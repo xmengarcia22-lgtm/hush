@@ -1,0 +1,41 @@
+# Caddy in front of the Hush server (SPEC.md 11.3). Replace <domain>.
+# No `log` directive: Caddy keeps no access log unless asked to.
+
+<domain> {
+	@notmedia not path /media/*
+	encode @notmedia zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# The app itself. Caching (SPEC.md 10.6): the page is revalidated on every visit, so a release is picked up at
+	# once; the files it pins carry a version in their address (?v=<hash prefix>, written by `npm run csp`), so they
+	# can be kept for a year without a returning visitor ever pairing a new page with an old file, which the pins
+	# would refuse. The same files without a version are revalidated too.
+	@page path / /index.html
+	header @page Cache-Control "no-cache"
+	@versioned {
+		path /app/* /vendor/*
+		query v=*
+	}
+	header @versioned Cache-Control "public, max-age=31536000, immutable"
+	@plainfile {
+		path /app/* /vendor/*
+		not query v=*
+	}
+	header @plainfile Cache-Control "no-cache"
+	root * /srv/hush/www
+	file_server
+
+	# The API. Caddy adds X-Forwarded-For; the server uses it only for a salted, in-memory rate-limit tag.
+	# /media/* carries encrypted pieces (SPEC.md 7.7): no logging, no caching (the server sends no-store),
+	# and no compression, since ciphertext doesn't compress.
+	@api path /ws /drop /healthz /media/*
+	reverse_proxy @api 127.0.0.1:8080 {
+		flush_interval -1
+	}
+}

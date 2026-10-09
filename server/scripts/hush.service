@@ -1,0 +1,43 @@
+# systemd unit for the Hush server (SPEC.md 11.2, 11.4).
+# Install: copy to /etc/systemd/system/hush.service, then
+#   systemctl daemon-reload && systemctl enable --now hush
+
+[Unit]
+Description=Hush messaging server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hush
+Group=hush
+WorkingDirectory=/opt/hush/server
+Environment=NODE_ENV=production
+Environment=HUSH_HOST=127.0.0.1
+Environment=HUSH_PORT=8080
+Environment=HUSH_DATA_DIR=/var/lib/hush
+Environment=HUSH_ADDR_KEY=/etc/hush/addr.key
+Environment=HUSH_ORIGINS=https://<domain>
+# Caddy is in front, so the client address comes from X-Forwarded-For (used only for the salted rate-limit tag).
+Environment=HUSH_TRUST_PROXY=1
+Environment=HUSH_AUTHZ=standard
+# Badges next to names (SPEC.md 12.3): decided here and nowhere else. A JSON object of username to badge.
+# Environment='HUSH_BADGES={"alice":"founder"}'
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/index.js
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/hush
+# journald keeps only what the server prints: lifecycle events and error codes.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

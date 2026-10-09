@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob: ws://127.0.0.1:8080 http://127.0.0.1:8080 wss://hushappofficial.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hush</title>
+<meta name="description" content="Hush: private messaging with end-to-end encryption.">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15131F" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="app/styles.css?v=156b166cd022" integrity="sha256-FWsWbNAif+PF/sxwmT9u4lneQgY7mnYucqBWoE8NYAs=">
+</head>
+<body>
+<div id="app">
+  <section class="pane pane-list">
+    <div class="bar top">
+      <button class="icon-btn" id="menuBtn" aria-label="Open menu"></button>
+      <h1 class="list-title" id="listTitle">Chats</h1>
+      <span class="net" id="netStatus" aria-live="polite"></span>
+    </div>
+    <div class="searchrow"><label class="search"><span id="searchIc"></span><input id="q" placeholder="Search chats" autocomplete="off" enterkeyhint="search"></label></div>
+    <div id="banner"></div>
+    <div id="threads"></div>
+    <div id="contacts" hidden></div>
+    <div id="profileView" hidden></div>
+    <button class="fab" id="newBtn" aria-label="New message"></button>
+    <nav class="tabs" role="tablist">
+      <button class="tab" data-tab="contacts" role="tab" aria-selected="false" hidden style="display:none"><span class="tab-ic" id="tabContactsIc"></span><span>Contacts</span></button>
+      <button class="tab" data-tab="chats" role="tab" aria-selected="true"><span class="tab-ic" id="tabChatsIc"></span><span>Chats</span><span class="tab-n" id="tabN" hidden></span></button>
+      <button class="tab" data-tab="profile" role="tab" aria-selected="false"><span class="tab-ic" id="tabProfileIc"></span><span>Profile</span></button>
+    </nav>
+  </section>
+  <section class="pane pane-chat" id="chatPane">
+    <div class="chat-blank"><span class="chip">Select a chat to start messaging</span></div>
+  </section>
+</div>
+
+<script src="vendor/qrcode.min.js?v=164fc2c1c9ea" integrity="sha256-Fk/Cwcnq8KA6qN/bhV6C5BpcaSL7rYuzI4EWIH4mvvc="></script>
+<script src="app/config.js?v=a099cab4098e" integrity="sha256-oJnKtAmOK7oDkUkmauvad8AiFwVTVRMNpTh/jkZxaBo="></script>
+<script src="app/crypto.js?v=00172c24d9a8" integrity="sha256-ABcsJNmoUx0gZxyAYRbQcqtfYBlGBFbnz1a/DRdSXGk="></script>
+<script src="app/adapter.js?v=72ba87a324f0" integrity="sha256-crqHoyTwerke1p2VggPZB7t4LNTZvjcItI3vFCOXai0="></script>
+<script src="app/ui.js?v=32925a71d5a8" integrity="sha256-MpJacdWo34GJVyBE2be3MHPqTAhvj1T5IZ9619Lf56A="></script>
+</body>
+</html>

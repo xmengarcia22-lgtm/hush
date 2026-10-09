@@ -1,0 +1,21 @@
+# Never in the repository: the server's data, its one secret, local TLS material, and installed packages.
+node_modules/
+server/data/
+server/devcert/
+*.db
+*.db-wal
+*.db-shm
+addr.key
+*.pem
+*.key
+.env
+.env.*
+
+# Leftovers of the Firebase version of the app, kept locally only.
+index.firebase-backup.html
+firestore-rules.txt
+vendor/firebase-*.js
+
+# Operating system noise.
+Thumbs.db
+.DS_Store
