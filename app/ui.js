@@ -216,6 +216,40 @@ const S={db:null,ids:ls.get('hush:ids',[]),me:null,dir:{},dirReady:false,presenc
 function applyTheme(){const t=ls.get('hush:theme','system');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;else delete document.documentElement.dataset.theme}
 applyTheme();
 
+/* ===== HUSH NAV HISTORY BEGIN ===== */
+/* The browser's Back (Android's Back button, Safari's swipe from the edge) closes what is open in Hush instead of
+   leaving the site. Everything that can be closed (a chat, a sheet, the side menu, the photo viewer, a settings page,
+   the archive, a tab other than Chats) is a layer on a stack. While any layer is open, one extra history entry, the
+   guard, sits on top of the page's own; Back uses it up and closes the top layer, and the guard is put back if more
+   are open. When the app closes its last layer itself (the X, a swipe, Escape, a Back button), the guard is quietly
+   taken off again, so history never fills up. The address shown never changes. */
+function makeNavHistory(h,defer){ // h: {state, pushState(state), back()}; defer(fn): run fn a moment later
+  const stack=[];let guard=!!(h.state&&h.state.hushGuard),pending=false,ignore=0;
+  const prune=()=>{while(stack.length&&stack[stack.length-1].alive&&!stack[stack.length-1].alive())stack.pop()}; // closed some other way
+  const arm=()=>{if(!guard){h.pushState({hushGuard:1});guard=true}};
+  const open=l=>{if(!stack.includes(l))stack.push(l);pending=false;arm();return l};
+  const settle=()=>{prune();if(stack.length||!guard||pending)return;pending=true;
+    defer(()=>{if(!pending)return;pending=false;if(stack.length||!guard)return;guard=false;ignore++;h.back()})};
+  const closed=l=>{const i=stack.indexOf(l);if(i<0)return;stack.splice(i,1);settle()};
+  const pop=()=>{ // the browser went back
+    if(ignore>0){ignore--;return} // our own step back after the app closed its last layer
+    guard=false;prune();const top=stack[stack.length-1];
+    if(top&&top.stay){arm();return} // a sheet that must be answered stays
+    if(top){stack.pop();top.close()}
+    prune();if(stack.length)arm()};
+  return {open,closed,pop,get depth(){return stack.length},get guarded(){return guard}};
+}
+/* ===== HUSH NAV HISTORY END ===== */
+const NAV=makeNavHistory({get state(){return history.state},pushState:s=>history.pushState(s,''),back:()=>history.back()},fn=>setTimeout(fn,0));
+addEventListener('popstate',()=>NAV.pop());
+let navList=null; // the list's own layer: a settings page, the archive or a tab other than Chats
+function navSyncList(){
+  const want=!!S.me&&(S.tab!=='chats'||!!S.showArchived);
+  if(want&&!navList){const l={kind:'list',alive:()=>navList===l,close:()=>{navList=null;listBack()}};navList=NAV.open(l)}
+  else if(!want&&navList){const l=navList;navList=null;NAV.closed(l)}
+}
+function listBack(){ // one step back on the list: a settings page or the archive first, then to Chats
+  if((S.tab==='profile'&&isSettingsPage())||(S.tab==='chats'&&S.showArchived))swipeBack();else setTab('chats',-1)}
 /* ---------- list pane ---------- */
 $('#menuBtn').innerHTML=I.menu;$('#tabChatsIc').innerHTML=I.chatsIc;$('#tabContactsIc').innerHTML=I.peopleIc;$('#tabProfileIc').innerHTML=I.contactsIc;$('#searchIc').innerHTML=I.search;$('#newBtn').innerHTML=I.pencil;
 $('#menuBtn').onclick=openDrawer;$('#newBtn').onclick=()=>S.tab==='contacts'?openEditContact(null):openNewChat();
@@ -361,7 +395,7 @@ function searchExtras(box,items){
   peopleLook(q);
 }
 function updateStatus(){const st=$('#netStatus');if(st)st.textContent=!S.db?'Offline':S.me&&!S.convsLoaded?'Connecting\u2026':''}
-function setListTitle(){const t=$('#listTitle');if(t)t.textContent=S.tab==='contacts'?'Contacts':S.tab==='profile'?'Profile':S.showArchived?'Archived':'Chats'}
+function setListTitle(){const t=$('#listTitle');if(t)t.textContent=S.tab==='contacts'?'Contacts':S.tab==='profile'?'Profile':S.showArchived?'Archived':'Chats';navSyncList()}
 function updateTitle(){let n=0;S.unread.forEach((v,k)=>{const c=convById(k);if(k!==S.chan&&!isMuted(k)&&!isArchived(k)&&!(c&&isRequest(c))&&!hiddenConv(c))n+=v});if(S.me)n+=pendingRequests().length;
   document.title=n?`(${n>99?'99+':n}) Hush`:'Hush';const t=$('#tabN');if(t){t.hidden=!n;t.textContent=n>99?'99+':String(n)}}
 /* ---------- chat organization: pins, mutes and archive live in your encrypted vault ---------- */
@@ -702,7 +736,9 @@ function closeConv(){
   $('#app').classList.remove('in-chat');
   const p=$('#chatPane');p.replaceChildren();const blank=el('div','chat-blank');blank.append(el('span','chip','Select a chat to start messaging'));p.append(blank);
   renderList();updateTitle();
+  if(navChat){const l=navChat;navChat=null;NAV.closed(l)}
 }
+let navChat=null; // the open chat's history layer
 function convMenu(c){
   const t=typeOf(c),owner=isOwner(c),admin=isAdmin(c),member=isMember(c),pub=c.visibility==='public',items=[];
   items.push({icon:I.search,label:'Search',fn:openSearch});
@@ -729,6 +765,7 @@ function openConv(cid){
     serverView:!!ls.get('hush:serverView',false),replyTo:null,editing:null,reads:{},typing:{},agg:new Map(),comp:null,curTtl:c.ttl||0,newBelow:0,
     pinIdx:0,pinCache:new Map(),comments:[],ccount:new Map(),commentsView:null,keepScroll:null,setSchedCount:null});
   $('#app').classList.add('in-chat');
+  if(!navChat){const l={kind:'chat',alive:()=>navChat===l&&!!S.chan,close:closeConv};navChat=NAV.open(l)} // one layer, however many chats are switched between
   const t=typeOf(c),p=$('#chatPane');p.replaceChildren();p.style.transform='';
   const bar=el('div','bar');
   const back=html('button','icon-btn back',I.back);back.setAttribute('aria-label','Back to chats');back.onclick=closeConv;
@@ -1446,7 +1483,8 @@ function viewer(c,items,start){
     for(const j of [i+1,i-1]){const it=items[j];if(it&&(it.m.kind!=='video'||(it.m.size||0)<=lim().videoAutoBytes))loadMedia(c,it.m,it.e).catch(()=>{})}};
   const go=d=>{const j=i+d;if(j<0||j>=n)return;i=j;show()};
   const key=ev=>{if(ev.key==='Escape')close();else if(ev.key==='ArrowLeft')go(-1);else if(ev.key==='ArrowRight')go(1)};
-  const close=()=>{seq++;stopAll();o.remove();document.removeEventListener('keydown',key)};
+  const layer={kind:'viewer',alive:()=>o.isConnected,close:()=>close()};
+  const close=()=>{seq++;stopAll();o.remove();document.removeEventListener('keydown',key);NAV.closed(layer)};NAV.open(layer);
   o.addEventListener('pointerdown',ev=>{const v=ev.target.tagName==='VIDEO'?ev.target:null; // not a drag along a video's controls
     sx=v&&ev.offsetY>v.clientHeight-70?null:ev.clientX;sy=ev.clientY});
   o.addEventListener('pointerup',ev=>{if(sx==null)return;const dx=ev.clientX-sx,dy=ev.clientY-sy;sx=null;
@@ -1753,8 +1791,10 @@ async function leaveChat(cid){ // tell the chat, then forget it; an admin rotate
 function sheet(title,opt={}){
   const bd=el('div','backdrop'),sh=el('div','sheet'),hd=el('div','sheet-head'),body=el('div','sheet-body');
   const x=html('button','icon-btn',I.x);x.setAttribute('aria-label','Close');
-  const close=()=>{bd.remove();document.removeEventListener('keydown',esc)};const esc=e=>{if(e.key==='Escape')close()};
-  if(!opt.locked){x.onclick=close;bd.onclick=e=>{if(e.target===bd)close()};document.addEventListener('keydown',esc)}
+  const layer={kind:'sheet',alive:()=>bd.isConnected,close:()=>close(),stay:!!opt.locked}; // Back closes it; a locked sheet stays
+  const close=()=>{bd.remove();document.removeEventListener('keydown',esc);NAV.closed(layer)};const esc=e=>{if(e.key==='Escape')close()};
+  if(!opt.locked){x.onclick=close;bd.onclick=e=>{if(e.target===bd)close()};document.addEventListener('keydown',esc);bd._close=close} // _close: what a back swipe calls
+  NAV.open(layer);
   hd.append(el('h2',null,title));if(!opt.locked)hd.append(x);sh.append(hd,body);bd.append(sh);document.body.append(bd);
   return {body,sh,close};
 }
@@ -2324,10 +2364,10 @@ async function matchContacts(){
   for(let i=0;i<todo.length;i+=5){await Promise.all(todo.slice(i,i+5).map(async c=>{const h=await lookupPhone(c.phone);if(h){c.handle=h;changed=true}}))}
   matching=false;if(changed){await saveContacts();toast('Some of your contacts are on Hush')}
 }
-const TABS=['chats','profile']; // Contacts lives in the side menu now
+const TABS=['chats','contacts','profile']; // the bottom tabs, left to right; a sideways swipe on the list steps through them
 function setTab(t,dir){
   const prev=S.tab;S.tab=t;renderBanner();$('#threads').hidden=t!=='chats';$('#contacts').hidden=t!=='contacts';$('#profileView').hidden=t!=='profile';
-  document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===(t==='contacts'?'chats':t))));
+  document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===t)));
   const q=$('#q');if(t!=='profile'&&prev!==t&&q.value){q.value='';S.query=''}q.placeholder=t==='chats'?'Search chats, messages, people':'Search contacts';setListTitle();
   document.querySelector('.searchrow').hidden=t==='profile';
   const nb=$('#newBtn');nb.hidden=t==='profile';nb.innerHTML=t==='chats'?I.pencil:I.userPlus;nb.setAttribute('aria-label',t==='chats'?'New message':'Add contact');
@@ -2337,14 +2377,120 @@ function setTab(t,dir){
   const view=t==='chats'?$('#threads'):t==='contacts'?$('#contacts'):$('#profileView');
   if(dir&&view){view.classList.remove('tab-in-l','tab-in-r');void view.offsetWidth;view.classList.add(dir>0?'tab-in-r':'tab-in-l')}
 }
-function setupTabSwipe(){ // swipe left/right anywhere in the list area to move between Chats, Contacts and Profile
-  const pane=document.querySelector('.pane-list');let x0=0,y0=0,t0=0,on=false;
-  pane.addEventListener('touchstart',e=>{if(e.touches.length!==1||e.target.closest('input,textarea,.seg,.strip,.rstrip,.drawer,.backdrop')){on=false;return}
-    x0=e.touches[0].clientX;y0=e.touches[0].clientY;t0=Date.now();on=true},{passive:true});
-  pane.addEventListener('touchend',e=>{if(!on)return;on=false;const t=e.changedTouches[0],dx=t.clientX-x0,dy=t.clientY-y0;
-    if(Math.abs(dx)<70||Math.abs(dx)<Math.abs(dy)*1.6||Date.now()-t0>700)return;
-    if(S.tab==='chats'&&S.showArchived&&dx>0){S.showArchived=false;setListTitle();renderList();return}
-    const i=TABS.indexOf(S.tab),j=i+(dx<0?1:-1);if(j<0||j>=TABS.length)return;if(navigator.vibrate)navigator.vibrate(6);setTab(TABS[j],dx<0?1:-1)},{passive:true});
+/* ===== HUSH SWIPE NAV BEGIN ===== */
+/* Swipe navigation, one controller for the whole app. A swipe to the right that starts at the left edge goes back:
+   out of a sheet, out of an open chat to the list, out of a settings page or the archive (an open chat and those
+   pages also take it from anywhere that is not busy with a sideways drag of its own). The side menu closes with a
+   swipe to the left, and on the Chats list, where there is nothing to go back from, a swipe to the right from the
+   left part of the list pulls it out. On the list, a sideways swipe moves between the bottom tabs. The screen follows the finger and
+   goes where it was flung. Whatever already owns a sideways drag keeps it: the photo viewer, swipe-to-reply (always
+   to the left, so never a back swipe), strips that scroll sideways, voice-message scrubbing, text being edited. */
+const SWIPE={edge:28,slop:10,ratio:1.2,commit:.35,flick:.5,flickMin:30,menuZone:.4};
+function swipeAxis(dx,dy){ // null until the finger has moved enough to tell, then 'x' (sideways) or 'y'
+  if(Math.abs(dx)<SWIPE.slop&&Math.abs(dy)<SWIPE.slop)return null;return Math.abs(dx)>Math.abs(dy)*SWIPE.ratio?'x':'y'}
+function swipeVelocity(pts){ // px per ms over about the last 100 ms of [time, x] samples
+  if(!pts||pts.length<2)return 0;const [t1,x1]=pts[pts.length-1];let k=pts.length-2;while(k>0&&t1-pts[k][0]<100)k--;
+  const [t0,x0]=pts[k];return t1>t0?(x1-x0)/(t1-t0):0}
+function swipeCommits(d,width,v){ // d and v are measured toward where the swipe goes; a fling counts as much as a long drag
+  if(v<=-SWIPE.flick/2)return false; // flung back the way it came: the user changed their mind
+  return d>=width*SWIPE.commit||(v>=SWIPE.flick&&d>=SWIPE.flickMin)}
+function tabStep(tabs,cur,dir){ // dir +1: the finger moves right, so the tab to the left comes in
+  const i=tabs.indexOf(cur);if(i<0)return null;const j=i-dir;return j>=0&&j<tabs.length?tabs[j]:null}
+function swipePlan(c){ // what a sideways swipe does, decided once its direction is known
+  // c: {dir: +1 right / -1 left, edge: started at the left edge, layer: null|'viewer'|'cover'|'locked'|'sheet'|'drawer',
+  //     blocked: started on something with its own sideways drag, chat: a chat fills the screen, onList, sub, tab, tabs,
+  //     nearLeft: started in the left part of the list (not only the very edge, which iPhone Safari keeps for its Back)}
+  if(c.layer==='viewer'||c.layer==='cover'||c.layer==='locked')return null;
+  if(c.layer==='drawer')return c.dir<0?{kind:'drawer'}:null;
+  if(c.layer==='sheet')return c.dir>0&&c.edge?{kind:'sheet'}:null;
+  if(c.blocked&&!c.edge)return null;
+  if(c.chat)return c.dir>0?{kind:'chat'}:null;
+  if(!c.onList)return null;
+  if(c.dir>0&&c.sub)return {kind:'sub'};
+  const to=tabStep(c.tabs,c.tab,c.dir);if(to)return {kind:'tab',to};
+  if(c.dir>0&&c.tab===c.tabs[0]&&c.nearLeft)return {kind:'menu'}; // nothing to go back to: the side menu comes out
+  return {kind:'end'};
+}
+/* ===== HUSH SWIPE NAV END ===== */
+const SWIPE_OWN='input,textarea,select,[contenteditable="true"],.seg,.vbars,.recbar,video';
+function ownsSideways(t){ // the touch started on something that drags sideways by itself
+  for(let n=t;n&&n.nodeType===1&&n!==document.body;n=n.parentElement){if(n.matches(SWIPE_OWN))return true;
+    if(n.scrollWidth>n.clientWidth+2){const o=getComputedStyle(n).overflowX;if(o==='auto'||o==='scroll')return true}}
+  return false}
+function swipeLayer(){ // the top-most thing over the app, if any
+  if(document.querySelector('.lock,.onboard'))return {kind:'cover'};
+  if(document.querySelector('.lightbox'))return {kind:'viewer'};
+  const all=document.querySelectorAll('body>.backdrop'),bd=all[all.length-1];if(!bd)return null;
+  const dr=bd.querySelector('.drawer');if(dr)return {kind:'drawer',bd,node:dr};
+  return bd._close?{kind:'sheet',bd,node:bd.querySelector('.sheet')||bd.firstElementChild}:{kind:'locked'};
+}
+const tabView=()=>$(S.tab==='contacts'?'#contacts':S.tab==='profile'?'#profileView':'#threads');
+function swipeBack(){ // the back step a sub-page takes, the same as its Back button
+  if(S.tab==='profile'&&isSettingsPage()){S.profilePage=S.profilePage==='settings'?'main':'settings';setTab('profile',-1);return}
+  if(S.tab==='chats'&&S.showArchived){S.showArchived=false;setListTitle();renderList();const v=$('#threads');v.classList.remove('tab-in-l','tab-in-r');void v.offsetWidth;v.classList.add('tab-in-l')}
+}
+function setupSwipeNav(){
+  const app=$('#app'),list=document.querySelector('.pane-list'),chat=$('#chatPane');let g=null,quietUntil=0;
+  const narrow=()=>matchMedia('(max-width:759px)').matches;
+  const still=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const decide=(k,dir)=>{
+    const L=swipeLayer();if(!S.me&&!L)return null;
+    const inChat=!!S.chan&&narrow()&&!L;
+    const lr=list.getBoundingClientRect();
+    const plan=swipePlan({dir,edge:k.edge,layer:L&&L.kind,blocked:ownsSideways(k.target),chat:inChat,
+      onList:!L&&!inChat&&list.contains(k.target),sub:S.tab==='profile'?isSettingsPage():S.tab==='chats'&&!!S.showArchived,tab:S.tab,tabs:TABS,
+      nearLeft:k.x0-lr.left<=lr.width*SWIPE.menuZone});
+    if(!plan)return null;
+    if(plan.kind==='chat'){plan.node=chat;plan.under=list;app.classList.add('sw-back')}
+    else if(plan.kind==='sheet'||plan.kind==='drawer'){plan.node=L.node;plan.bd=L.bd}
+    else if(plan.kind==='menu'){ // open it now, shut, and let the finger pull it out
+      openDrawer();const D=swipeLayer();if(!D||D.kind!=='drawer')return null;
+      plan.node=D.node;plan.bd=D.bd;plan.node.style.animation='none';plan.node.style.transform='translateX(-100%)';plan.bd.style.backgroundColor='rgba(10,8,25,0)'}
+    else{plan.node=tabView();list.classList.add('sw-clip')}
+    if(!plan.node)return null;
+    plan.width=plan.node.getBoundingClientRect().width||innerWidth;
+    for(const n of [plan.node,plan.under,plan.bd])if(n){n.style.transition='none';n.style.willChange='transform'}
+    return plan};
+  const paint=(p,d)=>{ // d: how far the finger has carried the screen, in the swipe's own direction (never negative)
+    const f=Math.min(1,d/p.width);
+    if(p.kind==='drawer'){p.node.style.transform=`translateX(${-d}px)`;p.bd.style.backgroundColor=`rgba(10,8,25,${.45*(1-f)})`;return}
+    if(p.kind==='menu'){p.node.style.transform=`translateX(${Math.min(0,d-p.width)}px)`;p.bd.style.backgroundColor=`rgba(10,8,25,${.45*f})`;return}
+    if(p.kind==='end'){p.node.style.transform=`translateX(${p.dir*Math.min(56,d*.25)}px)`;return}
+    p.node.style.transform=`translateX(${p.kind==='tab'?p.dir*d:d}px)`;
+    if(p.kind==='chat')p.under.style.transform=`translateX(${-25*(1-f)}%)`;
+    else if(p.kind==='sheet')p.bd.style.backgroundColor=`rgba(10,8,25,${.45*(1-f)})`;
+    else p.node.style.opacity=String(1-f*.5)};
+  const tidy=p=>{for(const n of [p.node,p.under,p.bd])if(n){n.style.transition='';n.style.transform='';n.style.willChange='';n.style.opacity='';n.style.backgroundColor=''}
+    app.classList.remove('sw-back');list.classList.remove('sw-clip')};
+  const settle=(p,go)=>{ // glide to the end the finger chose, then do the navigation (or put everything back)
+    const ms=still()?0:go?180:220,ease='cubic-bezier(.2,.8,.2,1)';
+    for(const n of [p.node,p.under,p.bd])if(n)n.style.transition=`transform ${ms}ms ${ease},opacity ${ms}ms ${ease},background-color ${ms}ms ${ease}`;
+    if(go)paint(p,p.width);else if(p.kind==='menu')paint(p,0);else{p.node.style.transform='';if(p.under)p.under.style.transform='';p.node.style.opacity='';if(p.bd){p.bd.style.opacity='';p.bd.style.backgroundColor=''}}
+    setTimeout(()=>{
+      if(p.kind==='menu'){if(go){if(navigator.vibrate)navigator.vibrate(6)}else p.bd._close();tidy(p);return} // stays open, or goes away again
+      if(!go){tidy(p);return}
+      if(navigator.vibrate)navigator.vibrate(6);
+      if(p.kind==='chat'){app.classList.add('sw-quiet');tidy(p);closeConv();requestAnimationFrame(()=>requestAnimationFrame(()=>app.classList.remove('sw-quiet')))}
+      else if(p.kind==='sheet'||p.kind==='drawer'){p.bd.style.visibility='hidden';(p.bd._close||(()=>p.bd.remove()))();tidy(p)}
+      else if(p.kind==='tab'){tidy(p);setTab(p.to,-p.dir)}
+      else{tidy(p);swipeBack()}
+    },ms+20)};
+  document.addEventListener('touchstart',e=>{
+    if(g&&g.plan){settle(g.plan,false);g=null;return} // a second finger: let go of the swipe
+    if(e.touches.length!==1){g=null;return}
+    const t=e.touches[0];g={x0:t.clientX,y0:t.clientY,pts:[[e.timeStamp,t.clientX]],axis:null,plan:null,target:e.target,edge:t.clientX<=SWIPE.edge}},{passive:true,capture:true});
+  document.addEventListener('touchmove',e=>{
+    if(!g||e.touches.length!==1)return;const t=e.touches[0],dx=t.clientX-g.x0,dy=t.clientY-g.y0;
+    if(!g.axis){g.axis=swipeAxis(dx,dy);if(!g.axis)return;if(g.axis==='y'){g=null;return}
+      const dir=dx>0?1:-1;g.plan=decide(g,dir);if(!g.plan){g=null;return}g.plan.dir=dir}
+    if(e.cancelable)e.preventDefault(); // the swipe is ours now: the page under it does not scroll as well
+    g.pts.push([e.timeStamp,t.clientX]);if(g.pts.length>16)g.pts.shift();
+    paint(g.plan,Math.max(0,dx*g.plan.dir))},{passive:false,capture:true});
+  const end=e=>{if(!g)return;const k=g;g=null;if(!k.plan)return;quietUntil=Date.now()+400;
+    const t=e.changedTouches&&e.changedTouches[0],d=t?(t.clientX-k.x0)*k.plan.dir:0;
+    settle(k.plan,e.type==='touchend'&&k.plan.kind!=='end'&&swipeCommits(d,k.plan.width,swipeVelocity(k.pts)*k.plan.dir))};
+  document.addEventListener('touchend',end,{capture:true});document.addEventListener('touchcancel',end,{capture:true});
+  document.addEventListener('click',e=>{if(Date.now()<quietUntil){e.stopPropagation();e.preventDefault()}},true); // a swipe is not a tap
 }
 function contactAvatar(c,cls=''){return c.handle&&S.dir[c.handle]?avatar(c.handle,c.name,cls,S.dir[c.handle].photo):avatar(c.id,c.name,cls)}
 function renderContacts(){
@@ -2442,7 +2588,7 @@ function splitMentions(text){const out=[];let last=0,m;const re=new RegExp(MENTI
   if(last<text.length)out.push({t:text.slice(last)});return out}
 async function openMention(h){
   if(!S.me)return;
-  if(h===S.me.handle){openProfile(h);return}
+  if(h===S.me.handle){openSaved();return} // your own name: your Saved Messages, as Telegram does
   if(isBlocked(h)){toast('You blocked @'+h+'. Unblock them in Settings → Privacy to message them.');return}
   if(!S.db||!S.db.online){toast('You’re offline. Try again once you’re connected.');return}
   const d=S.dir[h]||await lookupHandle(h);
@@ -2899,7 +3045,8 @@ function showRequestAlert(){
 function openDrawer(){
   if(!S.me)return;
   const bd=el('div','backdrop');bd.style.alignItems='stretch';const d=el('nav','drawer');
-  const close=()=>bd.remove();bd.onclick=e=>{if(e.target===bd)close()};
+  const layer={kind:'drawer',alive:()=>bd.isConnected,close:()=>close()};
+  const close=()=>{bd.remove();NAV.closed(layer)};bd.onclick=e=>{if(e.target===bd)close()};bd._close=close;NAV.open(layer);
   const top=el('button','drawer-top');top.append(userAvatar(S.me.handle),withBadge(el('div','t-name',displayName(S.me.handle)),S.me.handle),el('div','h',atOf(S.me.handle)));
   top.onclick=()=>{close();openSettings()};
   d.append(top,el('div','menu-label','Accounts on this device'));
@@ -3343,9 +3490,7 @@ async function republishSelf(){
   addEventListener('hashchange',()=>{if(S.me&&/join=|add=/.test(location.hash))handleJoin(location.hash)});
   setInterval(()=>{refreshHeader();drawTyping()},1500);
   setInterval(()=>{const now=Date.now();if(S.chan&&(S.posts.some(p=>p.exp&&p.exp<=now)||(S.future||[]).some(p=>p.ts<=now+3000))){applyExpiry();renderConv();renderList()}},2000);
-  addSwipe($('#chatPane'),{dir:1,max:innerWidth,threshold:100,on:()=>{if(S.chan)closeConv()},
-    when:e=>!!S.chan&&matchMedia('(max-width:759px)').matches&&e.touches[0].clientX<innerWidth*.6&&!e.target.closest('.strip,.rstrip,.album,.vbars,.editor,.fmtbar,.recbar,.msg')});
-  updateStatus();setupTabSwipe();
+  updateStatus();setupSwipeNav();
   document.addEventListener('selectionchange',()=>{if(S.comp&&S.comp.syncFmt)S.comp.syncFmt()});setInterval(()=>heartbeat(),45000);
   fitKeyboard();
   document.addEventListener('visibilitychange',()=>{heartbeat();if(!document.hidden)markRead()});

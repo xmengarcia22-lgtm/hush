@@ -36,5 +36,14 @@ test('finding mentions looks nothing up: the pure part of the block touches no s
   const pure = block.split('async function openMention')[0];
   assert.ok(!/S\.db|lookupHandle|loadDir|fetch\(|S\.dir/.test(pure), 'splitMentions is text work only');
   assert.match(block, /async function openMention/, 'the tap handler exists');
-  for (const call of ['lookupHandle(', 'isBlocked(', 'openDm(', 'openProfile(']) assert.ok(block.includes(call), 'openMention uses ' + call);
+  for (const call of ['lookupHandle(', 'isBlocked(', 'openDm(', 'openSaved(']) assert.ok(block.includes(call), 'openMention uses ' + call);
+});
+
+test('tapping a mention: your own name opens your Saved Messages, anyone else\'s the chat with them', () => {
+  const tap = block.slice(block.indexOf('async function openMention'));
+  assert.match(tap, /if\(h===S\.me\.handle\)\{openSaved\(\);return\}/, 'own name: Saved Messages');
+  assert.ok(!tap.includes('openProfile('), 'never the profile any more');
+  assert.ok(tap.indexOf('openSaved(') < tap.indexOf('isBlocked('), 'decided before any lookup, block check or network');
+  assert.match(tap, /openDm\(h\);\s*\}\s*$/, 'someone else: the one-on-one chat, as before');
+  assert.match(src, /function openSaved\(\)\{openDm\(S\.me\.handle\)\}/, 'Saved Messages is the chat with yourself');
 });

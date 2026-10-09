@@ -502,6 +502,12 @@ body{overscroll-behavior:none;touch-action:manipulation}
 @media (max-width:759px) and (prefers-reduced-motion:no-preference){
   #app.in-chat .pane-chat{animation:slideIn .26s cubic-bezier(.2,.8,.2,1)}
   #app:not(.in-chat) .pane-list{animation:backIn .22s ease-out}}
+/* swipe navigation (setupSwipeNav): during a back swipe out of a chat, the chat list waits underneath */
+@media (max-width:759px){
+  #app.sw-back .pane-list{display:flex;position:absolute;inset:0;z-index:0}
+  #app.sw-back .pane-chat{position:absolute;inset:0;z-index:1;background:var(--bg);box-shadow:-10px 0 28px rgba(0,0,0,.22)}
+  #app.sw-quiet .pane-list,#app.sw-quiet .pane-chat{animation:none!important}}
+.pane-list.sw-clip{overflow:hidden}
 @keyframes slideIn{from{transform:translateX(35%);opacity:.3}}
 @keyframes backIn{from{transform:translateX(-8%);opacity:.6}}
 .fwd{display:flex;align-items:center;gap:4px;font-size:13px;font-weight:500;color:var(--accent);margin:0 0 3px}
