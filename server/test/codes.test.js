@@ -192,7 +192,7 @@ test('bad addresses are refused before anything is sent', async () => {
 
 test('codes cannot be used to flood one inbox, or sprayed from one address', async () => {
   const mailer = fakeMailer();
-  await withServer({ mailer, limits: { codeSendsPerHourPerLogin: 3, codeSendsPerHourPerAddr: 6 } }, async (c) => {
+  await withServer({ mailer, limits: { codeSendsBurstPerLogin: 3, codeSendsBurstPerAddr: 6 } }, async (c) => {
     for (let n = 0; n < 3; n++) await c.ok('code.send', { to: EMAIL });
     assert.equal((await c.call('code.send', { to: EMAIL })).e, 'ratelimit', 'per email');
     // that refusal still counted against this address: 4 of 6 used
@@ -205,7 +205,7 @@ test('codes cannot be used to flood one inbox, or sprayed from one address', asy
 
 test('one code per address per cooldown, from any connection, and a refusal costs nothing', async () => {
   const mailer = fakeMailer();
-  await withServer({ mailer, limits: { codeCooldownMs: 700, codeSendsPerHourPerLogin: 100, codeSendsPerHourPerAddr: 100 } }, async (c, s) => {
+  await withServer({ mailer, limits: { codeCooldownMs: 700, codeSendsBurstPerLogin: 100, codeSendsBurstPerAddr: 100 } }, async (c, s) => {
     await c.ok('code.send', { to: EMAIL });
     const r = await c.call('code.send', { to: EMAIL });
     assert.equal(r.e, 'ratelimit');
@@ -317,4 +317,51 @@ test('sign-up: email or phone, password, username, display name, in that order a
   assert.match(between('const stepForgot=', 'const stepExisting='), /stepCode\(em\)[\s\S]*if\(!r\.link\)[\s\S]*r\.via==='email'/, 'a new device asks only when the server says the email belongs to the account');
   assert.match(between('function settingsAdvanced(', 'function '), /Recovery email[\s\S]*openRecoveryEmail/);
   assert.ok(!/openAddLogin/.test(ui));
+});
+
+// ---- findings 5, 8 and 9 (release 9) ----
+
+test('in production the server refuses to start without the mail key, so codes are never shown on screen', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hush-test-'));
+  try {
+    const r = await new Promise((resolve, reject) => {
+      const p = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.js'], {
+        cwd: new URL('..', import.meta.url), env: { ...process.env, NODE_ENV: 'production', RESEND_API_KEY: '', HUSH_AUTHZ: 'standard', HUSH_PORT: '0', HUSH_DATA_DIR: dir, HUSH_LOG: 'off' },
+      });
+      let err = '';
+      const t = setTimeout(() => { p.kill(); reject(new Error('it started: ' + err)); }, 15000);
+      p.stderr.on('data', (d) => { err += d; });
+      p.on('exit', (code) => { clearTimeout(t); resolve({ code, err }); });
+    });
+    assert.equal(r.code, 1);
+    assert.match(r.err, /Refusing to start: NODE_ENV=production but RESEND_API_KEY is not set/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('wrong codes for one email are capped per day, across fresh codes and connections', async () => {
+  await withServer({ limits: { codeMissesPerDayPerLogin: 3, codeSendsBurstPerLogin: 100, codeSendsBurstPerAddr: 100 } }, async (c, s) => {
+    for (let n = 0; n < 3; n++) {
+      const { demoCode } = await c.ok('code.send', { to: EMAIL });
+      assert.equal((await c.call('code.check', { to: EMAIL, code: demoCode === '000000' ? '111111' : '000000' })).e, 'denied');
+    }
+    const other = await connect(s.url); await other.hello();
+    const { demoCode } = await other.ok('code.send', { to: EMAIL });
+    const r = await other.call('code.check', { to: EMAIL, code: demoCode });
+    assert.equal(r.e, 'ratelimit', 'even the right code waits once the day’s wrong tries are used');
+    assert.match(r.m, /too many wrong codes for this address today/);
+    await other.close();
+    const { demoCode: d2 } = await c.ok('code.send', { to: 'olivia.lane@example.com' });
+    await c.ok('code.check', { to: 'olivia.lane@example.com', code: d2 });
+  });
+});
+
+test('code emails have tighter caps: a few at once, then a handful a day, per email and per address', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  assert.deepEqual([DEFAULT_LIMITS.codeSendsBurstPerLogin, DEFAULT_LIMITS.codeSendsPerDayPerLogin, DEFAULT_LIMITS.codeSendsBurstPerAddr, DEFAULT_LIMITS.codeSendsPerDayPerAddr, DEFAULT_LIMITS.codeMissesPerDayPerLogin], [3, 8, 6, 20, 10]);
+  const mailer = fakeMailer();
+  await withServer({ mailer, limits: { codeSendsBurstPerLogin: 3, codeSendsBurstPerAddr: 100 } }, async (c) => {
+    for (let n = 0; n < 3; n++) await c.ok('code.send', { to: EMAIL });
+    assert.equal((await c.call('code.send', { to: EMAIL })).e, 'ratelimit', 'the fourth in a row waits; the next comes hours later');
+    assert.equal(mailer.sent.length, 3);
+  });
 });

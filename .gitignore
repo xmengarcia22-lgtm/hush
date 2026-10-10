@@ -19,3 +19,5 @@ vendor/firebase-*.js
 # Operating system noise.
 Thumbs.db
 .DS_Store
+# Graphify's local code graph, built on this PC; never published.
+graphify-out/

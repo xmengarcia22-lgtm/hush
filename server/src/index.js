@@ -12,6 +12,11 @@ const envFile = join(SERVER_ROOT, '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 const cfg = loadConfig();
+if (process.env.NODE_ENV === 'production' && !cfg.mail.apiKey) {
+  // Without the key every code is shown on screen to whoever asks, so anyone could "confirm" any email (SPEC.md 14.10).
+  process.stderr.write('Refusing to start: NODE_ENV=production but RESEND_API_KEY is not set, so verification codes would be shown on screen instead of emailed.\n');
+  process.exit(1);
+}
 log.setEnabled(cfg.logging);
 
 if (!['open', 'standard'].includes(cfg.authz)) {

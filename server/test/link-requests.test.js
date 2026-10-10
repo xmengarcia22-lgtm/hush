@@ -131,3 +131,39 @@ test('the refusal the server really sends is the one the page understands', asyn
     assert.ok(secs >= 55 && secs <= 60, 'seconds read from: ' + r.m);
   } finally { await c.close(); await T.stop(); }
 });
+
+// ---- finding 4: only the new device or the account's own devices may answer or remove a waiting request ----
+
+test('a waiting request can be refused or removed only by the new device or a device of the account', async () => {
+  const T = await startServer({ authz: 'standard' });
+  const pg = page(T.url), other = page(T.url);
+  const pages = [pg, other];
+  try {
+    await Promise.all([pg.db.ready, other.db.ready]);
+    const { all } = await signUpWith(pg, EMAIL, PW, 'jordanhale', 'Jordan Hale');
+    await signUpWith(other, 'olivia.lane@example.com', PW, 'olivia', 'Olivia Lane');
+    const etag = await pg.auth.loginTag(EMAIL), at = 'linkreqs/' + etag;
+    const dev = await confirmedNewDevice(T); pages.push(dev.fresh);
+    await dev.fresh.db.doc(at).set(ask('a'));
+    // An outsider who only knows the email: no refusing, no deleting, no faking an approval.
+    const outsider = await connect(T.url); await outsider.hello();
+    for (const [op, d] of [['update', { state: 'no' }], ['update', { state: 'ok', iv: 'aXY=', ct: 'Y3Q=' }], ['delete', undefined]]) {
+      assert.equal((await outsider.call(op, { p: at, ...(d ? { d } : {}) })).e, 'denied', op + ' ' + JSON.stringify(d || ''));
+    }
+    await outsider.close();
+    assert.equal((await other.db.doc(at).update({ state: 'no' }).catch((e) => e)).code, 'denied', 'another signed-in account can’t either');
+    assert.equal(T.srv.store.get(at, SYSTEM).d.state, 'wait');
+    // The account's device: proving it holds the email login's password box lets it answer.
+    assert.equal((await pg.db.doc(at).update({ state: 'no' }).catch((e) => e)).code, 'denied', 'not before it proves it holds the login');
+    await pg.db.loginGate(etag, all[EMAIL]);
+    await pg.db.doc(at).update({ state: 'no' });
+    assert.equal(T.srv.store.get(at, SYSTEM).d.state, 'no');
+    // At the username's own tag the proven username is proof enough.
+    const htag = 'linkreqs/' + await pg.auth.loginTag('jordanhale');
+    T.srv.store.set(htag, ask('b'), SYSTEM);
+    assert.equal((await other.db.doc(htag).delete().catch((e) => e)).code, 'denied');
+    await pg.db.doc(htag).update({ state: 'no' });
+    await pg.db.doc(htag).delete();
+    assert.equal(T.srv.store.get(htag, SYSTEM).d, null);
+  } finally { pages.forEach((p) => p.close()); await T.stop(); }
+});

@@ -10,7 +10,7 @@ import { ID } from './paths.js';
 const KB = 1024, MB = 1024 * KB;
 
 export const MAX_BYTES = Object.freeze({
-  directory: 256 * KB, search: 4 * KB, presence: 1 * KB, phones: 1 * KB, logins: 1 * KB, recovery: 1 * KB,
+  directory: 256 * KB, search: 4 * KB, presence: 1 * KB, phones: 1 * KB, logins: 1 * KB, recovery: 1 * KB, secure: 1 * KB,
   accounts: 2 * MB, linkreqs: 64 * KB, vault: 2 * MB, backup: 2 * MB,
   channels: 2 * MB, posts: 64 * KB, comments: 64 * KB, acts: 64 * KB, reads: 4 * KB, typing: 4 * KB,
   chunks: 256 * KB, inbox: 4 * KB,
@@ -88,6 +88,11 @@ function phones(ctx, d) {
 function logins(ctx, d) {
   only(d, new Set(['ts']), 'logins'); need(d, ['ts'], 'logins');
   if (!num(d.ts)) bad('logins', 'ts');
+}
+
+function secure(ctx, d) {
+  only(d, new Set(['ts']), 'secure'); need(d, ['ts'], 'secure');
+  if (!num(d.ts)) bad('secure', 'ts');
 }
 
 function recovery(ctx, d) {
@@ -263,7 +268,7 @@ function inbox(ctx, d) {
 }
 
 const VALIDATORS = {
-  directory, search, presence, phones, logins, recovery, linkreqs, channels, posts, comments, acts, chunks, inbox,
+  directory, search, presence, phones, logins, recovery, secure, linkreqs, channels, posts, comments, acts, chunks, inbox,
   accounts: box('account box'), vault: box('vault'), backup: box('backup'),
   reads: sideRow('read mark'), typing: sideRow('typing mark'),
 };

@@ -66,7 +66,7 @@ function createHushAdapter(url,opts){
     if(!opts.caps)return false;let job=opening.get(cid);
     if(!job){job=(async()=>{let cap=null;try{cap=await opts.caps(cid)}catch{}
       if(!cap)return false;const cur=opened.get(cid);if(cur&&cur.cap===cap&&!force)return true;
-      try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});return true}
+      try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
       catch(e){if(e&&e.code!=='offline')opened.delete(cid);return false}})().finally(()=>{opening.delete(cid)});
       opening.set(cid,job)}
     const ok=await job;if(ok)retryDeferred(cid);return ok;
@@ -129,6 +129,9 @@ function createHushAdapter(url,opts){
   // ---- verification codes (SPEC.md 14.10): the server makes, sends and checks them. sendCode resolves to
   // {sent:true} once the email is out, or {sent:false, demoCode} when nothing was sent (no mail key, or a phone). ----
   api.sendCode=to=>call('code.send',{to});
+  // The address of a password box, made by the server from the login's tag and the stretched password (SPEC.md 4.5).
+  api.loginGate=(t,x)=>call('login.gate',{t,x}).then(r=>r.loc);
+  api.reopen=cid=>ensureOpen(cid,true); // after the account is secured: open again, now at the level the key gives (SPEC.md 4.6)
   // h: the username a forgotten password is for, so a confirmed recovery email lets this connection ask its devices.
   api.checkCode=(to,code,h)=>call('code.check',h?{to,code,h}:{to,code}).then(r=>r.link?{link:true,via:r.via}:{link:false});
   api.warmSignup=()=>work||working?Promise.resolve():call('signup.pow',{}).then(r=>solveSignup(r.salt,r.bits)).then(()=>{},()=>{});
@@ -257,7 +260,7 @@ async function connectServer(){
   const url=hushServerUrl();
   const unreachable=()=>'Can\u2019t reach the Hush server at '+url+'. Check that it\u2019s running, then this will reconnect on its own.';
   const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner();if(on)checkForUpdate()},
-    caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onEvict:cid=>onChatEvicted(cid),
+    caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onPower:(cid,held)=>askPower(cid,held),onEvict:cid=>onChatEvicted(cid),
     onBadges:b=>{S.badges=b||{};if(!S.me)return;renderList();if(S.chan){S.rendered=null;renderConv()}if(S.tab==='profile')setTab('profile')}}); // the operator's badge list came with the handshake
   await Promise.race([db.ready,new Promise(r=>setTimeout(r,5000))]);
   if(!db.online)SRV_ERR=db.error||unreachable();

@@ -10,7 +10,8 @@ const src = readFileSync(new URL('../../app/crypto.js', import.meta.url), 'utf8'
 const a = src.indexOf('/* ===== HUSH LINKCODE BEGIN ===== */'), b = src.indexOf('/* ===== HUSH LINKCODE END ===== */');
 assert.ok(a > 0 && b > a, 'link-code markers present in app/crypto.js');
 const unb64u = (s) => new Uint8Array(Buffer.from(s, 'base64url'));
-const { linkCode, parseLinkCode } = new Function('unb64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode };')(unb64u);
+const b64u = (u) => Buffer.from(u).toString('base64url');
+const { linkCode, parseLinkCode, linkFp, devShort } = new Function('unb64u', 'enc', 'b64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode, linkFp, devShort };')(unb64u, new TextEncoder(), b64u);
 
 const fresh = () => ({ secret: new Uint8Array(randomBytes(16)), fp: randomBytes(32).toString('base64url') });
 
@@ -55,4 +56,36 @@ test('the QR text is not a typed code, and two requests never share one', () => 
   assert.equal(parseLinkCode('hush-link:2:' + 'A'.repeat(22) + ':' + 'B'.repeat(43)), null);
   const x = fresh(), y = fresh();
   assert.notEqual(linkCode(x.secret, x.fp), linkCode(y.secret, y.fp));
+});
+
+// ---- release 9: the code covers the new device's own key as well ----
+
+const PUB = { x: 'p'.repeat(43), y: 'q'.repeat(43) };
+const DEVK = { id: 'dev0000001', x: 'a'.repeat(43), y: 'b'.repeat(43), sx: 'c'.repeat(43), sy: 'd'.repeat(43) };
+
+test('the fingerprint covers the device key: swapping any part of it, or the one-time key, changes it', async () => {
+  const base = await linkFp(PUB, DEVK);
+  assert.equal(await linkFp(PUB, { ...DEVK }), base, 'the same keys give the same fingerprint');
+  for (const f of ['id', 'x', 'y', 'sx', 'sy']) assert.notEqual(await linkFp(PUB, { ...DEVK, [f]: DEVK[f].replace(/.$/, 'Z') }), base, 'device key field ' + f);
+  assert.notEqual(await linkFp({ ...PUB, x: 'r'.repeat(43) }, DEVK), base, 'the one-time key');
+  assert.notEqual(await linkFp(PUB, undefined), base, 'a request whose device key was stripped');
+  assert.match(base, /^[A-Za-z0-9_-]{43}$/);
+});
+
+test('codes from before the device key was covered are told apart and refused as version 3', () => {
+  const secret = new Uint8Array(16).map((_, i) => i * 7 + 3), fp = Buffer.alloc(32, 0x5a).toString('base64url');
+  const v3 = linkCode(secret, fp), v2 = linkCode(secret, fp, 2);
+  assert.notEqual(v3, v2, 'only the check symbols differ');
+  assert.equal(v3.slice(0, 55), v2.slice(0, 55), 'the secret and fingerprint symbols are the same');
+  assert.ok(parseLinkCode(v3), 'a current code reads');
+  assert.equal(parseLinkCode(v2), null, 'an old code does not read as current');
+  assert.ok(parseLinkCode(v2, 2), 'but is recognised as an old one, so the page can say so');
+  assert.equal(parseLinkCode(v3, 2), null);
+});
+
+test('the device key is shown as eight symbols, the same on both devices, different for another key', async () => {
+  const k = await devShort(DEVK);
+  assert.match(k, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+  assert.equal(await devShort({ ...DEVK }), k);
+  assert.notEqual(await devShort({ ...DEVK, sx: 'e'.repeat(43) }), k);
 });

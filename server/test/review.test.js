@@ -26,10 +26,10 @@ test('blind-address lookups are counted per address and per path, whoever asks',
   try {
     const A = await signup(T.url, await makeIdentity('alice'));
     const addr = 'B'.repeat(43);
-    for (let i = 0; i < 2; i++) assert.equal((await A.call('get', { p: 'phones/' + addr })).ok, true);
-    assert.equal((await A.call('get', { p: 'phones/' + addr })).e, 'ratelimit', 'one address may be probed so often an hour');
-    assert.equal((await A.call('get', { p: 'phones/' + 'C'.repeat(43) })).ok, true, 'another address has its own count');
-    assert.equal((await A.call('mget', { ps: ['phones/' + addr] })).e, 'ratelimit', 'mget counts the same way');
+    for (let i = 0; i < 2; i++) assert.equal((await A.call('get', { p: 'logins/' + addr })).ok, true);
+    assert.equal((await A.call('get', { p: 'logins/' + addr })).e, 'ratelimit', 'one address may be probed so often an hour');
+    assert.equal((await A.call('get', { p: 'logins/' + 'C'.repeat(43) })).ok, true, 'another address has its own count');
+    assert.equal((await A.call('mget', { ps: ['logins/' + addr] })).e, 'ratelimit', 'mget counts the same way');
     await A.close();
   } finally { await T.stop(); }
 });

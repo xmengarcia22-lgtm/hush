@@ -594,13 +594,23 @@ const epochOf=c=>c.epoch==null?0:c.epoch;
 const keyMap=(c,e)=>(c.keys&&c.keys[e])||null;
 const epochsOf=c=>{const es=[...new Set(Object.keys(c.keys||{}).concat(Object.keys(c.openKeys||{})).map(Number))].sort((a,b)=>a-b);return es.length?es:[0]};
 const metaOf=s=>({name:s.name||'',desc:s.desc||'',photo:s.photo||null,owner:s.owner||'',admins:s.admins||[],members:s.members||[],banned:s.banned||[]});
+/* The highest power tier this person has held: none (''), admin, owner. Kept in the encrypted vault, so the server never
+   sees it. When it climbs past the best so far, 'hush:tier-up' fires on window with {tier}: the hook for the upgrade
+   card. The first time a device of an account from before this sees a role, it records it without firing. */
+const TIERS=['','admin','owner'];let tierQueued=null;
+function noteTier(t){
+  if(!S.me)return;
+  if(!S.contactsReady){if(!tierQueued||tierQueued.h!==S.me.handle||TIERS.indexOf(t)>TIERS.indexOf(tierQueued.t))tierQueued={h:S.me.handle,t};return}
+  const p=P(),was=p.tier;if(was!==undefined&&TIERS.indexOf(t)<=TIERS.indexOf(was))return;
+  p.tier=t;saveContacts();if(was!==undefined)window.dispatchEvent(new CustomEvent('hush:tier-up',{detail:{tier:t}}));
+}
 async function capsFor(cid){ // the best key this device holds for a chat, for the connector to open it with
   let c=S.chatDocs.get(cid);
   if(!c){const s=await S.db.preview(cid);if(!s.exists)return null;c=Object.assign({id:cid},s.data());S.chatDocs.set(cid,c)}
   if(typeOf(c)==='dm'){const e=epochOf(c);return (e>0&&await memberCap(c,e))||memberCap(c,0)} // the base key always lets you back in to heal
   const shown=await showMeta(c),me=S.me.handle;
-  if(shown.owner===me)return ownerCap(cid);
-  if((shown.admins||[]).includes(me)){const a=await adminSecret(c);if(a)return adminCapFrom(cid,a)}
+  if(shown.owner===me){noteTier('owner');return ownerCap(cid)}
+  if((shown.admins||[]).includes(me)){noteTier('admin');const a=await adminSecret(c);if(a)return adminCapFrom(cid,a)}
   return memberCap(c,epochOf(c));
 }
 function noteChatDoc(c){ // remember the server's copy; a new epoch or new admin keys mean the connector should open the chat again
@@ -1884,6 +1894,7 @@ function openCreateGroup(){
     const name=n.value.trim();err.textContent='';
     if(!name){err.textContent='Give your group a name.';return}
     if(!S.db){err.textContent='Groups can\u2019t be created right now. Check your connection.';return}
+    if(!(await ensureSecure('owner',name,'group'))){err.textContent='Secure your account to create a group.';return}
     go.disabled=true;
     try{
       const cid='g'+rid(),members=[S.me.handle,...sel],v={name,desc:'',photo:null,owner:S.me.handle,admins:[],members,banned:[]};
@@ -1891,7 +1902,7 @@ function openCreateGroup(){
       await ensureInbox(Object.assign({id:cid},doc,v));
       if(!convById(cid))S.convs.unshift(Object.assign({id:cid},doc,v));
       close();openConv(cid);
-    }catch{err.textContent='Couldn\u2019t create the group. Check your connection and try again.';go.disabled=false}
+    }catch(e){err.textContent=e&&e.code==='secure'?'Secure your account to create a group.':'Couldn\u2019t create the group. Check your connection and try again.';go.disabled=false}
   };
 }
 function openJoinLink(){
@@ -1929,6 +1940,7 @@ function openCreateChannel(){
     const name=n.value.trim();err.textContent='';
     if(!name){err.textContent='Give your channel a name.';return}
     if(!S.db){err.textContent='Channels can\u2019t be created right now. Check your connection.';return}
+    if(!(await ensureSecure('owner',name,'channel'))){err.textContent='Secure your account to create a channel.';return}
     go.disabled=true;
     try{
       const cid='c'+rid(),members=[S.me.handle,...sel],v={name,desc:d.value.trim(),photo:null,owner:S.me.handle,admins:[],members,banned:[]};
@@ -1937,7 +1949,7 @@ function openCreateChannel(){
       await ensureInbox(Object.assign({id:cid},doc,v));
       if(!convById(cid))S.convs.unshift(Object.assign({id:cid},doc,v));
       close();openConv(cid);
-    }catch{err.textContent='Couldn\u2019t create the channel. Check your connection and try again.';go.disabled=false}
+    }catch(e){err.textContent=e&&e.code==='secure'?'Secure your account to create a channel.':'Couldn\u2019t create the channel. Check your connection and try again.';go.disabled=false}
   };
 }
 async function createChatDoc(cid,type,vis,v){ // a new group or channel: chat key, admin secret, sealed description, room keys for the server
@@ -1948,7 +1960,7 @@ async function createChatDoc(cid,type,vis,v){ // a new group or channel: chat ke
     pub?{openKeys:{0:b64(raw)},name:v.name,desc:v.desc,photo:v.photo||null,owner:S.me.handle,admins:[]}:{meta:await sealMeta(cid,0,raw,v)});
   ksPut(cid,0,b64(raw));ksPut(cid,'a',b64(secret));
   await S.db.createChat(cid,doc,{m:await memberCapFrom(cid,0,raw),a:await adminCapFrom(cid,secret),o:await ownerCap(cid)});
-  S.chatDocs.set(cid,Object.assign({id:cid},doc));return doc;
+  S.chatDocs.set(cid,Object.assign({id:cid},doc));noteTier('owner');return doc;
 }
 function openAddSubs(cid){
   const c=convById(cid);if(!c)return;const noun=typeOf(c)==='group'?'member':'subscriber';
@@ -2205,24 +2217,13 @@ function settingsPrivacy(body,me){
   tg.append(cb,el('span',null,'Show my online status and last seen'));
   body.append(tg,el('p','hint','People you can see in Hush will see when you\u2019re online. Turn it off and they\u2019ll see \u201clast seen recently\u201d instead.'));
   body.append(el('div','menu-label flush','Find me by phone number'));
-  const pf=el('label','field');const pin=el('input');pin.type='tel';pin.autocomplete='tel';pin.placeholder='Optional';pin.value=ls.get('hush:phone:'+me.handle,'')||'';
-  pf.append(el('span',null,'Let friends find me by this number'),pin);
-  const prow=el('div','row2');const psave=el('button','secondary','Save number'),prm=el('button','secondary','Remove');prm.hidden=!pin.value;prow.append(psave,prm);
-  const perr=el('div','err');
-  body.append(pf,prow,perr,el('p','hint','Your number is stored as a scrambled fingerprint, not as the number itself, and has nothing to do with your encryption keys. Numbers aren\u2019t confirmed by text message in this prototype.'));
-  psave.onclick=async()=>{perr.textContent='';const e164=normPhone(pin.value);if(!e164){perr.textContent='Enter a full phone number, including the area code.';return}
-    if(!S.db){perr.textContent='Numbers can\u2019t be saved right now. Check your connection.';return}
-    psave.disabled=true;
-    try{const hsh=await phoneHash(e164),ref=S.db.doc('phones/'+hsh),s=await ref.get();
-      if(s.exists&&s.data().handle!==me.handle){perr.textContent='That number is already linked to another account.';psave.disabled=false;return}
-      const old=ls.get('hush:phone:'+me.handle,null);
-      if(old&&old!==e164){const oh=await phoneHash(old);const os=await S.db.doc('phones/'+oh).get();if(os.exists&&os.data().handle===me.handle)await S.db.doc('phones/'+oh).delete()}
-      await ref.set({handle:me.handle,ts:Date.now()});ls.set('hush:phone:'+me.handle,e164);pin.value=e164;prm.hidden=false;toast('Friends can now find you by your number')}
-    catch{perr.textContent='Couldn\u2019t save. Check your connection and try again.'}
-    psave.disabled=false};
-  prm.onclick=async()=>{const old=ls.get('hush:phone:'+me.handle,null);
-    try{if(old&&S.db){const oh=await phoneHash(old);const os=await S.db.doc('phones/'+oh).get();if(os.exists&&os.data().handle===me.handle)await S.db.doc('phones/'+oh).delete()}
-      ls.set('hush:phone:'+me.handle,null);pin.value='';prm.hidden=true;toast('Number removed')}catch{toast('Couldn\u2019t remove it. Try again.')}};
+  // Off until numbers can be confirmed by text message (SPEC.md 12.4): an unconfirmed number let anyone claim yours and be
+  // matched to your friends under your name. A number saved before can still be taken off the server.
+  body.append(el('p','hint','Finding friends by phone number is off until Hush can confirm numbers by text message. Until then nobody can be found by a number, so nobody can pose as you with yours.'));
+  const oldPhone=ls.get('hush:phone:'+me.handle,null);
+  if(oldPhone){const prm=el('button','secondary','Remove my saved number');
+    prm.onclick=async()=>{try{if(S.db)await S.db.doc('phones/'+await phoneHash(oldPhone)).delete();ls.set('hush:phone:'+me.handle,null);prm.remove();toast('Number removed')}catch{toast('Couldn\u2019t remove it. Try again.')}};
+    body.append(prm)}
   // Everything blocked, both kinds. People and chats are kept in my vault and never told; per-chat blocks live in the
   // chat's own sealed member list, so they are listed for the chats I run.
   const row=(av,label,sub,fn,h)=>{const r=el('div','menu-item flush static');const m=el('div','t-main');m.append(withBadge(el('div','t-name',label),h||''),el('div','t-sub',sub));
@@ -2315,14 +2316,14 @@ function openPhoneInvite(){
   body.append(f);
   if(navigator.contacts&&navigator.contacts.select){const pick=html('button','menu-item flush',I.user+'<span>Choose from contacts</span>');
     pick.onclick=async()=>{try{const r=await navigator.contacts.select(['tel'],{multiple:false});const t=r&&r[0]&&r[0].tel&&r[0].tel[0];if(t){inp.value=t;go.click()}}catch{toast('Contacts aren\u2019t available here. Type the number instead.')}};body.append(pick)}
-  body.append(go,err,out,el('p','hint','Looking up a number only checks whether someone chose to be findable by it. It never touches anyone\u2019s messages or encryption keys.'));
+  body.append(go,err,out,el('p','hint','Hush can\u2019t look people up by phone number until numbers can be confirmed by text message, so this sends them an invite.'));
   setTimeout(()=>inp.focus(),50);
   inp.onkeydown=e=>{if(e.key==='Enter')go.click()};
   go.onclick=async()=>{
     err.textContent='';out.replaceChildren();const e164=normPhone(inp.value);
     if(!e164){err.textContent='Enter a full phone number, including the area code.';return}
     go.disabled=true;let found=null;
-    try{if(S.db){const s=await S.db.doc('phones/'+await phoneHash(e164)).get();if(s.exists){const h=s.data().handle;if(h&&h!==S.me.handle&&S.dir[h])found=h}}}catch{}
+    // No lookup: numbers aren't matched until they can be confirmed by text message (see lookupPhone), so this invites.
     go.disabled=false;
     if(found){
       out.append(el('div','menu-label flush','On Hush'));const r=personRow(S.dir[found]);r.onclick=()=>{close();openDm(found)};
@@ -2359,11 +2360,13 @@ async function loadContacts(){
         rec:pr.rec&&typeof pr.rec.loc==='string'?{loc:pr.rec.loc,ts:+pr.rec.ts||0}:undefined,
         login:pr.login&&typeof pr.login.login==='string'?{login:pr.login.login,...(typeof pr.login.loc==='string'?{loc:pr.login.loc}:{})}:undefined,
         blocked:Array.isArray(pr.blocked)?pr.blocked.filter(h=>typeof h==='string'&&validHandle(h)):[],
-        blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[]}}
+        blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[],
+        secure:pr.secure===true||undefined,tier:TIERS.includes(pr.tier)?pr.tier:undefined}}
     vaultOk=true}
   catch{toast('Your contacts couldn\u2019t be unlocked on this device.')}
   S.contactsReady=true;
-  if(vaultOk&&s&&!s.exists&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;saveContacts()} // new account: Message backup on from the start
+  if(vaultOk&&s&&!s.exists&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;S.prefs.tier='';saveContacts()} // new account: Message backup on from the start, and no power tier yet
+  if(tierQueued&&tierQueued.h===me){const t=tierQueued.t;tierQueued=null;noteTier(t)}
   if(vaultOk&&S.me.handle===me){const r=recLocal(me),v=S.prefs.rec; // tell your other devices about words set up here (and words set up before this update)
     if(r&&r.loc&&r.conf!==false&&(!v||(v.loc!==r.loc&&(r.ts||0)>(v.ts||0)))){S.prefs.rec={loc:r.loc,ts:r.ts||Date.now()};saveContacts()}
     // Keep the login note and its vault copy in step, so a login saved on the server survives a cleared browser.
@@ -2386,8 +2389,9 @@ function saveContacts(){
 }
 function rebuildNames(){S.cnames=new Map();(S.contacts||[]).forEach(c=>{if(c.handle)S.cnames.set(c.handle,c.name)})}
 const contactFor=h=>(S.contacts||[]).find(c=>c.handle===h);
-async function lookupPhone(e164){try{const s=await S.db.doc('phones/'+await phoneHash(e164)).get();if(!s.exists)return null;const h=s.data().handle;
-  if(!h||h===S.me.handle)return null;if(!S.dir[h]){const d=await S.db.doc('directory/'+h).get();if(!d.exists)return null;S.dir[h]=d.data()}return h}catch{return null}}
+// Matching contacts by phone number is off until numbers can be confirmed by text message (SPEC.md 12.4); the server
+// refuses the lookups too. An unconfirmed number let anyone claim yours and be matched to your friends under your name.
+async function lookupPhone(e164){return null}
 let matching=false;
 async function matchContacts(){
   if(matching||!S.db)return;matching=true;let changed=false;const todo=S.contacts.filter(c=>c.phone&&!c.handle);
@@ -2781,30 +2785,70 @@ async function enterAccount(id){ // shared by log in and restore
   if(S.pendingJoin){const pj=S.pendingJoin;S.pendingJoin=null;setTimeout(()=>handleJoin(pj),400)}
   return true;
 }
-function openSetupLogin(reset){ // reset: true after a password reset, 'again' when the server lost the saved box
-  const me=S.me,li=loginInfo(me.handle)||{login:me.handle};const cur=li.loc&&!reset?li:null,again=reset==='again';
-  const {body,close}=sheet(again?'Save your password again':reset?'Choose a new password':cur?'Change password':'Add a password');
-  body.append(el('p',null,again?'The server no longer has your saved password, so it can\u2019t be used to log in until you save it again. Enter a password now; your old one is fine.':reset?'You\u2019re back in. Pick a new password so you can log in with it next time.':cur?'Enter your current password, then choose a new one.':'Optional. A password lets you log in on a new device even when your other devices aren\u2019t around. It locks your account on this device first, so Hush never sees it and can\u2019t reset it.'));
+/* ---------- power roles need a secured account (SPEC.md 4.6) ----------
+   An owner or admin of a group or channel holds keys to other people's chats, so their password must be strong (12+).
+   The server can't see passwords: the page checks, and once a password it saw was strong it sets the account's
+   secured mark, which only the server can read. Without it the server won't let the account create a group or channel,
+   and opens its chats at member level, owner or admin tools paused, until the account is secured. Skipping the prompt
+   keeps it that way: a new group or channel isn't made, and an existing role stays paused, asked about again next load. */
+const isSecure=h=>!!(ls.get('hush:secure:'+h,0)||(S.me&&S.me.handle===h&&S.contactsReady&&P().secure));
+async function markSecure(){
+  if(!S.me||!S.db)return false;const h=S.me.handle;
+  try{await S.db.doc('secure/'+h).set({ts:Date.now()})}catch{return false}
+  ls.set('hush:secure:'+h,Date.now());if(S.contactsReady&&!P().secure){P().secure=true;saveContacts()}
+  for(const cid of S.paused||[])S.db.reopen(cid).catch(()=>{});S.paused=new Set();return true;
+}
+function ensureSecure(role,name,kind,held){ // true once the account may hold this role; asks only when needed
+  if(isSecure(S.me.handle))return Promise.resolve(true);
+  return new Promise(res=>openSetupLogin(false,{role,name,kind,held,done:res}));
+}
+const powerAsked=new Set();
+function askPower(cid,held){ // the server opened a chat at member level: this account holds a power role there, unsecured
+  (S.paused||(S.paused=new Set())).add(cid);if(!S.me||powerAsked.has(cid)||S.securing)return;powerAsked.add(cid);
+  const c=convById(cid)||S.chatDocs.get(cid)||{};S.securing=true;
+  ensureSecure(held,c.name||'this chat',typeOf(c)==='channel'?'channel':'group',true).then(()=>{S.securing=false});
+}
+const powerLead=p=>'You\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \u201c'+p.name+'\u201d. '+(p.role==='owner'?'Owners':'Admins')+' hold the keys to this '+p.kind+', so your password needs to be stronger: at least 12 characters, to keep it safe.';
+function openSetupLogin(reset,power){ // reset: true after a password reset, 'again' when the server lost the saved box; power: {role,name,kind,done} securing for a power role
+  const me=S.me,li=loginInfo(me.handle)||{login:me.handle};const cur=li.loc&&!reset?li:null,again=reset==='again',strong=!!power||isSecure(me.handle);
+  const {body,sh,close}=sheet(power?'Secure your account':again?'Save your password again':reset?'Choose a new password':cur?'Change password':'Add a password');
+  body.append(el('p',null,power?powerLead(power):again?'The server no longer has your saved password, so it can\u2019t be used to log in until you save it again. Enter a password now; your old one is fine.':reset?'You\u2019re back in. Pick a new password so you can log in with it next time.':cur?'Enter your current password, then choose a new one.':'Optional. A password lets you log in on a new device even when your other devices aren\u2019t around. It locks your account on this device first, so Hush never sees it and can\u2019t reset it.'));
   const {f:fo,i:po}=pwField('Current password','current-password');
-  const {f:f1,i:p1}=pwField(cur?'New password':'Password (at least 8 characters)','new-password');
+  const {f:f1,i:p1}=pwField(strong?'New password (at least 12 characters)':cur?'New password':'Password (at least 8 characters)','new-password');
   const {f:f2,i:p2}=pwField('Type it again','new-password');
-  const go=el('button','primary',cur?'Change password':'Save password');go.style.width='100%';const err=el('div','err');
+  const go=el('button','primary',power?'Secure my account':cur?'Change password':'Save password');go.style.width='100%';const err=el('div','err');
   body.append(...(cur?[fo]:[]),f1,f2,go,err);setTimeout(()=>(cur?po:p1).focus(),50);
+  let secured=false;
+  if(power){
+    if(cur)fo.after(el('p','hint','If your current password is already 12 characters or more, just enter it and leave the new one empty.'));
+    const lock=el('button','link','Turn on app lock');lock.onclick=()=>openAppLock();
+    const later=el('button','link','Not now');later.onclick=close;
+    body.append(el('p','hint','Also turn on the app lock, so someone who picks up your phone can\u2019t act as you in this '+power.kind+'.'),lock,
+      el('p','hint',power.role==='owner'&&!power.held?'Not now: the '+power.kind+' isn\u2019t created.':'Not now: you stay in the '+power.kind+' and can read and post, but your '+power.role+' tools wait until your account is secured.'),later);
+    const watch=setInterval(()=>{if(!sh.isConnected){clearInterval(watch);power.done(secured)}},300);
+  }
   go.onclick=async()=>{err.textContent='';
     // One password for every way in: a box for the username and for each email or number, all replaced together, and
     // the old boxes removed so the old password stops working everywhere (after a reset too).
     const login=li.login,logins=loginsOf(me.handle);
-    const bad=logins.map(l=>pwProblem(p1.value,isHandleLogin(l)?null:l,me.handle)).find(Boolean);if(bad){err.textContent=bad;return}if(p1.value!==p2.value){err.textContent='The passwords don\u2019t match.';return}
+    if(power&&cur&&po.value&&!p1.value&&!p2.value){ // the current password may already be strong enough
+      go.disabled=true;
+      try{await openLoginBox(login,po.value)}catch(e){go.disabled=false;err.textContent=e&&e.code==='ratelimit'?'Too many wrong passwords for this login. Try again later.':'Your current password isn\u2019t right.';return}
+      if(!logins.every(l=>pwStrongEnough(po.value,isHandleLogin(l)?null:l,me.handle))){go.disabled=false;err.textContent='Your current password isn\u2019t strong enough for this. Choose a new one of at least 12 characters.';return}
+      if(!(await markSecure())){go.disabled=false;err.textContent='Couldn\u2019t save. Check your connection and try again.';return}
+      secured=true;close();toast('Your account is secured');return}
+    const bad=logins.map(l=>pwProblem(p1.value,isHandleLogin(l)?null:l,me.handle)).find(Boolean)||(strong&&p1.value.length<12?'Use at least 12 characters: this password guards '+(power?'your '+power.kind:'your groups and channels')+'.':null);if(bad){err.textContent=bad;return}if(p1.value!==p2.value){err.textContent='The passwords don\u2019t match.';return}
     go.disabled=true;go.textContent='Locking your account\u2026';
     try{
-      if(cur){try{await openLoginBox(login,po.value)}catch{throw new Error('oldpw')}}
+      if(cur){try{await openLoginBox(login,po.value)}catch(e){throw e&&e.code==='ratelimit'?e:new Error('oldpw')}}
       const old=Object.assign({},li.all||{},li.loc?{[login]:li.loc}:{});
       const all=await saveLoginBoxes(me,logins,p1.value);rememberPw(login,p1.value);
-      for(const [l,loc] of Object.entries(old))if(all[l]!==loc)S.db.doc('accounts/'+loc).delete().catch(()=>{});
+      for(const [l,loc] of Object.entries(old))if(all[l]!==loc)dropLoginBox(l,loc);
       rememberLogin(me.handle,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+me.handle,Date.now());renderBanner();
-      close();toast(cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
+      if(logins.every(l=>pwStrongEnough(p1.value,isHandleLogin(l)?null:l,me.handle))&&await markSecure())secured=true;
+      close();toast(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
     }catch(e){go.disabled=false;go.textContent=cur?'Change password':'Save password';
-      err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':'Couldn\u2019t save. Check your connection and try again.'}};
+      err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?'Too many wrong passwords for this login. Try again later.':'Couldn\u2019t save. Check your connection and try again.'}};
 }
 /* ---------- recovery-email codes and moving to a new device; keys move between your devices, never through readable server data ----------
    Codes are used only for the optional recovery email: to confirm it in Settings, and for "Forgot password?". The
@@ -2844,11 +2888,12 @@ function watchLinkRequests(){
 }
 function askApprove(tag,r){
   const {body,sh,close}=sheet('Log in on a new device?');sh.parentNode.style.zIndex='70';
-  body.append(el('p',null,(r.dev||'A device')+' is trying to log in to your account. To let it in, scan the QR code on its screen with this device, or type the code under it.'),
+  const kl=el('p','hint');devShort(r.devk).then(k=>{kl.textContent='Its device key is '+k+'. The new device shows its key under the code: if they differ, tap Not me.'});
+  body.append(el('p',null,(r.dev||'A device')+' is trying to log in to your account. To let it in, scan the QR code on its screen with this device, or type the code under it.'),kl,
     el('p','warnbox','If someone asked you to scan or approve something, tap Not me. Hush will never ask you to.'));
   const row=el('div','reqbtns'),no=el('button','secondary','Not me'),yes=el('button','primary','Scan or type code');row.append(no,yes);body.append(row);
   try{navigator.vibrate&&navigator.vibrate([30,60,30])}catch{}
-  no.onclick=async()=>{try{await S.db.doc('linkreqs/'+tag).update({state:'no'})}catch{}close();toast('Login blocked. Nothing was shared.')};
+  no.onclick=async()=>{try{await claimLinkTags();await S.db.doc('linkreqs/'+tag).update({state:'no'})}catch{}close();toast('Login blocked. Nothing was shared.')};
   yes.onclick=()=>{close();openLinkScanner()};
 }
 // --- QR reading: the phone's built-in reader when there is one, otherwise a small library loaded on demand ---
@@ -2877,24 +2922,28 @@ const linkScanErr=e=>linkNetErr(e)||linkScanMsg(e);
 const linkScanMsg=e=>{const m=e&&e.message;return m==='notqr'?'That isn\u2019t a Hush login code.'
   :m==='nomatch'?'That code isn\u2019t from a login to your account. Never scan a code someone else sends you.'
   :m==='expired'?'That login request expired or was cancelled. Start again on the new device.'
+  :m==='oldcode'?'That code is from an older version of Hush. Reload Hush on the new device, then use the code it shows.'
   :m==='badcode'?'That code doesn\u2019t look right. Check each character against the new device\u2019s screen.'
   :m==='nologin'?'Log in first.':'That didn\u2019t go through. Check your connection and try again.'};
-// What a scan or a typed code says: the secret, and a test for the fingerprint of the key that asked. The QR names all 256 bits
-// of the fingerprint, the typed code its first 128; either way the request must be the one whose key the new device showed.
+// What a scan or a typed code says: the secret, and a test that a request is the one the new device showed. The test is
+// on linkFp, which covers both of the device's keys; the QR names all 256 bits of it, the typed code its first 128.
+// Codes from before (version 2) covered only the one-time key and are refused, with a word about why.
 function linkProof(text){
-  const t=String(text||'').trim(),m=/^hush-link:2:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})$/.exec(t);
-  if(m)return {secret:unb64u(m[1]),fits:fp=>fp===m[2]};
-  const c=parseLinkCode(t);if(!c)throw new Error(/^hush-link:/.test(t)?'notqr':'badcode');
-  return {secret:c.secret,fits:fp=>{const h=unb64u(fp);return c.fp.every((x,i)=>x===h[i])}};
+  const t=String(text||'').trim(),m=/^hush-link:3:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})$/.exec(t);
+  if(m)return {secret:unb64u(m[1]),fits:async r=>await linkFp(r.pub,r.devk)===m[2]};
+  if(/^hush-link:2:/.test(t))throw new Error('oldcode');
+  const c=parseLinkCode(t);
+  if(!c)throw new Error(/^hush-link:/.test(t)?'notqr':parseLinkCode(t,2)?'oldcode':'badcode');
+  return {secret:c.secret,fits:async r=>{const h=unb64u(await linkFp(r.pub,r.devk));return c.fp.every((x,i)=>x===h[i])}};
 }
 async function approveFromQr(text){
   const {secret,fits}=linkProof(text);
   if(!S.me||!S.db)throw new Error('nologin');
   let tag=null,r=null; // the code must match the device that's asking to log in to this account
-  for(const t of await linkTags(S.me.handle)){const s=await S.db.doc('linkreqs/'+t).get();if(s.exists&&s.data().pub&&fits(await pubFp(s.data().pub))){tag=t;r=s.data();break}}
+  for(const t of await linkTags(S.me.handle)){const s=await S.db.doc('linkreqs/'+t).get();if(s.exists&&s.data().pub&&await fits(s.data())){tag=t;r=s.data();break}}
   if(!r)throw new Error('nomatch');
   if(r.state!=='wait'||Date.now()-r.ts>5*60e3)throw new Error('expired');
-  linkSeen.add(r.ts+':'+r.pub.x);await approveLink(tag,r,secret);return r.dev;
+  linkSeen.add(r.ts+':'+r.pub.x);await approveLink(tag,r,secret);return {dev:r.dev,key:await devShort(r.devk)};
 }
 function openLinkScanner(){
   const {body,sh,close}=sheet('Link a new device');sh.parentNode.style.zIndex='70';
@@ -2911,7 +2960,7 @@ function openLinkScanner(){
   const stop=()=>{done=true;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null};
   const watch=setInterval(()=>{if(!sh.isConnected){stop();clearInterval(watch)}},400);
   const use=async (text,typed)=>{if(done||working||!text)return;working=true;err.textContent='';status.textContent='Checking\u2026';
-    try{const dev=await approveFromQr(text);stop();close();toast('Approved. Your account is opening on '+(dev||'the new device')+'.')}
+    try{const {dev,key}=await approveFromQr(text);stop();close();toast('Approved. Your account is opening on '+(dev||'the new device')+', device key '+key+'.')}
     catch(e){err.textContent=typed&&e&&e.message==='notqr'?linkScanErr(new Error('badcode')):linkScanErr(e);status.textContent=stream?'Point the camera at the QR code.':'';setTimeout(()=>{working=false},typed?300:1500)}};
   tgo.onclick=async()=>{const v=ti.value.trim();if(!v){err.textContent='Type or paste the code first.';return}await use(v,true)};
   ti.onkeydown=e=>{if(e.key==='Enter')tgo.click()};
@@ -2927,7 +2976,12 @@ function openLinkScanner(){
       setTimeout(tick,250)};tick();
   })();
 }
+async function claimLinkTags(){ // prove to the server that this device holds the account's logins, so it may answer requests at their tags
+  const li=loginInfo(S.me.handle)||{},boxes=Object.assign({},li.all||{},li.loc?{[li.login]:li.loc}:{});
+  await Promise.all(Object.entries(boxes).map(async([l,x])=>{try{await S.db.loginGate(await loginTag(l),x)}catch{}}));
+}
 async function approveLink(tag,r,secret){
+  await claimLinkTags();
   if(!(secret instanceof Uint8Array)||secret.length!==16)throw new Error('notqr');
   const e=await ephemeral(),key=await linkKey(e.privateKey,r.pub,secret),iv=crypto.getRandomValues(new Uint8Array(12));
   let payload=bundleOf(S.me);const dk=r.devk,okDev=dk&&/^[a-zA-Z0-9]{6,20}$/.test(dk.id||'')&&['x','y','sx','sy'].every(f=>typeof dk[f]==='string'&&dk[f].length>20);
@@ -2945,8 +2999,11 @@ async function approveLink(tag,r,secret){
 // --- the new device: asks, waits, then unlocks what the old device sent ---
 async function requestLink(login,onStatus){
   const tag=await loginTag(login),e=await ephemeral(),secret=crypto.getRandomValues(new Uint8Array(16)),pub=await pubJwk(e),dv=await newDev();
-  const ts=Date.now();await S.db.doc('linkreqs/'+tag).set({state:'wait',pub,ts,dev:deviceName(),devk:{id:dv.id,x:dv.ecdh.x,y:dv.ecdh.y,sx:dv.sig.x,sy:dv.sig.y}});
-  const fp=await pubFp(pub);onStatus({qr:'hush-link:2:'+b64u(secret)+':'+fp,code:linkCode(secret,fp)});
+  const devk={id:dv.id,x:dv.ecdh.x,y:dv.ecdh.y,sx:dv.sig.x,sy:dv.sig.y};
+  const ts=Date.now();await S.db.doc('linkreqs/'+tag).set({state:'wait',pub,ts,dev:deviceName(),devk});
+  // The codes commit to both keys (linkFp): the one-time key the handoff is sealed to, and this device's own key, which
+  // the approving device signs onto the account. Swapping either on the server makes the code stop matching.
+  const fp=await linkFp(pub,devk);onStatus({qr:'hush-link:3:'+b64u(secret)+':'+fp,code:linkCode(secret,fp),dk:await devShort(devk)});
   // Leaving, cancelling or timing out takes this request down, so the next try starts clean. Only this device's own
   // waiting request goes: one that was approved, refused, or replaced by a newer try is left alone.
   let stop=false,finished=false;
@@ -3180,11 +3237,14 @@ function showOnboard(adding,notice){
       const here=S.ids.find(x=>loginsOf(x.handle).includes(l));if(here){o.remove();start(here);return}
       busy(go,'Checking…');
       let r;try{r=await tryLogin(l,p.value)}
-      catch(e){busy(go);err.textContent=e&&e.message==='nomatch'?'That password isn’t right. Try again, or tap “Forgot password?”':'Couldn’t check that. Check your connection and try again.';return}
+      catch(e){busy(go);const w=e&&e.code==='ratelimit'&&/wait (\d+) minute/.exec(e.message||'');
+        err.textContent=w?'Too many wrong passwords for this login. Try again in '+w[1]+' minute'+(w[1]==='1'?'':'s')+', or tap “Forgot password?”'
+          :e&&e.code==='ratelimit'?'Too many tries from this network. Wait a minute, then try again.'
+          :e&&e.message==='nomatch'?'That password isn’t right. Try again, or tap “Forgot password?”':'Couldn’t check that. Check your connection and try again.';return}
       if(r.kind==='wrongpw'){busy(go);err.textContent='That password isn’t right. Try again, or tap “Forgot password?”';return}
       if(r.kind==='new'){busy(go);err.textContent='There’s no account with that '+loginKind(l)+'. Check it, or tap “Sign up” to create one.';return}
       busy(go,'Unlocking your account…');
-      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id))toast('Welcome back, '+id.name);else busy(go)}
+      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value,l))markSecure()}else busy(go)}
       catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account was set up fresh. Tap “Forgot password?”':'Couldn’t log in. Check your connection and try again.'}};
   };
   // Sign-up, in two quick screens and no code: an email or a phone number (one is required) and a password, then a
@@ -3242,7 +3302,7 @@ function showOnboard(adding,notice){
         let all={};try{all=await saveLoginBoxes(id,reserved?[handle,contact]:[handle],pw);rememberPw(handle,pw)}catch{}
         su=null;if(all[handle])rememberLogin(handle,{login:handle,loc:all[handle],all},true);else rememberLogin(handle,{login:handle});
         S.freshSignup=handle; // a brand-new account starts with Message backup on (loadContacts); accounts from before keep their choice
-        await enterAccount(id);
+        await enterAccount(id);if(pwStrongEnough(pw,contact,handle))markSecure();
         if(!reserved)toast('That '+loginKind(contact)+' couldn’t be saved, so log in with your username for now.');else if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };
@@ -3284,12 +3344,12 @@ function showOnboard(adding,notice){
     S.resetFor={login};
     head('Get back in','Open Hush on a device where you’re still logged in and scan this code. Then you’ll pick a new password.');
     const num=el('div','qr'),manual=el('div','link-code'),box=el('div','link-wait');box.append(el('span','spin'),el('span',null,'Waiting for you to scan…'));const err=el('div','err');
-    const showCode=code=>{const cp=el('button','link sm','Copy code');cp.onclick=async()=>{try{await navigator.clipboard.writeText(code);toast('Code copied')}catch{toast('Select the code and copy it.')}};
-      manual.replaceChildren(el('p','hint center','No camera on your other device? Type or paste this code there instead:'),el('div','link-code-text',code),cp)};
+    const showCode=(code,dk)=>{const cp=el('button','link sm','Copy code');cp.onclick=async()=>{try{await navigator.clipboard.writeText(code);toast('Code copied')}catch{toast('Select the code and copy it.')}};
+      manual.replaceChildren(el('p','hint center','No camera on your other device? Type or paste this code there instead:'),el('div','link-code-text',code),cp,el('p','hint center','This device\u2019s key: '+dk+'. Your other device shows the same key when it asks you to approve.'))};
     w.append(num,manual,box,el('p','hint center','Your other device will pop up an alert — tap Scan or type code. Or go to Settings → Login and devices → Link a new device.'),err);
     const bk=el('button','link','Use my recovery words'),fresh=el('button','link','I don’t have my other device');
     bk.onclick=()=>openRestore();fresh.onclick=()=>stepFresh();w.append(bk,fresh);foot(()=>stepLogin());
-    (async()=>{try{link=await requestLink(login,({qr,code})=>{const q=qrSvg(qr,'QR code to log in on this device');if(q)num.innerHTML=q;else num.textContent='The QR code couldn’t be drawn. Use another option below.';showCode(code)});const id=await link.done;if(!id)return;
+    (async()=>{try{link=await requestLink(login,({qr,code,dk})=>{const q=qrSvg(qr,'QR code to log in on this device');if(q)num.innerHTML=q;else num.textContent='The QR code couldn’t be drawn. Use another option below.';showCode(code,dk)});const id=await link.done;if(!id)return;
         link=null;if(await enterAccount(id))toast('Welcome back, '+id.name)}
       catch(e){if(e&&e.code==='denied')proven=null; // the server forgot the confirmation (a dropped connection): ask for a code again
         box.remove();num.remove();manual.remove();err.textContent=linkWaitErr(e)||(e&&e.message==='denied'?'The other device said this wasn’t you, so nothing was shared.':e&&e.message==='timeout'?'No approval came through. Go back to try again, or use another option below.':e&&e.message==='stale'?'This account was set up fresh on another device since then.':e&&e.code==='denied'?'The code for your recovery email has to be confirmed again. Go back and send a new one.':'Couldn’t reach your other device. Use another option below.')}})();

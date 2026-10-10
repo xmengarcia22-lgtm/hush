@@ -1,5 +1,6 @@
 // The identity plane (SPEC.md 4): proofs, ownership of profile-side records,
 // blind-address op rules, and what an unproven connection may still do.
+import { SYSTEM } from '../src/store.js';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -129,16 +130,18 @@ test('presence and search belong to their owner; reading needs a signed-in conne
   await anon.close();
 });
 
-test('phone entries: a number can only point at the account that registered it', async () => {
+test('phone entries: numbers are not matched until they can be confirmed; an owner can still remove theirs', async () => {
+  // An unconfirmed number let anyone claim yours and be matched to your friends under your name (SPEC.md 12.4).
   const hash = 'PhoneHash'.padEnd(43, '0');
-  await A.ok('set', { p: 'phones/' + hash, d: { handle: 'alice' } });
-  assert.equal((await B.call('set', { p: 'phones/' + hash, d: { handle: 'bob' } })).e, 'denied', 'bob cannot take alice\'s number');
-  assert.equal((await B.call('set', { p: 'phones/' + hash, d: { handle: 'alice' } })).e, 'denied', 'nor write entries in her name');
-  assert.equal((await B.call('delete', { p: 'phones/' + hash })).e, 'denied');
-  assert.equal((await B.ok('get', { p: 'phones/' + hash })).d.handle, 'alice', 'lookups are open to signed-in users');
+  assert.equal((await A.call('set', { p: 'phones/' + hash, d: { handle: 'alice' } })).e, 'denied', 'no new entries, even in your own name');
+  S.srv.store.set('phones/' + hash, { handle: 'alice' }, SYSTEM);      // one saved before matching was turned off
+  assert.equal((await B.call('get', { p: 'phones/' + hash })).e, 'denied', 'nobody can look a number up');
+  assert.equal((await A.call('get', { p: 'phones/' + hash })).e, 'denied', 'not even its owner');
+  assert.ok(!JSON.stringify(await B.call('mget', { ps: ['phones/' + hash] })).includes('alice'), 'nor in a batch');
+  assert.equal((await B.call('set', { p: 'phones/' + hash, d: { handle: 'bob' } })).e, 'denied', 'nobody can take it over');
+  assert.equal((await B.call('delete', { p: 'phones/' + hash })).e, 'denied', 'only its owner removes it');
   await A.ok('delete', { p: 'phones/' + hash });
-  await B.ok('set', { p: 'phones/' + hash, d: { handle: 'bob' } });
-  await B.ok('delete', { p: 'phones/' + hash });
+  assert.equal(S.srv.store.get('phones/' + hash, SYSTEM).d, null);
 });
 
 test('blind-address boxes follow their fixed rules and need no sign-in', async () => {

@@ -16,6 +16,7 @@
 
 import { HushError, fail } from './errors.js';
 import { changedKeys } from './merge.js';
+import { loginTag } from './codes.js';
 
 const RANK = Object.freeze({ member: 1, admin: 2, owner: 3 });
 const sameXY = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
@@ -142,12 +143,14 @@ function standardCheck(a, op, p, ctx) {
       own(a, p.id);
       return;
     case 'phones':
+      // Matching by phone number is off until numbers can be confirmed by text message (SPEC.md 12.4): an unconfirmed
+      // number let anyone claim yours and be matched to your friends under your name. Entries can't be read or made;
+      // an owner can still take theirs down.
       if (list) noList();
       needProven(a);
-      if (read) return;
-      if (ctx.prev && ctx.prev.handle !== a.handle) fail('denied', 'that number is linked to another account');
-      if (write && ctx.d && ctx.d.handle !== a.handle) fail('denied', 'a phone entry must name its owner');
-      return;
+      if (read) fail('denied', 'phone numbers are not matched until they can be confirmed by text message');
+      if (del) { if (ctx.prev && ctx.prev.handle !== a.handle) fail('denied', 'that number is linked to another account'); return; }
+      fail('denied', 'phone numbers can not be saved until they can be confirmed by text message');
     case 'accounts':
       if (list) noList();
       if (op === 'set' && ctx.prev) fail('exists', 'an account box already exists at this address');
@@ -157,6 +160,13 @@ function standardCheck(a, op, p, ctx) {
       if (list) noList();
       if (op === 'set' && ctx.prev) fail('exists', 'that login is already taken');
       if (op === 'update' || del) fail('denied', 'login reservations never change');
+      return;
+    case 'secure':
+      // Read by the server only, so nobody learns whose password is weak; set by the account itself, once (SPEC.md 4.6).
+      if (list) noList();
+      if (read) fail('denied', 'this mark is read by the server only');
+      own(a, p.id);
+      if (op === 'update' || del) fail('denied', 'the mark is set once and kept');
       return;
     case 'recovery':
       // Never read back, not even by its owner: code.check answers for it, and only to someone who just proved they
@@ -175,7 +185,11 @@ function standardCheck(a, op, p, ctx) {
       // A new device asks to be let in only after the email was confirmed with a code on this connection: the
       // account's own recovery email, or (accounts from before usernames logged in) the email it logs in with.
       if (list) noList();
-      if (write && ctx.d && ctx.d.state === 'wait' && !(a.conn && a.conn.linkOk && a.conn.linkOk.has(p.id))) fail('denied', 'confirm your recovery email with a code first');
+      // Any change, a refusal or a deletion included, needs proof: the new device's email confirmed by code, or one of
+      // the account's devices, proven as the username this tag is for or holding this login's password box (login.gate).
+      if ((write || del) && !(a.conn && a.conn.linkOk && a.conn.linkOk.has(p.id)) && !(a.handle && loginTag(a.handle) === p.id)) {
+        fail('denied', ctx.d && ctx.d.state === 'wait' ? 'confirm your recovery email with a code first' : 'only this account\u2019s devices can answer this request');
+      }
       return;
     case 'vault':
       if (list) noList();

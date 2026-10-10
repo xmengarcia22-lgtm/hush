@@ -408,8 +408,9 @@ function normLogin(s){
   if(s.includes('@'))return normEmail(s);
   return normPhone(s);
 }
-/* Passwords: at least 8 characters, not on the built-in list of common passwords, and not containing the
-   person's own username, phone number or email. The list holds the usual suspects of 8+ characters from the
+/* Passwords: at least 8 characters, not all lowercase letters, not on the built-in list of common passwords, and not
+   containing the person's own username, phone number or email. An owner or admin of a group or channel needs 12 or
+   more (pwStrongEnough, SPEC.md 4.6): their password guards other people's chats too. The list holds the usual suspects of 8+ characters from the
    big breach counts; anything shorter is already refused by the length rule. */
 const COMMON_PW=new Set(('password 12345678 123456789 1234567890 12345678910 123456789a 123456abc 123abc123 1234qwer qwer1234 1q2w3e4r 1q2w3e4r5t 1qaz2wsx 1qaz2wsx3edc zaq12wsx !qaz2wsx '+
   'qwertyuiop qwertyui qwerty123 qwerty1234 qwertyuiop123 asdfghjkl asdfgh123 asdfasdf asdf1234 zxcvbnm123 poiuytrewq mnbvcxz1 123qweasd qweasdzxc qazwsxedc abcdefgh abcdefg1 abcd1234 abc12345 abc123456 1234abcd a1b2c3d4 1234567a '+
@@ -423,12 +424,14 @@ function pwProblem(pw,login,handle){ // null when the password is acceptable, el
   const low=pw.toLowerCase();
   if(COMMON_PW.has(low))return 'This password is too common.';
   if(/^(.+?)\1+$/.test(low)||/^(?:0?1234567890?|9876543210)+$/.test(low))return 'This password is too easy to guess.';
+  if(/^[a-z]+$/.test(pw))return 'Add a capital letter, a number, a space or a symbol.';
   if(handle&&low.includes(String(handle).toLowerCase()))return 'Password can\u2019t contain your username.';
   if(login&&!isHandleLogin(login)){const l=String(login).toLowerCase();
     if(l.includes('@')){const local=l.split('@')[0];if(low.includes(l)||(local.length>=4&&low.includes(local)))return 'Password can\u2019t contain your email.'}
     else{const d=l.replace(/\D/g,''),pd=low.replace(/\D/g,'');if(d.length>=7&&(pd.includes(d)||pd.includes(d.slice(-7))))return 'Password can\u2019t contain your phone number.'}}
   return null;
 }
+const pwStrongEnough=(pw,login,handle)=>pw.length>=12&&!pwProblem(pw,login,handle); // what a power role asks for
 function pwStrength(pw,login,handle){ // 0 empty, 1 weak, 2 fair, 3 good, 4 strong; weak whenever pwProblem would refuse it
   if(!pw)return {level:0,label:''};
   if(pwProblem(pw,login,handle))return {level:1,label:'Weak'};
@@ -445,19 +448,37 @@ async function loginSecrets(login,pw){
   return {loc,key};
 }
 const loginTag=async login=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-login-v1:'+login))));
+/* Where a password box lives (SPEC.md 4.5). The login's tag and the stretched password (loc above, never the password)
+   go to the server, which mixes in a secret of its own: nobody can work out a box address without asking it, and it
+   counts the asks that find no box, per login, so a password can't be guessed at speed. loc is still what this device
+   remembers for each login; boxes made before the gate lived at loc itself, and findBox moves such a box behind the
+   gate the first time it is opened. */
+const gated=new Map();
+async function boxLoc(login,x){const t=await loginTag(login),k=t+'|'+x;
+  if(!gated.has(k))gated.set(k,S.db.loginGate(t,x).catch(e=>{gated.delete(k);throw e}));return gated.get(k)}
+async function moveBox(x,g,d){
+  try{await S.db.doc('accounts/'+g).set({iv:d.iv,ct:d.ct})}catch(e){if(!(e&&e.code==='exists'))throw e}
+  await S.db.doc('accounts/'+x).delete().catch(()=>{})}
+async function findBox(login,x){ // the box for this login and stretched password, wherever it is, or null
+  const g=await boxLoc(login,x),s=await S.db.doc('accounts/'+g).get();if(s.exists)return s.data();
+  const o=await S.db.doc('accounts/'+x).get();if(!o.exists)return null;
+  await moveBox(x,g,o.data());return o.data()}
+async function dropLoginBox(login,x){ // a login's box for an old password, behind the gate and from before it
+  await S.db.doc('accounts/'+x).delete().catch(()=>{});
+  try{await S.db.doc('accounts/'+await boxLoc(login,x)).delete()}catch{}}
 async function saveLoginBox(id,login,pw){
   const {loc,key}=await loginSecrets(login,pw),iv=crypto.getRandomValues(new Uint8Array(12));
   const payload=JSON.stringify(bundleOf(id));
   const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('hush-login-v1')},key,enc.encode(payload)));
-  await S.db.doc('accounts/'+loc).set({iv:b64u(iv),ct:b64u(ct)});return loc;
+  await S.db.doc('accounts/'+await boxLoc(login,loc)).set({iv:b64u(iv),ct:b64u(ct)});return loc;
 }
 async function unsealBundle(d,key){ // a locked password box → the account inside it, or 'nomatch'
   let pt;try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(d.iv),additionalData:enc.encode('hush-login-v1')},key,unb64u(d.ct))}catch{throw new Error('nomatch')}
   try{return idFromBundle(JSON.parse(dec.decode(pt)))}catch{throw new Error('nomatch')}
 }
 async function openLoginBox(login,pw){
-  const {loc,key}=await loginSecrets(login,pw);const s=await S.db.doc('accounts/'+loc).get();if(!s.exists)throw new Error('nomatch');
-  return {id:await unsealBundle(s.data(),key),loc};
+  const {loc,key}=await loginSecrets(login,pw),d=await findBox(login,loc);if(!d)throw new Error('nomatch');
+  return {id:await unsealBundle(d,key),loc};
 }
 /* One login attempt, three possible answers:
      in       the box at the address made from this login and password opened: here is the account
@@ -468,8 +489,8 @@ async function openLoginBox(login,pw){
    reservation is missing (a server whose data was reset while this account's profile was republished). */
 async function tryLogin(login,pw){
   const {loc,key}=await loginSecrets(login,pw);
-  const [rec,box]=await Promise.all([S.db.doc(isHandleLogin(login)?'directory/'+login:'logins/'+await loginTag(login)).get(),S.db.doc('accounts/'+loc).get()]);
-  if(box.exists)return {kind:'in',id:await unsealBundle(box.data(),key),loc};
+  const [rec,d]=await Promise.all([S.db.doc(isHandleLogin(login)?'directory/'+login:'logins/'+await loginTag(login)).get(),findBox(login,loc)]);
+  if(d)return {kind:'in',id:await unsealBundle(d,key),loc};
   return {kind:rec.exists?'wrongpw':'new'};
 }
 async function reserveLogin(login,handle){ // one account per email or number
@@ -529,7 +550,11 @@ async function healLogin(id){
   const h=id.handle,li=loginInfo(h);if(!S.db||!li||!li.login||loginHealed.has(h))return;loginHealed.add(h);
   try{for(const l of loginsOf(h)){if(isHandleLogin(l))continue; // a username needs no reservation: the profile itself holds the name
       const ref=S.db.doc('logins/'+await loginTag(l));if(!(await ref.get()).exists)await ref.set({ts:Date.now()})}
-    if(li.loc&&!(await S.db.doc('accounts/'+li.loc).get()).exists&&S.me===id){
+    // Every box this device knows of: moved behind the gate if it is from before it, and the password asked for again
+    // when the server has lost the one this device logs in with.
+    const boxes=Object.assign({},li.all||{},li.loc?{[li.login]:li.loc}:{});let lost=false;
+    for(const [l,x] of Object.entries(boxes))if(!(await findBox(l,x))&&l===li.login)lost=true;
+    if(lost&&S.me===id){
       rememberLogin(h,{login:li.login});setTimeout(()=>{if(S.me===id)openSetupLogin('again')},700)}
   }catch{loginHealed.delete(h)}
 }
@@ -583,28 +608,42 @@ const pubJwk=async k=>{const j=await crypto.subtle.exportKey('jwk',k.publicKey);
 /* ===== HUSH LINKCODE BEGIN ===== */
 // The QR code's contents as something to type or paste, for an approving device with no camera. It carries the same two
 // things the QR does, so it protects the same way: the 128-bit secret that never goes through the server, and the
-// first 128 bits of the fingerprint of the asking device's key, which stops the server swapping in a key of its own.
+// first 128 bits of the request's fingerprint (linkFp), which covers both of the new device's keys: the one-time key the
+// handoff is sealed to and the device's own key, which the approving device signs onto the account. A server, or
+// anyone who can edit the request, that swapped either key would make the code stop matching. Codes before that
+// (version 2) covered only the one-time key; their check symbols differ, so they are told apart and refused.
 // Crockford base32 (no I, L, O or U; a typed O reads as 0, I and L as 1), 52 symbols plus 2 check symbols, shown in
 // groups of six. A mistyped symbol fails the check here instead of approving a request nobody can open.
 const LC_ABC='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-const lcCheck=v=>{let a=0,b=0;for(const x of v){a=(a+x+1)%32;b=(b+a)%32}return [a,b]};
-function linkCode(secret,fp){ // secret: 16 bytes; fp: the pubFp string
+const lcCheck=(v,ver=3)=>{let a=ver===3?7:0,b=0;for(const x of v){a=(a+x+1)%32;b=(b+a)%32}return [a,b]};
+function linkCode(secret,fp,ver=3){ // secret: 16 bytes; fp: the linkFp string
   const bytes=new Uint8Array(32);bytes.set(secret,0);bytes.set(unb64u(fp).slice(0,16),16);
   const v=[];let acc=0,bits=0;
   for(const b of bytes){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
   if(bits)v.push((acc<<(5-bits))&31);
-  v.push(...lcCheck(v));
+  v.push(...lcCheck(v,ver));
   return v.map(x=>LC_ABC[x]).join('').replace(/(.{6})(?=.)/g,'$1-');
 }
-function parseLinkCode(text){ // {secret, fp} (16 bytes each), or null when it isn't a whole, correct code
+function parseLinkCode(text,ver=3){ // {secret, fp} (16 bytes each), or null when it isn't a whole, correct code of that version
   const t=String(text||'').toUpperCase().replace(/[\s-]+/g,'').replace(/O/g,'0').replace(/[IL]/g,'1');
   if(t.length!==54)return null;
   const v=[];for(const ch of t){const i=LC_ABC.indexOf(ch);if(i<0)return null;v.push(i)}
-  const [a,b]=lcCheck(v.slice(0,52));if(a!==v[52]||b!==v[53])return null;
+  const [a,b]=lcCheck(v.slice(0,52),ver);if(a!==v[52]||b!==v[53])return null;
   const out=new Uint8Array(32);let acc=0,bits=0,n=0;
   for(const x of v.slice(0,52)){acc=(acc<<5)|x;bits+=5;if(bits>=8){if(n<32)out[n++]=(acc>>(bits-8))&255;bits-=8}acc&=(1<<bits)-1}
   if(acc!==0)return null; // the four spare bits are always zero
   return {secret:out.slice(0,16),fp:out.slice(16)};
+}
+// A new device's own key as one string, for the fingerprints below; '-' when a request carries none.
+const devkStr=dk=>dk&&typeof dk==='object'?[dk.id,dk.x,dk.y,dk.sx,dk.sy].map(v=>String(v)).join('|'):'-';
+// What the QR code and the typed code commit to: the one-time key and the device's own key, together.
+const linkFp=async(pub,devk)=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-link-fp-v3|'+String(pub&&pub.x)+'.'+String(pub&&pub.y)+'|'+devkStr(devk)))));
+// The start of a device key's fingerprint, 40 bits as 8 symbols ("7K2M-9QX4"), shown on both devices to compare by eye.
+async function devShort(dk){
+  const h=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-dev-short-v1|'+devkStr(dk))));
+  const v=[];let acc=0,bits=0;
+  for(const b of h.slice(0,5)){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
+  const s=v.map(x=>LC_ABC[x]).join('');return s.slice(0,4)+'-'+s.slice(4,8);
 }
 /* ===== HUSH LINKCODE END ===== */
 const pubFp=async j=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(String(j.x)+'.'+String(j.y)))));

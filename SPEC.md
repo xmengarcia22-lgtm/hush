@@ -102,7 +102,7 @@ The client tries its device key first and falls back to the account key when the
 | `directory/<h>` | anyone, rate-limited (the sign-up screen checks availability before an account exists) | only `h`, doc.handle == h, doc.sig == proving key | only `h`; `ecdh`/`sig`/`kv` may change only if `kv` increases and the connection proved with the account key (not a device key) | never |
 | `search/<h>` | query only, see 7.6 | only `h`, doc.h == h | only `h` | only `h` |
 | `presence/<h>` | anyone proven, batched | only `h` | only `h` | only `h` |
-| `phones/<hash>` | anyone proven | only `h` == doc.handle | only `h` == doc.handle | only stored doc.handle |
+| `phones/<hash>` | nobody: matching is off, 12.4 | nobody | nobody | only stored doc.handle |
 | mailbox of `h` | pull / ack only by `h` | drop by anyone, see 6 | – | ack by `h` |
 
 The server reads the `devs` entries for one purpose only: to check a device-key proof. It never stores anything about devices beyond those signed entries on the profile. Until stage 4 lands, everything under `channels/` requires a proven connection and nothing more.
@@ -115,13 +115,37 @@ Five collections are addressed by secrets the client derives itself, so knowing 
 |---|---|---|---|---|
 | `accounts/<loc>` | anyone | anyone, if absent | never | anyone |
 | `logins/<tag>` | anyone | anyone, if absent | never | never |
-| `linkreqs/<tag>` | anyone | anyone | anyone, state machine in 9.3 | anyone |
+| `linkreqs/<tag>` | anyone | a connection that confirmed the email by code (`linkOk`) | that, or a device of the account: proven as the username of the tag, or holding the login's password box (`login.gate`), state machine in 9.3 | the same as update |
 | `vault/<id>` | anyone | anyone | anyone | never |
 | `backup/<id>` | anyone | anyone | anyone | anyone |
 
 ### 4.4 Removed from the old model
 
 `owners/*`, `owners/*/devices/*`, `uids/*` and the `_uid` / `_by` stamps on every write are gone. The server rejects any document that contains a key beginning with `_`.
+
+### 4.5 Password boxes and the login gate
+
+A password box holds the account's keys, sealed with a key stretched from the password (PBKDF2-SHA-256, 600,000 rounds; the second half of the 512-bit output). The first half, hashed, is `x`. Until release 9 the box lived at `accounts/<x>`, so anyone could test a password guess by reading an address, with no limit per account, since the server could not tell which login an address belonged to.
+
+From release 9 the box lives at `accounts/<HMAC-SHA-256(gate key, "hush-login-gate-v1|" + t + "|" + x)>`, where `t` is the login's tag (`SHA-256("hush-login-v1:" + login)`, the username included) and the gate key is the server's `addr.key`. Only the server can make that address: the page asks with `login.gate {t, x}` and gets `{loc}` back. Every ask that finds no box is counted against `t`, whoever asks (`pwMissesPerLogin`, 10 an hour); asks that find the box are not counted, so a person who knows their password is never charged for it. While a login is out of tries every answer waits, the right password included, so the wait says nothing about which guess was right. Someone who steals the database without `addr.key` can no longer test guesses offline at all; with `addr.key` (or as the server) they still can, which is why an owner or admin of a group or channel needs a password of 12 characters or more (4.6).
+
+Trade-off, stated plainly: the server now learns, when a box is opened or saved, which login tag the box belongs to. It could already see this on the live connection (the page reads the reservation and the box together); now it is a property of the address. Separate logins of one account still have separate, unlinked boxes.
+
+Boxes from before the gate are moved the first time they are opened (`findBox`: read `accounts/<x>`, write it behind the gate, delete the old one), and a signed-in device moves the boxes of all its logins on its next load, without the password. Until a box has moved, its old address can still be guessed without a limit: accounts with no device that loads release 9 stay exposed this way until they log in once.
+
+---
+
+### 4.6 Power roles need a secured account (release 9)
+
+Passwords for everyone are at least 8 characters, not all lowercase letters, not common, and not containing the person's own username, email or number. An owner or admin of a group or channel holds keys to other people's chats, so they need a stronger password: 12 characters or more, passing the same checks.
+
+The server never sees a password, so it can't check one. Instead the page sets the account's secured mark, `secure/<h>` = `{ts}`, once it has seen a strong password for the account: at sign-up, at log-in, at a password change, or in the prompt below. Only the account can set it, it is never changed or removed, and nobody can read it but the server, so nobody learns whose password is weak. A changed page could set the mark without a strong password; that weakens only its own account.
+
+The server enforces it in the only two places a connection gains a power level: `chat.create` of a group or channel is refused with `secure`, and `chat.open` with an owner or admin key opens at member level and answers `held: "owner" | "admin"`. Every owner or admin action checks the connection's level, so the tools of an unsecured owner or admin wait. That covers every way into a role: creating, being promoted (the new admin's device opens with the admin key), holding a role from before release 9, and a new device of the account. Ownership can't be handed over in this version (5); a hand-over would go through `chat.open` too. `powerNeedsSecure: false` turns the rule off for development and tests only: a server running with `NODE_ENV=production` ignores it, so there the rule is always on.
+
+The page asks at that moment, only when the account isn't secured: "Secure your account", naming the role and the chat ("You're now an admin of …. Admins hold the keys to this channel, so your password needs to be stronger"), with a suggestion to turn on the app lock. Someone whose current password is already 12 characters or more just enters it. Skipping (Not now, the close button, or Back) means: a new group or channel is not created; a role already held stays paused, read and post as a member, asked about again on the next load. Once secured, the page opens the paused chats again and gets the level its keys give.
+
+The highest tier a person has held (none, admin, owner) is kept in their encrypted vault (`prefs.tier`), so the server never sees it. When it climbs past the best so far, the page fires `hush:tier-up` on `window` with `{tier}`, the hook for an upgrade card. A device of an account from before release 9 records the current tier silently the first time.
 
 ---
 
@@ -500,6 +524,9 @@ Buckets live in memory. "address bucket" means a token bucket keyed by `HMAC(hou
 | `hello`, `prove` | address | 30 / min; 10 failed proofs per 10 min then 10-minute block |
 | `accounts`, `logins`, `phones`, `recovery` reads | address and per path | 20 / min per address, 60 / h per path (`blindReadsPerMinPerAddr`, `blindReadsPerHourPerPath`); `get` and every path of an `mget` alike, proven or not |
 | `linkreqs` reads | address and per path, counted apart from the row above | 120 / min per address, 2000 / h per path (`linkReadsPerMinPerAddr`, `linkReadsPerHourPerPath`). A new device polls its request every 3 s for up to 5 minutes and each device that may let it in polls every 3.5 s, and several of them share one network address, so the strict count above starved them. A request holds only the asking device's public key, its name and the sealed handoff |
+| `code.send` | address and email or number | 6 at once then 20 / day per address (`codeSendsBurstPerAddr`, `codeSendsPerDayPerAddr`); 3 at once then 8 / day per email or number (`codeSendsBurstPerLogin`, `codeSendsPerDayPerLogin`); 60 s between two for one email (`codeCooldownMs`) |
+| `code.check` wrong codes | email or number, whoever types them | 10 / day (`codeMissesPerDayPerLogin`), on top of 5 tries per code; once used up even the right code waits |
+| `login.gate` asks that find no box | login tag, whoever asks (also counted as a blind lookup of the address) | 10 / h per login (`pwMissesPerLogin`); while a login is out of tries every answer waits, the right password included (4.5) |
 | `directory` create (a sign-up) | proof of work on the connection, with an address count as a backstop | the create must bring a nonce with `sha256("hush-signup-v1\|<salt>\|<nonce>")` starting with `signupPowBits` (16) zero bits, the salt being the connection's own and good for one account; the page fetches the puzzle when the sign-up screen opens and solves it while the person types, so no step is visible and nothing is added to the tap. Behind it, 100 a day per address under a second salt that turns daily (`signupsPerDayPerAddr`), since the hourly tag would reset the count |
 | `POST /drop` | address, recipient | 30 / h per address, charged on every attempt; 100 / h per recipient; proof of work once a recipient's hour is half used, or always for a recipient with `requests: true` (section 6) |
 | `chat.create` | connection | 200 / day (`chatCreatesPerDay`) |
@@ -666,6 +693,12 @@ Outside the page's control: the browser's own password manager, which is offered
 
 ---
 
+### 12.4 Phone numbers (release 9)
+
+Finding friends by phone number is off. A number was never confirmed, so anyone could save yours first and be matched to your friends, who have your number in their contacts, under the name they saved for you. Until numbers can be confirmed by text message, the server refuses to read or make `phones/` entries; an owner can still delete theirs, from Settings. The page no longer looks numbers up (contacts are not matched, and "Invite by phone number" only invites). Login reservations by phone number are a separate thing and still work as logins (14, item 10).
+
+---
+
 ## 13. Changes to the client implied by this specification
 
 Line numbers refer to the single-file index.html of the time and are for orientation only; the code now lives in the files of 12.1.
@@ -706,7 +739,7 @@ Line numbers refer to the single-file index.html of the time and are for orienta
 7. **Login existence check.** Keep the "no account with that email" pre-check, which is an enumeration oracle, or remove it from the sign-in flow. Default: keep, rate-limited.
 8. **Plain `type` on chat records.** Keep plaintext (default) or fold into sealed `meta` at the cost of touching every `typeOf` call site.
 9. **Directory read rate.** Decided: 600 per minute per connection (9.4), since the page refreshes every contact's profile each minute.
-10. **Unverified logins and phone entries.** Parked until stage 8. A login reservation and a phone entry are first come, first served, and a reservation is never deleted: anyone can take another person's email or number before they do, and a taken phone entry points searches by that number at the taker. Closing this needs a verification code by email or SMS at sign-up, which needs the domain and a way to send; both come with stage 8. Decided 2026-10-09: sign-up takes no code. It asks for an email or a phone number (one is required), a password, a username and a display name, in that order, and is done at once; the email or number is reserved for the account but not confirmed. Login is one field that takes any of the account's email, phone number or username, plus the password: each has its own password box at an address made from that login and the password, so the server cannot tell that the boxes belong to one account, and a password change replaces all of them. Confirming an email is for optional account recovery, set up in Settings → Advanced: the server emails a six-digit code (`code.send`, through Resend when `RESEND_API_KEY` is set, on screen otherwise) and checks it (`code.check`). Only a connection that has just confirmed the email may then write the account's recovery record, at `recovery/<SHA-256("hush-recover-v1:<username>|<email>")>`. The record names the username but not the email, and it is never readable, not even by its owner. "Forgot password?" works with that email, or with the email the account signed up with (the server answers `via: "email"` and the request goes to that email's own address, which the account's devices watch): a fresh code for it, checked for the username, is the only thing that lets a connection open a link request (`linkreqs/<login tag>` in state `wait`), after which a device that is still logged in scans the new device's QR code. An email alone never opens an account, since the server holds no keys. Still open: SMS, and the old phone and email reservations, which stay unverified.
+10. **Unverified logins and phone entries.** Release 9: phone entries can no longer be read or made (12.4), so a taken number no longer points anyone at the taker; login reservations stay unconfirmed. Also release 9: the new-device approval code (QR or typed) covers the new device's own key as well as its one-time key (`linkFp`), so a server, or anyone who can edit a waiting request, can no longer swap in a device key of its own for the approving device to sign; both devices show the start of that key (`devShort`, 8 symbols) to compare. Parked until stage 8. A login reservation and a phone entry are first come, first served, and a reservation is never deleted: anyone can take another person's email or number before they do, and a taken phone entry points searches by that number at the taker. Closing this needs a verification code by email or SMS at sign-up, which needs the domain and a way to send; both come with stage 8. Decided 2026-10-09: sign-up takes no code. It asks for an email or a phone number (one is required), a password, a username and a display name, in that order, and is done at once; the email or number is reserved for the account but not confirmed. Login is one field that takes any of the account's email, phone number or username, plus the password: each has its own password box at an address made from that login and the password, so the server cannot tell that the boxes belong to one account, and a password change replaces all of them. Confirming an email is for optional account recovery, set up in Settings → Advanced: the server emails a six-digit code (`code.send`, through Resend when `RESEND_API_KEY` is set, on screen otherwise) and checks it (`code.check`). Only a connection that has just confirmed the email may then write the account's recovery record, at `recovery/<SHA-256("hush-recover-v1:<username>|<email>")>`. The record names the username but not the email, and it is never readable, not even by its owner. "Forgot password?" works with that email, or with the email the account signed up with (the server answers `via: "email"` and the request goes to that email's own address, which the account's devices watch): a fresh code for it, checked for the username, is the only thing that lets a connection open a link request (`linkreqs/<login tag>` in state `wait`), after which a device that is still logged in scans the new device's QR code. An email alone never opens an account, since the server holds no keys. Still open: SMS, and the old phone and email reservations, which stay unverified.
 11. **Wrap salt without the epoch.** Decided and built: wraps made from stage 7 on name the epoch in the salt (5.3); wraps from before still open, under the client's replay rule.
 12. **Secrets derived from the signing key.** Decided and built: accounts created from stage 7 on carry a private secret `own` for ownership tokens and owner keys (5.1, 5.7); accounts from before keep the old derivation, so nothing of theirs changes hands.
 13. **Sign-up limit per address.** Decided and built: proof of work on every sign-up, solved by the page out of sight, with 100 a day per address as a backstop only (9.4).

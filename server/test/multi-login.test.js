@@ -85,7 +85,7 @@ test('a new password replaces the box behind every login, and the old one opens 
     // What the Change password sheet does.
     const NEW = 'green ferry past the old mill';
     const after = await pg.auth.saveLoginBoxes(id, pg.auth.loginsOf('jordanhale'), NEW);
-    for (const [l, loc] of Object.entries(before)) if (after[l] !== loc) await pg.db.doc('accounts/' + loc).delete();
+    for (const [l, loc] of Object.entries(before)) if (after[l] !== loc) await pg.auth.dropLoginBox(l, loc);
     pg.auth.rememberLogin('jordanhale', { login: 'jordanhale', loc: after.jordanhale, all: after }, true);
     assert.deepEqual(pg.auth.loginInfo('jordanhale').all, after);
     assert.deepEqual(pg.S.prefs.login.all, after);
@@ -125,7 +125,7 @@ test('healLogin puts back every reservation, and asks for the password again whe
     const pg2 = page(T.url);
     try {
       await pg2.db.ready;
-      T.srv.store.delete('accounts/' + all.jordanhale, {}, SYSTEM);
+      assert.equal(T.srv.store.delete('accounts/' + await pg.auth.boxLoc('jordanhale', all.jordanhale), {}, SYSTEM), true);
       await pg2.db.prove(await pg2.auth.proofFor(id));
       pg2.S.me = id;
       pg2.ls.set('hush:login:jordanhale', { login: 'jordanhale', loc: all.jordanhale, all });

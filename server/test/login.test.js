@@ -42,10 +42,17 @@ test('password rules: length, the common list, and nothing of your own in it; th
     const { pwProblem, pwStrength } = pg.auth;
     const phone = '+12125550134', email = 'jordan.hale@example.com';
     assert.equal(pwProblem('short7!', phone), 'Use at least 8 characters.');
-    assert.equal(pwProblem('mydogmax', phone), null, 'eight characters is enough');
+    assert.equal(pwProblem('mydogmax', phone), 'Add a capital letter, a number, a space or a symbol.', 'eight lowercase letters are refused');
+    assert.equal(pwProblem('mydogmaxrunsfar', phone), 'Add a capital letter, a number, a space or a symbol.', 'so are fifteen');
+    assert.equal(pwProblem('Mydogmax', phone), null, 'eight characters with a capital are enough');
+    assert.equal(pwProblem('mydogmax1', phone), null, 'or with a number');
     for (const common of ['password', 'Password1', 'iloveyou', 'qwertyuiop', '12345678', 'letmein123']) assert.equal(pwProblem(common, phone), 'This password is too common.', common);
     assert.equal(pwProblem('abababab', phone), 'This password is too easy to guess.');
     assert.equal(pwProblem('aaaaaaaaaa', phone), 'This password is too easy to guess.');
+    const { pwStrongEnough } = pg.auth;
+    assert.equal(pwStrongEnough('Mydogmax12!', phone), false, 'a power role asks for 12 or more');
+    assert.equal(pwStrongEnough('Mydogmax123!', phone), true);
+    assert.equal(pwStrongEnough('password1234', phone), false, 'and still nothing common');
     assert.match(pwProblem('x2125550134x', phone), /phone number/);
     assert.match(pwProblem('my 555-0134 pw', phone), /phone number/, 'the local part of the number, however it is punctuated');
     assert.match(pwProblem('jordan.hale!', email), /email/);
@@ -58,11 +65,12 @@ test('password rules: length, the common list, and nothing of your own in it; th
     assert.deepEqual(pwStrength('', phone), { level: 0, label: '' });
     assert.equal(pwStrength('short7!', phone).label, 'Weak');
     assert.equal(pwStrength('password', phone).label, 'Weak', 'refused passwords always read as weak');
-    assert.equal(pwStrength('mydogmax', phone).label, 'Weak', 'eight lowercase letters pass but are weak');
+    assert.equal(pwStrength('mydogmax', phone).label, 'Weak', 'all lowercase, so refused, so weak');
     assert.equal(pwStrength('mydogmax12', phone).label, 'Fair');
     assert.equal(pwStrength('MyDogMax12', phone).label, 'Good');
     assert.equal(pwStrength('blue truck on main street', phone).label, 'Strong');
-    assert.equal(pwStrength('correcthorsebatterystaple', phone).label, 'Good', 'long but one kind of character');
+    assert.equal(pwStrength('correcthorsebatterystaple', phone).label, 'Weak', 'all lowercase letters is refused, however long');
+    assert.equal(pwStrength('correct horse battery staple', phone).label, 'Strong', 'the same words with spaces pass');
     assert.equal(pwStrength('P@ssw0rd2024!', phone).label, 'Strong');
     assert.equal(pwStrength('x2125550134x!A', phone).label, 'Weak', 'contains the phone number');
   } finally { pg.close(); await T.stop(); }
@@ -194,7 +202,7 @@ test('the login still opens when the server lost its reservation, and healLogin 
     try {
       await pg2.db.ready;
       T.srv.store.delete('logins/' + tag, {}, SYSTEM);
-      assert.equal(T.srv.store.delete('accounts/' + loc, {}, SYSTEM), true);
+      assert.equal(T.srv.store.delete('accounts/' + await pg.auth.boxLoc(login, loc), {}, SYSTEM), true, 'the box, at its address behind the gate');
       await pg2.db.prove(await pg2.auth.proofFor(r.id));
       pg2.S.me = r.id;
       pg2.ls.set('hush:login:jordan', { login, loc });

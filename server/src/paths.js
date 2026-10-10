@@ -31,6 +31,8 @@ const KINDS = Object.freeze({
   linkreqs:  { top: 'linkreqs',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   // Email recovery (SPEC.md 14.10): one record per account and email, at SHA-256("hush-recover-v1:<username>|<email>").
   recovery:  { top: 'recovery',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
+  // A power role needs a secured account (SPEC.md 4.6): the mark that the account's password was checked as strong.
+  secure:    { top: 'secure',    depth: 2, id: HANDLE, backend: 'docs' },
   vault:     { top: 'vault',     depth: 2, id: VAULT,  backend: 'docs', keyed: true },
   backup:    { top: 'backup',    depth: 2, id: BACKUP, backend: 'docs', keyed: true },
   channels:  { top: 'channels',  depth: 2, id: CID,    backend: 'docs' },

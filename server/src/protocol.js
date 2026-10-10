@@ -5,7 +5,7 @@
 // being applied, so a writer who also subscribes sees the push before the
 // acknowledgement.
 
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, createHmac } from 'node:crypto';
 import { HushError, fail } from './errors.js';
 import { log } from './log.js';
 import { TokenBucket } from './limits.js';
@@ -59,6 +59,10 @@ function takeWrite(c, p) {
 // sha256("hush-signup-v1|<this connection's salt>|<nonce>") starts with `signupPowBits` zero bits. The policy refuses
 // the create without it (answering `pow` with the salt and bits, so the page can solve and try again); a solution is
 // good for one account. The per-address daily count is only a backstop behind it.
+// A power role (owner or admin of a group or channel) needs a secured account (SPEC.md 4.6). The server can't see a
+// password, so it checks the mark the account sets once its password was checked as strong.
+// powerNeedsSecure: false switches the rule off for development and tests only; production ignores it.
+const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
 
 const HANDLERS = {
@@ -132,6 +136,25 @@ const HANDLERS = {
     return {};
   },
 
+  // ---- password boxes (SPEC.md 4.5) ----
+  // A box lives at HMAC(server secret, login tag | stretched password). The page sends the tag and the stretched password
+  // (never the password); only this server can turn them into an address, so guesses have to come through here, and a
+  // guess that finds no box is counted against that login, whoever makes it. While a login is out of tries every answer
+  // waits, the right password included, so the wait tells nothing about which guess was right.
+  'login.gate'(c, f) {
+    if (typeof f.t !== 'string' || !ID.ADDR43.test(f.t) || typeof f.x !== 'string' || !ID.ADDR43.test(f.x)) fail('invalid', 'login.gate: "t" and "x" must be 43-character addresses');
+    const { pwMisses, blindReads, store } = c.ctx;
+    if (!blindReads.take(c.addrTag)) fail('ratelimit', 'too many lookups from here; slow down');
+    if (!pwMisses.peek(f.t)) {
+      const mins = Math.max(1, Math.ceil((1 - pwMisses.tokensLeft(f.t)) / (c.limits.pwMissesPerLogin / 3600) / 60));
+      fail('ratelimit', 'too many wrong passwords for this login; wait ' + mins + ' minute' + (mins === 1 ? '' : 's'));
+    }
+    const loc = createHmac('sha256', store.addrKey).update('hush-login-gate-v1|' + f.t + '|' + f.x).digest('base64url');
+    if (!store.get('accounts/' + loc, SYSTEM).d) pwMisses.take(f.t);
+    else c.linkOk.add(f.t);   // holding this login's box proves it is the account: this connection may answer its device requests
+    return { loc };
+  },
+
   // The sign-up puzzle, for a page to solve while the person is still filling in the form.
   'signup.pow'(c) { return c.signupChallenge(); },
 
@@ -156,11 +179,12 @@ const HANDLERS = {
   'code.check'(c, f) {
     const to = codeLogin(f.to);
     if (!to) fail('invalid', 'code.check: "to" must be an email address or a phone number');
-    const { codes, codeChecks } = c.ctx;
+    const { codes, codeChecks, codeMisses } = c.ctx;
     if (!codes) fail('invalid', 'codes are not sent here');
     if (!codeChecks.take(c.addrTag)) fail('ratelimit', 'too many code checks from here; wait a few minutes');
+    if (!codeMisses.peek(codes.tag(to))) fail('ratelimit', 'too many wrong codes for this address today; try again tomorrow');
     const r = codes.check(to, typeof f.code === 'string' ? f.code : '');
-    if (r === 'wrong') fail('denied', 'that code is not right');
+    if (r === 'wrong') { codeMisses.take(codes.tag(to)); fail('denied', 'that code is not right'); }
     if (r === 'none') fail('notfound', 'no code is waiting; ask for a new one');
     // What a confirmed email unlocks on this connection, and nothing more (SPEC.md 14.10):
     //  - signed in: saving this email as the account's recovery email;
@@ -206,6 +230,7 @@ const HANDLERS = {
 
   // ---- room keys (SPEC.md 5) ----
   'chat.create'(c, f) {
+    if (f.d && f.d.type !== 'dm' && !secured(c)) fail('secure', 'owning a group or channel needs a stronger password; secure your account first');
     if (!c.creates.take()) fail('ratelimit', 'too many new chats today');
     const r = c.ctx.store.createChat({ cid: f.cid, d: f.d, caps: f.caps }, c.actor());
     c.chats.set(f.cid, { level: r.level, epoch: r.epoch, type: r.type });
@@ -216,6 +241,13 @@ const HANDLERS = {
     let r;
     try { r = c.ctx.store.openChat({ cid: f.cid, cap: f.cap }, c.actor()); }
     catch (e) { if (e instanceof HushError && e.code === 'denied') c.ctx.openFails.take(c.addrTag); throw e; }
+    // An owner or admin whose account isn't secured opens at member level: their tools wait, and `held` says why.
+    if (r.type !== 'dm' && (r.level === 'owner' || r.level === 'admin') && !secured(c)) {
+      const held = r.level;
+      r = { ...r, level: 'member' };
+      c.chats.set(f.cid, r);
+      return { level: r.level, epoch: r.epoch, held };
+    }
     c.chats.set(f.cid, r);
     return { level: r.level, epoch: r.epoch };
   },
@@ -256,7 +288,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeChecks, addrTag, dayTag, now, badges, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges, onClose }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
