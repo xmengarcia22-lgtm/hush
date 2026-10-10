@@ -393,13 +393,19 @@ const hasRecovery=h=>{const r=recLocal(h),v=S.me&&S.me.handle===h&&S.contactsRea
   return !!r||vOk};
 /* ===== HUSH RECOVERY END ===== */
 /* ===== HUSH AUTH BEGIN ===== */
-/* ---------- log in with email or phone + password ----------
+/* ---------- log in with username + password ----------
    The password never leaves the device. It's stretched (PBKDF2, 600k rounds) into two things:
    a secret address for your account on the server, and the key that locks your account keys.
-   The server only ever holds a locked box at an address it can't connect to your email or number. */
+   The server only ever holds a locked box at an address it can't connect to your username.
+   Accounts made before sign-up took a username and password log in with their email or phone number instead, so a
+   "login" is one of three things: a username (lowercase, as in the directory), an email, or +digits. */
+const isHandleLogin=l=>typeof l==='string'&&/^[a-z0-9_]{3,20}$/.test(l);
+function normEmail(s){s=String(s||'').trim().toLowerCase();return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s)?s:null}
 function normLogin(s){
   s=String(s||'').trim();if(!s)return null;
-  if(s.includes('@')){s=s.toLowerCase();return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s)?s:null}
+  const u=s.replace(/^@/,'');
+  if(/^[A-Za-z0-9_]{3,20}$/.test(u)&&(/[A-Za-z_]/.test(u)||s.startsWith('@')))return u.toLowerCase(); // a username (digits only: write it as @123)
+  if(s.includes('@'))return normEmail(s);
   return normPhone(s);
 }
 /* Passwords: at least 8 characters, not on the built-in list of common passwords, and not containing the
@@ -418,7 +424,7 @@ function pwProblem(pw,login,handle){ // null when the password is acceptable, el
   if(COMMON_PW.has(low))return 'This password is too common.';
   if(/^(.+?)\1+$/.test(low)||/^(?:0?1234567890?|9876543210)+$/.test(low))return 'This password is too easy to guess.';
   if(handle&&low.includes(String(handle).toLowerCase()))return 'Password can\u2019t contain your username.';
-  if(login){const l=String(login).toLowerCase();
+  if(login&&!isHandleLogin(login)){const l=String(login).toLowerCase();
     if(l.includes('@')){const local=l.split('@')[0];if(low.includes(l)||(local.length>=4&&low.includes(local)))return 'Password can\u2019t contain your email.'}
     else{const d=l.replace(/\D/g,''),pd=low.replace(/\D/g,'');if(d.length>=7&&(pd.includes(d)||pd.includes(d.slice(-7))))return 'Password can\u2019t contain your phone number.'}}
   return null;
@@ -455,13 +461,14 @@ async function openLoginBox(login,pw){
 }
 /* One login attempt, three possible answers:
      in       the box at the address made from this login and password opened: here is the account
-     wrongpw  no box there, but this login is reserved, so the password must be wrong
-     new      no box and no reservation: nobody has signed up with this login
+     wrongpw  no box there, but this login is taken (the username exists, or the email or number is reserved),
+              so the password must be wrong
+     new      neither: nobody has signed up with this login
    The box itself is the real test. It is looked up first and on its own, so a login still works when the
    reservation is missing (a server whose data was reset while this account's profile was republished). */
 async function tryLogin(login,pw){
   const {loc,key}=await loginSecrets(login,pw);
-  const [rec,box]=await Promise.all([S.db.doc('logins/'+await loginTag(login)).get(),S.db.doc('accounts/'+loc).get()]);
+  const [rec,box]=await Promise.all([S.db.doc(isHandleLogin(login)?'directory/'+login:'logins/'+await loginTag(login)).get(),S.db.doc('accounts/'+loc).get()]);
   if(box.exists)return {kind:'in',id:await unsealBundle(box.data(),key),loc};
   return {kind:rec.exists?'wrongpw':'new'};
 }
@@ -478,17 +485,40 @@ const loginInfo=h=>ls.get('hush:login:'+h,null);
    vault (prefs.login) so it survives a cleared or partitioned browser, exactly as recovery words do (prefs.rec).
    Without the vault copy, a login that is saved for good on the server (its reservation can never be deleted)
    looks like "Not set up" again the moment the local note is lost. rememberLogin writes both. */
-function rememberLogin(h,rec){
-  if(!rec||!rec.login)return;const v={login:rec.login};if(rec.loc)v.loc=rec.loc;
+/* An account can be logged in to with any of its logins: its username, and the email or phone number given at sign-up
+   (older accounts: just that email or number). Each has its own password box, at an address made from that login and
+   the password, so the server can't tell that two boxes belong to one account. The note keeps, besides the login this
+   device used, `all`: every login of the account with its box address, so a password change replaces every box. */
+const hintOf=(login,loc,all)=>Object.assign({login},loc?{loc}:{},all&&Object.keys(all).length?{all}:{});
+const sameHint=(a,b)=>!!a&&!!b&&JSON.stringify(hintOf(a.login,a.loc,a.all))===JSON.stringify(hintOf(b.login,b.loc,b.all));
+// replace: the boxes in rec.all are now all there is (after a password change); otherwise they are added to what is known.
+function rememberLogin(h,rec,replace){
+  if(!rec||!rec.login)return;const old=ls.get('hush:login:'+h,null)||{};
+  const all=Object.assign({},replace?{}:old.all||{},rec.all||{});if(rec.loc)all[rec.login]=rec.loc;
+  const v=hintOf(rec.login,rec.loc,all);
   ls.set('hush:login:'+h,v);
-  if(S.me&&S.me.handle===h&&S.contactsReady){const p=P(),cur=p.login;
-    if(!cur||cur.login!==v.login||cur.loc!==v.loc){p.login=v;saveContacts()}}
+  if(S.me&&S.me.handle===h&&S.contactsReady){const p=P();
+    if(!sameHint(p.login,v)){p.login=hintOf(v.login,v.loc,replace?all:Object.assign({},(p.login&&p.login.all)||{},all));saveContacts()}}
 }
-// On load, keep the two copies in step: push a local-only note up to the vault, or restore a lost note from it.
+// Every login the account is known to have here, the username always among them.
+const loginsOf=h=>{const li=loginInfo(h)||{};return [...new Set([h,...(li.login?[li.login]:[]),...Object.keys(li.all||{})])]};
+// On load, keep the two copies in step: push a local-only note up to the vault, or restore a lost note from it. The
+// vault is shared by all of the account's devices, so for the box addresses it wins; this device adds what it alone knows.
 function reconcileLoginHint(local,vault){
-  if(local&&local.login){if(!vault||vault.login!==local.login||vault.loc!==local.loc)return {toVault:{login:local.login,...(local.loc?{loc:local.loc}:{})}};return {}}
-  if(vault&&vault.login)return {toLocal:{login:vault.login,...(vault.loc?{loc:vault.loc}:{})}};
+  if(local&&local.login){
+    const all=Object.assign({},local.all||{},(vault&&vault.all)||{}),merged=hintOf(local.login,local.loc,all),out={};
+    if(!sameHint(vault,merged))out.toVault=merged;
+    if(!sameHint(local,merged))out.toLocal=merged;
+    return out}
+  if(vault&&vault.login)return {toLocal:hintOf(vault.login,vault.loc,vault.all)};
   return {};
+}
+// A box for each login under one password, made side by side; returns {login: box address}. A box that is already
+// there for this login and password (the same address) counts as made.
+async function saveLoginBoxes(id,logins,pw){
+  const all={};
+  await Promise.all(logins.map(async l=>{try{all[l]=await saveLoginBox(id,l,pw)}catch(e){if(e&&e.code==='exists')all[l]=(await loginSecrets(l,pw)).loc;else throw e}}));
+  return all;
 }
 /* After a server reset the profile comes back by itself (republishSelf puts the keys back), so the login has to
    come back too, or nobody could log in with it again once this device logs out. The reservation is re-made from
@@ -497,11 +527,28 @@ function reconcileLoginHint(local,vault){
 const loginHealed=new Set();
 async function healLogin(id){
   const h=id.handle,li=loginInfo(h);if(!S.db||!li||!li.login||loginHealed.has(h))return;loginHealed.add(h);
-  try{const ref=S.db.doc('logins/'+await loginTag(li.login));if((await ref.get()).exists)return;
-    await ref.set({ts:Date.now()});
+  try{for(const l of loginsOf(h)){if(isHandleLogin(l))continue; // a username needs no reservation: the profile itself holds the name
+      const ref=S.db.doc('logins/'+await loginTag(l));if(!(await ref.get()).exists)await ref.set({ts:Date.now()})}
     if(li.loc&&!(await S.db.doc('accounts/'+li.loc).get()).exists&&S.me===id){
       rememberLogin(h,{login:li.login});setTimeout(()=>{if(S.me===id)openSetupLogin('again')},700)}
   }catch{loginHealed.delete(h)}
+}
+/* ---------- email recovery (SPEC.md 14.10): optional, set up in Settings ----------
+   Proving an email (a code the server mails to it) and then saving a record at a blind address made from the
+   username and the email. The record names only the username; the email itself is never stored on the server, and
+   the server lets a connection write the record only after that connection confirmed the email with a code. When the
+   password is forgotten, the same email and a fresh code let a new device ask this account's devices to let it in. */
+const recoveryTag=async(h,email)=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-recover-v1:'+h+'|'+email))));
+const recEmailOf=h=>{const v=S.me&&S.me.handle===h&&S.prefs&&S.prefs.recEmail;return (v&&v.email)||((ls.get('hush:recEmail:'+h,null)||{}).email)||null};
+async function saveRecoveryEmail(h,email){ // after code.check on this connection; replaces an earlier email
+  const old=recEmailOf(h);await S.db.doc('recovery/'+await recoveryTag(h,email)).set({h,ts:Date.now()});
+  if(old&&old!==email)S.db.doc('recovery/'+await recoveryTag(h,old)).delete().catch(()=>{});
+  const v={email,ts:Date.now()};ls.set('hush:recEmail:'+h,v);
+  if(S.me&&S.me.handle===h&&S.contactsReady){P().recEmail=v;saveContacts()}
+}
+async function removeRecoveryEmail(h){
+  const old=recEmailOf(h);if(old)await S.db.doc('recovery/'+await recoveryTag(h,old)).delete();
+  ls.set('hush:recEmail:'+h,null);if(S.me&&S.me.handle===h&&S.contactsReady&&S.prefs&&S.prefs.recEmail){delete P().recEmail;saveContacts()}
 }
 async function rememberPw(login,pw){ // offers to save it in iCloud Keychain / Google Password Manager; Hush itself never stores it
   try{if(window.PasswordCredential&&navigator.credentials)await navigator.credentials.store(new PasswordCredential({id:login,password:pw,name:login}))}catch{}}
@@ -533,6 +580,33 @@ async function linkKey(myPriv,theirPubJwk,secret){ // secret only travels inside
 }
 const ephemeral=()=>crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
 const pubJwk=async k=>{const j=await crypto.subtle.exportKey('jwk',k.publicKey);return {kty:j.kty,crv:j.crv,x:j.x,y:j.y}};
+/* ===== HUSH LINKCODE BEGIN ===== */
+// The QR code's contents as something to type or paste, for an approving device with no camera. It carries the same two
+// things the QR does, so it protects the same way: the 128-bit secret that never goes through the server, and the
+// first 128 bits of the fingerprint of the asking device's key, which stops the server swapping in a key of its own.
+// Crockford base32 (no I, L, O or U; a typed O reads as 0, I and L as 1), 52 symbols plus 2 check symbols, shown in
+// groups of six. A mistyped symbol fails the check here instead of approving a request nobody can open.
+const LC_ABC='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const lcCheck=v=>{let a=0,b=0;for(const x of v){a=(a+x+1)%32;b=(b+a)%32}return [a,b]};
+function linkCode(secret,fp){ // secret: 16 bytes; fp: the pubFp string
+  const bytes=new Uint8Array(32);bytes.set(secret,0);bytes.set(unb64u(fp).slice(0,16),16);
+  const v=[];let acc=0,bits=0;
+  for(const b of bytes){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
+  if(bits)v.push((acc<<(5-bits))&31);
+  v.push(...lcCheck(v));
+  return v.map(x=>LC_ABC[x]).join('').replace(/(.{6})(?=.)/g,'$1-');
+}
+function parseLinkCode(text){ // {secret, fp} (16 bytes each), or null when it isn't a whole, correct code
+  const t=String(text||'').toUpperCase().replace(/[\s-]+/g,'').replace(/O/g,'0').replace(/[IL]/g,'1');
+  if(t.length!==54)return null;
+  const v=[];for(const ch of t){const i=LC_ABC.indexOf(ch);if(i<0)return null;v.push(i)}
+  const [a,b]=lcCheck(v.slice(0,52));if(a!==v[52]||b!==v[53])return null;
+  const out=new Uint8Array(32);let acc=0,bits=0,n=0;
+  for(const x of v.slice(0,52)){acc=(acc<<5)|x;bits+=5;if(bits>=8){if(n<32)out[n++]=(acc>>(bits-8))&255;bits-=8}acc&=(1<<bits)-1}
+  if(acc!==0)return null; // the four spare bits are always zero
+  return {secret:out.slice(0,16),fp:out.slice(16)};
+}
+/* ===== HUSH LINKCODE END ===== */
 const pubFp=async j=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(String(j.x)+'.'+String(j.y)))));
 /* ---------- private inbox (SPEC.md 6) ----------
    Each person has a box of sealed pointers at inbox/<username>/c/<random id>. Anyone signed in may leave one, but

@@ -174,6 +174,35 @@ const proofFor = (id, dev = null) => ({
   signAcct: (m) => signText(id.sigKey, m),
 });
 
+test('a connection idle past the server\u2019s sign-in challenge still signs in: it reconnects for a fresh one', async () => {
+  // The server forgets a challenge after nonceTtlMs. A new device that waited for approval, or a login screen left open,
+  // holds an old one; signing in with it used to fail with "the sign-in challenge expired; reconnect".
+  for (const [name, extra] of [['replaced before signing in', { nonceFreshMs: 700 }], ['replaced after the server refused', { nonceFreshMs: 600_000 }]]) {
+    const S = await startServer({ authz: 'standard', limits: { nonceTtlMs: 1200 } });
+    const alice = await makeIdentity('alice');
+    const db = openAdapter(S.url, { offlineWaitMs: 5000, ...extra });
+    try {
+      await db.ready;
+      await sleep(1500);                                          // older than the server accepts
+      await db.prove(proofFor(alice));
+      assert.equal(db.proven, 'alice', name);
+      await db.doc('directory/alice').set(directoryDoc(alice));
+      assert.equal((await db.doc('directory/alice').get()).exists, true, name);
+    } finally { await db.close?.(); await S.stop(); }
+  }
+});
+
+test('a sign-in the server refuses for another reason is still an error, not a reconnect loop', async () => {
+  const S = await startServer({ authz: 'standard' });
+  const db = openAdapter(S.url, { offlineWaitMs: 5000 });
+  try {
+    await db.ready;
+    const bad = { h: 'alice', pub: { x: 'x'.repeat(43), y: 'y'.repeat(43) }, dev: '', signDev: null, signAcct: async () => 'bad-signature' };
+    await assert.rejects(db.prove(bad), (e) => !!e && e.code !== 'offline');
+    assert.equal(db.proven, null);
+  } finally { await db.close?.(); await S.stop(); }
+});
+
 test('identity: the adapter proves on request, prefers the device key, survives restarts, and switches accounts cleanly', async () => {
   const S1 = await startServer({ authz: 'standard' });
   const port = Number(new URL(S1.url).port);

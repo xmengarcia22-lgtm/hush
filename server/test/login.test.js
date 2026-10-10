@@ -9,56 +9,12 @@
 //   - signing up with a username that exists is refused by the server
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import WebSocket from 'ws';
 
-import { startServer, sleep, appSource } from './helpers.js';
+import { startServer, sleep } from './helpers.js';
 import { SYSTEM } from '../src/store.js';
 
-const html = appSource();
+import { page, logOut, sameKeys } from './page-auth.js';
 
-// The page's source between two landmarks (the second one excluded).
-function lift(from, to) {
-  const a = html.indexOf(from);
-  assert.ok(a > 0, `the page's files contain ${JSON.stringify(from)}`);
-  const b = html.indexOf(to, a + from.length);
-  assert.ok(b > a, `the page's files contain ${JSON.stringify(to)} after ${JSON.stringify(from)}`);
-  return html.slice(a, b);
-}
-const line = (from) => lift(from, '\n');
-
-const SRC = [
-  line('const b64=buf=>'), line('const unb64=s=>'), line('const b64u=a=>'), line('const unb64u=s=>'),
-  line('const dispOk='), line('const validHandle='),
-  line('const EC={name:'),
-  lift('async function newIdentity(){', 'const jwk=xy=>'),
-  lift('function normPhone(s){', 'async function phoneHash('),
-  lift('function bundleOf(id){', 'async function linkKey('),
-  lift('async function proofFor(id){', 'async function bindDevice(id){'),
-  lift('/* ===== HUSH RECOVERY BEGIN ===== */', '/* ===== HUSH RECOVERY END ===== */'),
-  lift('/* ===== HUSH AUTH BEGIN ===== */', '/* ===== HUSH AUTH END ===== */'),
-].join('\n');
-const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,pwProblem,pwStrength,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,reserveLogin,reserveLoginConfirmed,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
-const build = new Function('S', 'ls', 'enc', 'dec', 'saveContacts', 'renderBanner', 'P', 'openSetupLogin', `${SRC}\nreturn {${EXPORTS}};`);
-
-const BEGIN = '/* ===== HUSH ADAPTER BEGIN ===== */';
-const END = '/* ===== HUSH ADAPTER END ===== */';
-const createHushAdapter = new Function(lift(BEGIN, END) + '\nreturn createHushAdapter;')();
-
-// One page's worth of state: the adapter, a localStorage stand-in, and the page's auth code bound to them.
-function page(url) {
-  const m = new Map();
-  const ls = {
-    get: (k, d) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : d),
-    set: (k, v) => { if (v === null || v === undefined) m.delete(k); else m.set(k, JSON.parse(JSON.stringify(v))); },
-    clear: () => m.clear(),
-  };
-  const db = createHushAdapter(url, { WebSocket, onStatus: () => {} });
-  const S = { db, me: null, prefs: null, contactsReady: false, ids: [] };
-  const calls = { setup: [] };
-  const auth = build(S, ls, new TextEncoder(), new TextDecoder(), () => {}, () => {}, () => S.prefs || (S.prefs = {}), (mode) => calls.setup.push(mode));
-  return { db, ls, S, auth, calls, close: () => db.close() };
-}
 
 const PHONE = '(212) 555-0134';
 const PW = 'blue truck on main street';
@@ -77,15 +33,7 @@ async function signUp(pg, handle, login, pw) {
   return { id, loc };
 }
 
-// The page's log-out: the device forgets everything about the account and the connection signs out.
-async function logOut(pg) {
-  pg.ls.clear();
-  pg.S.ids = [];
-  pg.S.me = null;
-  await pg.db.prove(null);
-}
 
-const sameKeys = (a, b) => a.sig.x === b.sig.x && a.sig.y === b.sig.y && a.ecdh.x === b.ecdh.x && a.ecdh.y === b.ecdh.y && a.sigPriv.d === b.sigPriv.d && a.ecdhPriv.d === b.ecdhPriv.d;
 
 test('password rules: length, the common list, and nothing of your own in it; the meter agrees', async () => {
   const T = await startServer({ authz: 'standard' });

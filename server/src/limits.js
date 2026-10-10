@@ -53,6 +53,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   queriesPerMin: 120,           // query + mget, per connection
   blindReadsPerMinPerAddr: 20,  // reads of accounts, logins, linkreqs and phones per address tag (SPEC.md 9.4)
   blindReadsPerHourPerPath: 60, // and per blind address, whoever asks
+  linkReadsPerMinPerAddr: 120,  // link requests have their own allowance: a new device and the devices that may let it in poll them
+                                // every few seconds, and several of them can share one network address (SPEC.md 9.4)
+  linkReadsPerHourPerPath: 2000,// and per link-request address, whoever asks: a device left open all day polls about 500 an hour
   directoryReadsPerMin: 600,    // profile reads per connection, every path of an mget counted (SPEC.md 9.4 asks for 60;
                                 // the page refreshes every contact's profile once a minute, so that would cut off anyone
                                 // with more than 60 contacts)
@@ -64,6 +67,11 @@ export const DEFAULT_LIMITS = Object.freeze({
   postsPerMin: 60,              // posts and comments per connection (SPEC.md 9.4 counts per chat; a connection is one person)
   sideWritesPerMin: 120,        // reactions, read marks and typing marks per connection
   invitesPerMinPerAddr: 20,     // chat.invite lookups per address tag (SPEC.md 5.5)
+  codeSendsPerHourPerAddr: 10,  // verification codes sent, per address tag (SPEC.md 14.10)
+  codeSendsPerHourPerLogin: 5,  // and per email or number, whoever asks, so nobody can flood one inbox
+  codeChecksPer10MinPerAddr: 30,// code checks per address tag; each code also dies after 5 wrong tries
+  codeTtlMs: 10 * 60_000,       // a code works for this long
+  codeCooldownMs: 60_000,       // and a new one can't be asked for the same email or number sooner than this
   subsPerConn: 600,
   docsPerSub: 1000,
   queryLimitMax: 1000,

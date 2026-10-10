@@ -2,9 +2,14 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadConfig } from './config.js';
+import { loadConfig, SERVER_ROOT } from './config.js';
 import { createServer } from './server.js';
 import { log } from './log.js';
+
+// Secrets that must not sit in the code or the service file (the Resend key) live in server/.env, which is never
+// committed. A value already in the environment wins over the file.
+const envFile = join(SERVER_ROOT, '.env');
+if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 const cfg = loadConfig();
 log.setEnabled(cfg.logging);
@@ -31,6 +36,7 @@ const lines = [
   cfg.origins === 'any' ? 'Allowed origins: any (HUSH_ORIGINS=*; never in production)' : cfg.origins.length ? `Allowed origins: ${cfg.origins.join(', ')}, and pages served from this host` : 'Allowed origins: pages served from this host only (set HUSH_ORIGINS for others)',
   cfg.trustProxy ? 'Client addresses: taken from X-Forwarded-For (behind Caddy)' : 'Client addresses: the socket\'s own (set HUSH_TRUST_PROXY=1 behind Caddy)',
   Object.keys(cfg.badges || {}).length ? `Badges: ${Object.entries(cfg.badges).map(([h, b]) => `@${h} ${b}`).join(', ')}` : 'Badges: none (set HUSH_BADGES to give some)',
+  cfg.mail.apiKey ? `Verification codes: emailed through Resend, from ${cfg.mail.from}` : 'Verification codes: shown on screen, nothing is emailed (no RESEND_API_KEY; testing only)',
 ];
 if (cfg.staticDir) lines.push(`Serving the app from: ${cfg.staticDir}`, `Open the app at: http://${host}:${port}/`);
 if (tls) {

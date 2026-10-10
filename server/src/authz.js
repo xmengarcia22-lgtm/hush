@@ -158,8 +158,24 @@ function standardCheck(a, op, p, ctx) {
       if (op === 'set' && ctx.prev) fail('exists', 'that login is already taken');
       if (op === 'update' || del) fail('denied', 'login reservations never change');
       return;
-    case 'linkreqs':
+    case 'recovery':
+      // Never read back, not even by its owner: code.check answers for it, and only to someone who just proved they
+      // can read the email. Only its own account writes or removes it, and writing it takes an email this connection
+      // has just confirmed with a code.
       if (list) noList();
+      if (read) fail('denied', 'recovery records cannot be read');
+      needProven(a);
+      if (op === 'update') fail('denied', 'recovery records are replaced, never edited');
+      if (ctx.prev && ctx.prev.h !== a.handle) fail('denied', 'that record belongs to another account');
+      if (del) return;
+      if (ctx.d && ctx.d.h !== a.handle) fail('denied', 'a recovery record must name its owner');
+      if (!(a.conn && a.conn.recoveryOk && a.conn.recoveryOk.has(p.id))) fail('denied', 'confirm the email with a code first');
+      return;
+    case 'linkreqs':
+      // A new device asks to be let in only after the email was confirmed with a code on this connection: the
+      // account's own recovery email, or (accounts from before usernames logged in) the email it logs in with.
+      if (list) noList();
+      if (write && ctx.d && ctx.d.state === 'wait' && !(a.conn && a.conn.linkOk && a.conn.linkOk.has(p.id))) fail('denied', 'confirm your recovery email with a code first');
       return;
     case 'vault':
       if (list) noList();

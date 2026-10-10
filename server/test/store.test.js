@@ -134,12 +134,13 @@ test('blind addresses are keyed before they touch the disk', () => {
   assert.ok(!rows[0].path.includes(loc) && rows[0].id !== loc, 'the raw address is not stored');
 });
 
-test('link requests: a waiting request is not replaced until it ages out', () => {
+test('link requests: a newer waiting request replaces an older one (writing one takes a confirmed email, authz.js)', () => {
   const tag = 'T4g'.padEnd(43, 'y');
   store.set('linkreqs/' + tag, { state: 'wait', ts: now(), pub: { x: 'a', y: 'b' }, dev: 'Pixel' });
-  throwsCode(() => store.set('linkreqs/' + tag, { state: 'wait', ts: now(), pub: { x: 'c', y: 'd' } }), 'conflict');
-  store.update('linkreqs/' + tag, { state: 'no' });
   store.set('linkreqs/' + tag, { state: 'wait', ts: now(), pub: { x: 'c', y: 'd' } });
+  assert.equal(store.get('linkreqs/' + tag).d.pub.x, 'c');
+  store.update('linkreqs/' + tag, { state: 'no' });
+  store.set('linkreqs/' + tag, { state: 'wait', ts: now(), pub: { x: 'e', y: 'f' } });
 });
 
 test('presence and typing live in memory only and expire', async () => {

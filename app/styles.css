@@ -443,6 +443,8 @@ body{overscroll-behavior:none;touch-action:manipulation}
 .demo-code strong{display:block;font-size:24px;letter-spacing:6px;color:var(--text);margin-top:4px;font-variant-numeric:tabular-nums}
 .code-in{width:100%;font-size:28px;letter-spacing:12px;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--text);font-variant-numeric:tabular-nums;box-sizing:border-box}
 .link-num{font-size:44px;font-weight:700;text-align:center;letter-spacing:4px;margin:8px 0 0;font-variant-numeric:tabular-nums}
+.link-code{text-align:center;margin:0 0 8px}
+.link-code-text{font:600 15px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1px;word-break:break-all;user-select:all;margin:4px 0 2px}
 .link-wait{display:flex;gap:10px;align-items:center;justify-content:center;color:var(--muted);margin:6px 0}
 .link-wait .spin{position:static;margin:0}
 .scan-box{position:relative;width:min(300px,80vw);aspect-ratio:1;margin:6px auto 8px;border-radius:18px;overflow:hidden;background:#000}

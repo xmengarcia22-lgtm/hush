@@ -29,6 +29,8 @@ const KINDS = Object.freeze({
   logins:    { top: 'logins',    depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   accounts:  { top: 'accounts',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   linkreqs:  { top: 'linkreqs',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
+  // Email recovery (SPEC.md 14.10): one record per account and email, at SHA-256("hush-recover-v1:<username>|<email>").
+  recovery:  { top: 'recovery',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   vault:     { top: 'vault',     depth: 2, id: VAULT,  backend: 'docs', keyed: true },
   backup:    { top: 'backup',    depth: 2, id: BACKUP, backend: 'docs', keyed: true },
   channels:  { top: 'channels',  depth: 2, id: CID,    backend: 'docs' },

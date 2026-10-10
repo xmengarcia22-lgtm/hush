@@ -30,7 +30,10 @@ function createHushAdapter(url,opts){
     else out.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);return l?out.slice(0,l):out};
   // ---- transport ----
   let ws=null,online=false,nextI=0,nextS=0,backoff=500,closed=false,pingT=null,offlineT=null,reconnectT=null,clockOffset=0,fatal='',readyRes;
-  let identity=null,proven=null,proofP=null,nonce=null;const proofWaiters=[];
+  let identity=null,proven=null,proofP=null,nonce=null,nonceAt=0,staleRetry=false;const proofWaiters=[];
+  // The server's sign-in challenge lasts two minutes. A connection that sat idle longer (a new device waiting for approval, a login screen
+  // left open) is replaced by a fresh one before signing in, and if the server still calls the challenge expired, once more.
+  const NONCE_FRESH_MS=opts.nonceFreshMs||90e3;
   const calls=new Map(),subs=new Map(),waiting=[];
   const opened=new Map(),opening=new Map(); // chats this connection holds a level for, and opens in progress
   const api={flat:true,addr:url,online:false,proven:null,error:'',identityError:null,badges:{},now:()=>Date.now()+clockOffset};
@@ -38,7 +41,7 @@ function createHushAdapter(url,opts){
   // The operator's badge list rides on the hello reply (SPEC.md 12.3); the page hears about a change through onBadges.
   const takeBadges=r=>{const nb=r&&r.badges&&typeof r.badges==='object'&&!Array.isArray(r.badges)?r.badges:{};if(JSON.stringify(nb)===JSON.stringify(api.badges))return;api.badges=nb;try{opts.onBadges&&opts.onBadges(nb)}catch{}};
   function connect(){if(closed)return;clearTimeout(reconnectT);reconnectT=null;let sock;try{sock=new WS(url)}catch(e){scheduleReconnect();return}ws=sock;
-    sock.onopen=()=>{if(sock!==ws)return;rawCall('hello',{v:1}).then(async r=>{if(sock!==ws)return;nonce=r.nonce;clockOffset=(typeof r.now==='number'?r.now:Date.now())-Date.now();backoff=500;takeBadges(r);
+    sock.onopen=()=>{if(sock!==ws)return;rawCall('hello',{v:1}).then(async r=>{if(sock!==ws)return;nonce=r.nonce;nonceAt=Date.now();clockOffset=(typeof r.now==='number'?r.now:Date.now())-Date.now();backoff=500;takeBadges(r);
         if(identity)await runProof();if(sock!==ws)return;   // sign in before anything else goes out
         setOnline(true);opened.clear();for(const sub of subs.values())sendSub(sub);waiting.splice(0).forEach(f=>f());startPing();readyRes()},
       e=>{if(e&&e.code==='version'){fatal='This copy of Hush is out of date for the server. Reload the page.';api.error=fatal;closed=true}try{sock.close()}catch{}})};
@@ -123,6 +126,11 @@ function createHushAdapter(url,opts){
       for(const [nonce,h] of await Promise.all(batch))if(zeroBits(h)>=bits)return nonce}}
   let work=null,working=null; // the solved {salt, nonce} for this connection, and the solving in progress
   function solveSignup(salt,bits){if(!working)working=solveWork('hush-signup-v1|'+salt+'|',bits).then(nonce=>{work={salt,nonce};return nonce}).finally(()=>{working=null});return working}
+  // ---- verification codes (SPEC.md 14.10): the server makes, sends and checks them. sendCode resolves to
+  // {sent:true} once the email is out, or {sent:false, demoCode} when nothing was sent (no mail key, or a phone). ----
+  api.sendCode=to=>call('code.send',{to});
+  // h: the username a forgotten password is for, so a confirmed recovery email lets this connection ask its devices.
+  api.checkCode=(to,code,h)=>call('code.check',h?{to,code,h}:{to,code}).then(r=>r.link?{link:true,via:r.via}:{link:false});
   api.warmSignup=()=>work||working?Promise.resolve():call('signup.pow',{}).then(r=>solveSignup(r.salt,r.bits)).then(()=>{},()=>{});
   async function setWithWork(fields){
     if(working)await working.catch(()=>{});
@@ -154,7 +162,10 @@ function createHushAdapter(url,opts){
       catch(e){if(!e||!['denied','invalid'].includes(e.code))throw e}}   // this device isn't listed on the profile yet: use the account key
     await rawCall('prove',{h,pub:idn.pub,sig:await idn.signAcct(sessionMsg(h,''))});proven=h;api.proven=h}
   function runProof(){if(proofP)return proofP;const h=identity.h;   // a proof for an account we have since switched away from settles nothing
-    proofP=doProve().then(()=>{if(identity&&identity.h===h){api.identityError=null;settleProof(null)}},e=>{if(identity&&identity.h===h){api.identityError=e;settleProof(e)}}).finally(()=>{proofP=null});return proofP}
+    proofP=doProve().then(()=>{if(identity&&identity.h===h){staleRetry=false;api.identityError=null;settleProof(null)}},
+    e=>{if(identity&&identity.h===h){
+      if(e&&e.code==='unauth'&&/expired/.test(e.message||'')&&!staleRetry){staleRetry=true;setTimeout(()=>{if(identity&&identity.h===h)reconnectNow()},0);return} // the waiting callers stay waiting: the next hello signs in
+      api.identityError=e;settleProof(e)}}).finally(()=>{proofP=null});return proofP}
   const awaitProof=()=>new Promise((res,rej)=>proofWaiters.push({res,rej}));
   function settleProof(err){for(const w of proofWaiters.splice(0))err?w.rej(err):w.res()}
   function dropSubs(){for(const sub of subs.values())sub.dead=true;subs.clear()}
@@ -166,7 +177,7 @@ function createHushAdapter(url,opts){
     const same=!!identity&&identity.h===idn.h;identity=idn;
     if(same){if(proven===idn.h)return Promise.resolve();if(proofP)return awaitProof()}
     else if(proven||proofP){dropSubs();reconnectNow();return awaitProof()}
-    if(live()&&!proven){const p=awaitProof();runProof();return p}
+    if(live()&&!proven){const p=awaitProof();if(Date.now()-nonceAt>NONCE_FRESH_MS)reconnectNow();else runProof();return p}
     return awaitProof();   // connecting or offline: the next hello signs in
   };
   // ---- snapshots ----
@@ -245,7 +256,7 @@ function hushServerUrl(){let s=String(HUSH_CONFIG.server||'').trim();
 async function connectServer(){
   const url=hushServerUrl();
   const unreachable=()=>'Can\u2019t reach the Hush server at '+url+'. Check that it\u2019s running, then this will reconnect on its own.';
-  const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner()},
+  const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner();if(on)checkForUpdate()},
     caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onEvict:cid=>onChatEvicted(cid),
     onBadges:b=>{S.badges=b||{};if(!S.me)return;renderList();if(S.chan){S.rendered=null;renderConv()}if(S.tab==='profile')setTab('profile')}}); // the operator's badge list came with the handshake
   await Promise.race([db.ready,new Promise(r=>setTimeout(r,5000))]);

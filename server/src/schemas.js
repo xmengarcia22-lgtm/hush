@@ -10,7 +10,7 @@ import { ID } from './paths.js';
 const KB = 1024, MB = 1024 * KB;
 
 export const MAX_BYTES = Object.freeze({
-  directory: 256 * KB, search: 4 * KB, presence: 1 * KB, phones: 1 * KB, logins: 1 * KB,
+  directory: 256 * KB, search: 4 * KB, presence: 1 * KB, phones: 1 * KB, logins: 1 * KB, recovery: 1 * KB,
   accounts: 2 * MB, linkreqs: 64 * KB, vault: 2 * MB, backup: 2 * MB,
   channels: 2 * MB, posts: 64 * KB, comments: 64 * KB, acts: 64 * KB, reads: 4 * KB, typing: 4 * KB,
   chunks: 256 * KB, inbox: 4 * KB,
@@ -19,7 +19,6 @@ export const MAX_BYTES = Object.freeze({
 const DAY = 86_400_000;
 export const POST_TS_PAST_MS = 30 * DAY;
 export const POST_TS_FUTURE_MS = 400 * DAY;
-export const LINKREQ_WAIT_MS = 10 * 60_000;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -91,6 +90,12 @@ function logins(ctx, d) {
   if (!num(d.ts)) bad('logins', 'ts');
 }
 
+function recovery(ctx, d) {
+  only(d, new Set(['h', 'ts']), 'recovery'); need(d, ['h', 'ts'], 'recovery');
+  if (!ID.HANDLE.test(d.h)) bad('recovery', 'h');
+  if (!num(d.ts)) bad('recovery', 'ts');
+}
+
 function box(what) {
   return (ctx, d) => {
     only(d, new Set(['iv', 'ct', 'ts']), what); need(d, ['iv', 'ct'], what);
@@ -111,11 +116,9 @@ function linkreqs(ctx, d) {
   if (d.devk !== undefined && !isPlain(d.devk)) bad(w, 'devk');
   if (d.iv !== undefined && !str(d.iv, 1, 64)) bad(w, 'iv');
   if (d.ct !== undefined && !str(d.ct, 1)) bad(w, 'ct');
-  // A waiting request may not be replaced by another waiting request until it has aged out.
-  const prev = ctx.prev;
-  if (prev && prev.state === 'wait' && d.state === 'wait' && num(prev.ts) && ctx.now - prev.ts < LINKREQ_WAIT_MS) {
-    fail('conflict', 'linkreqs: a login request is already waiting');
-  }
+  // A new waiting request replaces an older one. Writing one takes an email confirmed by code on this connection
+  // (authz.js), so whoever replaces it can already read the email the account is recovered with; refusing them only
+  // locked a person out of a retry for ten minutes. The device whose request was replaced sees it and stops.
 }
 
 // ---- chats --------------------------------------------------------------------
@@ -260,7 +263,7 @@ function inbox(ctx, d) {
 }
 
 const VALIDATORS = {
-  directory, search, presence, phones, logins, linkreqs, channels, posts, comments, acts, chunks, inbox,
+  directory, search, presence, phones, logins, recovery, linkreqs, channels, posts, comments, acts, chunks, inbox,
   accounts: box('account box'), vault: box('vault'), backup: box('backup'),
   reads: sideRow('read mark'), typing: sideRow('typing mark'),
 };

@@ -18,6 +18,7 @@ import { DEFAULT_LIMITS, AddressTagger, BucketMap, clientAddress, withLimits } f
 import { Drops, statusOf } from './drops.js';
 import { Tickets, createMediaHttp } from './media.js';
 import { HushError } from './errors.js';
+import { Codes, createMailer } from './codes.js';
 
 // ---- POST /drop (SPEC.md 6): one sealed note into one mailbox, no session, no cookie, no proof ----
 function readJson(req, maxBytes) {
@@ -113,8 +114,16 @@ export function createServer(cfg) {
   // The address-keyed limits of SPEC.md 9.4: blind-address lookups, sign-ups (under the daily tag) and invite lookups.
   const blindReads = new BucketMap(limits.blindReadsPerMinPerAddr, limits.blindReadsPerMinPerAddr / 60);
   const blindPaths = new BucketMap(limits.blindReadsPerHourPerPath, limits.blindReadsPerHourPerPath / 3600, 3600_000);
+  const linkReads = new BucketMap(limits.linkReadsPerMinPerAddr, limits.linkReadsPerMinPerAddr / 60);
+  const linkPaths = new BucketMap(limits.linkReadsPerHourPerPath, limits.linkReadsPerHourPerPath / 3600, 3600_000);
   const signups = new BucketMap(limits.signupsPerDayPerAddr, limits.signupsPerDayPerAddr / 86400, 86400_000);
   const invites = new BucketMap(limits.invitesPerMinPerAddr, limits.invitesPerMinPerAddr / 60);
+  // Verification codes (SPEC.md 14.10): sent through Resend when there is a key, shown on screen otherwise.
+  const codes = new Codes({ now, ttlMs: limits.codeTtlMs, cooldownMs: limits.codeCooldownMs });
+  const mailer = cfg.mailer !== undefined ? cfg.mailer : createMailer(cfg.mail || {});
+  const codeSends = new BucketMap(limits.codeSendsPerHourPerAddr, limits.codeSendsPerHourPerAddr / 3600, 3600_000);
+  const codeSendsTo = new BucketMap(limits.codeSendsPerHourPerLogin, limits.codeSendsPerHourPerLogin / 3600, 3600_000);
+  const codeChecks = new BucketMap(limits.codeChecksPer10MinPerAddr, limits.codeChecksPer10MinPerAddr / 600);
   const originOk = originChecker(cfg.origins);
   const trustProxy = cfg.trustProxy === true;          // off unless said so: a client reaching Node directly could forge the header
   const staticRoot = cfg.staticDir ? resolve(cfg.staticDir) : null;
@@ -173,7 +182,7 @@ export function createServer(cfg) {
     const address = clientAddress(req, trustProxy);
     const addrTag = tagger.tag(address), dayTag = tagger.tagDay(address);   // the address itself goes no further
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, signups, invites, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
+      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeChecks, addrTag, dayTag, now, badges: cfg.badges || {}, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
       conns.add(conn);
     });
   };
@@ -192,14 +201,14 @@ export function createServer(cfg) {
     if (t.unref) t.unref();
     timers.push(t);
   };
-  every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); tickets.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
+  every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); tickets.prune(); codes.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
   every(Math.max(250, Math.min(5000, limits.typingTtlMs)), () => store.prune(), 'prune');
-  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); invites.prune(); drops.prune(); }, 'rotate');
+  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); invites.prune(); drops.prune(); codeSends.prune(); codeSendsTo.prune(); codeChecks.prune(); }, 'rotate');
   every(86400_000, () => { tagger.rotateDay(); signups.prune(); }, 'rotateDay');
   every(3600_000, () => store.sweepInbox(), 'inboxSweep');   // notes older than 30 days (SPEC.md 8.6)
 
   return {
-    store, subs, conns, limits, tagger, authz, staticRoot, drops, tickets,
+    store, subs, conns, limits, tagger, authz, staticRoot, drops, tickets, codes, mailer,
     sweepInbox: (t) => store.sweepInbox(t),
     sweepMedia: (t) => store.sweepMedia(t),
     tlsPort: () => (https && https.listening ? https.address().port : null),

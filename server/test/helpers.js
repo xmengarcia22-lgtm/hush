@@ -26,9 +26,10 @@ export function appSource() {
 export async function startServer(overrides = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'hush-test-'));
   // Test clients are not browser pages (no Origin header), so the origin check is off unless a test turns it on;
-  // every test account comes from 127.0.0.1, so the daily sign-up backstop is lifted unless a test sets it on purpose.
+  // every test account comes from 127.0.0.1, so the daily sign-up backstop is lifted unless a test sets it on purpose,
+  // and the wait between two codes for one address is off.
   const cfg = { host: '127.0.0.1', port: 0, dataDir, authz: 'open', origins: 'any', trustProxy: true, ...overrides };
-  cfg.limits = { signupsPerDayPerAddr: 1000, ...(overrides.limits || {}) };
+  cfg.limits = { signupsPerDayPerAddr: 1000, codeCooldownMs: 0, ...(overrides.limits || {}) };   // tests resend codes freely unless one sets the cooldown
   log.setEnabled(false);
   const srv = createServer(cfg);
   const { port } = await srv.listen();

@@ -14,6 +14,8 @@ This list is only ever added to, never edited. A page whose hash is not here is 
 | 2026-10-09 | Badge wherever a name is shown | `7700d5364fdd25b7695aa4d62208b127d4d65f1fce834093be0ca78176b70e51` |
 | 2026-10-09 | Neutral sample phone numbers in input placeholders | `e87def444e4e654949627b1ee7e83bcf3c31cef567c71cdb8dddcc19b75ae247` |
 | 2026-10-09 | Swipe navigation, Back closes what is open, Contacts tab, own @mention opens Saved Messages | `13dffd0797428bf5991cf10264cfb015443ff0ea590e97f2f554a69ace5e1bc1` |
+| 2026-10-10 | Sign-up and login by email, phone or username; emailed recovery codes with a 60-second resend wait; typed device-approval code | `787cefc8e7c04b06eea1073e00c64febb66768156526165bde5308a854b4bc9e` |
+| 2026-10-10 | New-device login: retry after backing out, own read allowance for login requests, clear error messages, sign-in after a long wait, update notice | `d169c3e5d851e266ca77c76e0a498c8ae489c2d39c631bac2a503c1c1a015c63` |
 
 To check what you are served: `curl -s https://hushappofficial.com/ | sha256sum`, or save the page from the
 browser and run `certutil -hashfile index.html SHA256` on Windows, then compare with the last line above.

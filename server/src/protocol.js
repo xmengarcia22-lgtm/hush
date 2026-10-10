@@ -15,6 +15,7 @@ import { ID } from './paths.js';
 import { rankOf } from './authz.js';
 import { clientLimits } from './media.js';
 import { leadingZeroBits } from './drops.js';
+import { codeLogin, EMAIL, loginTag, recoveryTag } from './codes.js';
 
 const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -34,12 +35,16 @@ function takeQuery(c) {
 // entries) are guessable by whoever knows the login or number, so lookups are counted per address tag and per
 // path; profile reads are counted per connection, every path of an mget included, so the directory cannot be
 // walked; posts and the side rows have their own per-connection rates.
-const BLIND = /^(?:accounts|logins|linkreqs|phones)\//;
+const BLIND = /^(?:accounts|logins|phones|recovery)\//;
+const LINKREQ = /^linkreqs\//;
 const DIRECTORY = /^directory\//;
 const CHAT_WRITE = /^channels\/[^/]+\/(posts|comments|acts|reads|typing)(?:\/|$)/;
 function takeRead(c, p) {
   if (typeof p !== 'string') return;
-  if (BLIND.test(p)) {
+  if (LINKREQ.test(p)) {   // polled every few seconds by the devices on both ends, so counted apart from the other blind lookups
+    if (!c.ctx.linkReads.take(c.addrTag)) fail('ratelimit', 'too many login-request lookups from here; slow down');
+    if (!c.ctx.linkPaths.take(p)) fail('ratelimit', 'that login request is being looked up too often; try again later');
+  } else if (BLIND.test(p)) {
     if (!c.ctx.blindReads.take(c.addrTag)) fail('ratelimit', 'too many lookups from here; slow down');
     if (!c.ctx.blindPaths.take(p)) fail('ratelimit', 'that address is being looked up too often; try again later');
   } else if (DIRECTORY.test(p) && !c.dirReads.take()) fail('ratelimit', 'too many profile lookups; slow down');
@@ -129,6 +134,53 @@ const HANDLERS = {
 
   // The sign-up puzzle, for a page to solve while the person is still filling in the form.
   'signup.pow'(c) { return c.signupChallenge(); },
+
+  // ---- verification codes (SPEC.md 14.10): sent by email through Resend; on screen (`demoCode`) only when no mail
+  // key is set, or for a phone number until texting exists. The reply never says whether the login has an account.
+  async 'code.send'(c, f) {
+    const to = codeLogin(f.to);
+    if (!to) fail('invalid', 'code.send: "to" must be an email address or a phone number');
+    const { codes, codeSends, codeSendsTo } = c.ctx;
+    if (!codes) fail('invalid', 'codes are not sent here');
+    // One code per address per cooldown, however many connections ask. Checked first so a refused ask costs no allowance.
+    const wait = codes.wait(to);
+    if (wait > 0) fail('ratelimit', `wait ${Math.ceil(wait / 1000)} seconds before asking for another code`);
+    if (!codeSends.take(c.addrTag)) fail('ratelimit', 'too many codes asked for from here; wait a while');
+    if (!codeSendsTo.take(codes.tag(to))) fail('ratelimit', 'too many codes sent to that address; wait a while');
+    const code = codes.issue(to), mailer = c.ctx.mailer;
+    if (!mailer || !EMAIL.test(to)) return { sent: false, demoCode: code };
+    try { await mailer.send({ to, code }); }
+    catch (e) { log.error('code.mail.failed', e); codes.release(to); fail('unavailable', 'the code could not be sent; try again in a moment'); }
+    return { sent: true };
+  },
+  'code.check'(c, f) {
+    const to = codeLogin(f.to);
+    if (!to) fail('invalid', 'code.check: "to" must be an email address or a phone number');
+    const { codes, codeChecks } = c.ctx;
+    if (!codes) fail('invalid', 'codes are not sent here');
+    if (!codeChecks.take(c.addrTag)) fail('ratelimit', 'too many code checks from here; wait a few minutes');
+    const r = codes.check(to, typeof f.code === 'string' ? f.code : '');
+    if (r === 'wrong') fail('denied', 'that code is not right');
+    if (r === 'none') fail('notfound', 'no code is waiting; ask for a new one');
+    // What a confirmed email unlocks on this connection, and nothing more (SPEC.md 14.10):
+    //  - signed in: saving this email as the account's recovery email;
+    //  - "forgot password" for username `h`: asking that account's devices to let a new one in, when `h` has set up
+    //    this email for recovery;
+    //  - "forgot password" for an account that logs in with this very email (given at sign-up, or an account from before
+    //    usernames): the same request at the email's own tag, which that account's devices watch.
+    // `link` says whether the second or third applied, and `via` which: 'username' or 'email'. Recovery records are never
+    // readable, so this answer, given only to someone who can read the email, is the one way to learn that an email is
+    // set up for an account.
+    let link = false, via;
+    if (EMAIL.test(to)) {
+      const st = c.ctx.store;
+      if (c.proven) c.recoveryOk.add(recoveryTag(c.proven, to));
+      const rec = typeof f.h === 'string' && HANDLE.test(f.h) ? st.get('recovery/' + recoveryTag(f.h, to), SYSTEM).d : null;
+      if (rec && rec.h === f.h) { c.linkOk.add(loginTag(f.h)); link = true; via = 'username'; }
+      else if (st.get('logins/' + loginTag(to), SYSTEM).d) { c.linkOk.add(loginTag(to)); link = true; via = 'email'; }
+    }
+    return link ? { link, via } : { link };
+  },
   update(c, f) { takeWrite(c, f.p); c.ctx.store.update(f.p, f.d, c.actor()); return {}; },
   delete(c, f) { c.ctx.store.delete(f.p, { ot: f.ot }, c.actor()); return {}; },
   add(c, f) { takeWrite(c, f.p); return c.ctx.store.add(f.p, f.d, c.actor()); },
@@ -204,7 +256,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, signups, invites, tickets, addrTag, dayTag, now, badges, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeChecks, addrTag, dayTag, now, badges, onClose }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
@@ -219,6 +271,8 @@ export class Connection {
     this.pub = null;           // the account public key behind the proof
     this.mayCreate = null;     // handle this connection may create (sign-up)
     this.signupPow = null;     // { salt, bits }: the puzzle a sign-up on this connection solves, once
+    this.recoveryOk = new Set(); // recovery records this connection may write: emails confirmed by code while signed in
+    this.linkOk = new Set();     // link-request addresses this connection may open: emails confirmed by code (SPEC.md 14.10)
     this.proving = false;
     this.chats = new Map();    // cid → { level, epoch, type }
     this.closed = false;
