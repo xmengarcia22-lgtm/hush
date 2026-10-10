@@ -52,7 +52,10 @@ test('password rules: length, the common list, and nothing of your own in it; th
     const { pwStrongEnough } = pg.auth;
     assert.equal(pwStrongEnough('Mydogmax12!', phone), false, 'a power role asks for 12 or more');
     assert.equal(pwStrongEnough('Mydogmax123!', phone), true);
-    assert.equal(pwStrongEnough('password1234', phone), false, 'and still nothing common');
+    assert.equal(pwStrongEnough('password1234'), false, 'nothing on the common list');
+    assert.equal(pwStrongEnough('lowercaseonlyletters'), false, 'not all lowercase letters, however long');
+    assert.equal(pwStrongEnough('Jordanhale rides at dawn'), true, 'a password already in use counts even if it holds the username: that rule is for choosing one');
+    assert.equal(pwStrongEnough('jordan.hale@example.com!'), true, 'or the email');
     assert.match(pwProblem('x2125550134x', phone), /phone number/);
     assert.match(pwProblem('my 555-0134 pw', phone), /phone number/, 'the local part of the number, however it is punctuated');
     assert.match(pwProblem('jordan.hale!', email), /email/);

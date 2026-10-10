@@ -2817,10 +2817,11 @@ function openSetupLogin(reset,power){ // reset: true after a password reset, 'ag
   const {f:f1,i:p1}=pwField(strong?'New password (at least 12 characters)':cur?'New password':'Password (at least 8 characters)','new-password');
   const {f:f2,i:p2}=pwField('Type it again','new-password');
   const go=el('button','primary',power?'Secure my account':cur?'Change password':'Save password');go.style.width='100%';const err=el('div','err');
-  body.append(...(cur?[fo]:[]),f1,f2,go,err);setTimeout(()=>(cur?po:p1).focus(),50);
+  const askCur=cur||power;if(power)f1.hidden=f2.hidden=true; // power: the current password is checked first; new fields only if it is too weak
+  body.append(...(askCur?[fo]:[]),f1,f2,go,err);setTimeout(()=>(askCur?po:p1).focus(),50);
   let secured=false;
   if(power){
-    if(cur)fo.after(el('p','hint','If your current password is already 12 characters or more, just enter it and leave the new one empty.'));
+    fo.after(el('p','hint','Already strong? Just re-enter your current password.'));
     const lock=el('button','link','Turn on app lock');lock.onclick=()=>openAppLock();
     const later=el('button','link','Not now');later.onclick=close;
     body.append(el('p','hint','Also turn on the app lock, so someone who picks up your phone can\u2019t act as you in this '+power.kind+'.'),lock,
@@ -2831,10 +2832,13 @@ function openSetupLogin(reset,power){ // reset: true after a password reset, 'ag
     // One password for every way in: a box for the username and for each email or number, all replaced together, and
     // the old boxes removed so the old password stops working everywhere (after a reset too).
     const login=li.login,logins=loginsOf(me.handle);
-    if(power&&cur&&po.value&&!p1.value&&!p2.value){ // the current password may already be strong enough
+    if(power&&f1.hidden){ // step one: the password they already have, kept as it is when it is strong enough
+      if(!po.value){err.textContent='Enter your current password.';po.focus();return}
       go.disabled=true;
-      try{await openLoginBox(login,po.value)}catch(e){go.disabled=false;err.textContent=e&&e.code==='ratelimit'?'Too many wrong passwords for this login. Try again later.':'Your current password isn\u2019t right.';return}
-      if(!logins.every(l=>pwStrongEnough(po.value,isHandleLogin(l)?null:l,me.handle))){go.disabled=false;err.textContent='Your current password isn\u2019t strong enough for this. Choose a new one of at least 12 characters.';return}
+      try{await openLoginBox(login,po.value)}catch(e){go.disabled=false;
+        err.textContent=e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'That isn\u2019t your current password.';
+        if(!cur&&!(e&&e.code==='ratelimit')){f1.hidden=f2.hidden=false;err.textContent+=' No password saved for this account? Choose one below.'}return}
+      if(!pwStrongEnough(po.value)){go.disabled=false;f1.hidden=f2.hidden=false;err.textContent='Your current password is too weak for this. Choose a new one below: at least 12 characters, not all lowercase.';p1.focus();return}
       if(!(await markSecure())){go.disabled=false;err.textContent='Couldn\u2019t save. Check your connection and try again.';return}
       secured=true;close();toast('Your account is secured');return}
     const bad=logins.map(l=>pwProblem(p1.value,isHandleLogin(l)?null:l,me.handle)).find(Boolean)||(strong&&p1.value.length<12?'Use at least 12 characters: this password guards '+(power?'your '+power.kind:'your groups and channels')+'.':null);if(bad){err.textContent=bad;return}if(p1.value!==p2.value){err.textContent='The passwords don\u2019t match.';return}
@@ -2845,10 +2849,10 @@ function openSetupLogin(reset,power){ // reset: true after a password reset, 'ag
       const all=await saveLoginBoxes(me,logins,p1.value);rememberPw(login,p1.value);
       for(const [l,loc] of Object.entries(old))if(all[l]!==loc)dropLoginBox(l,loc);
       rememberLogin(me.handle,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+me.handle,Date.now());renderBanner();
-      if(logins.every(l=>pwStrongEnough(p1.value,isHandleLogin(l)?null:l,me.handle))&&await markSecure())secured=true;
+      if(pwStrongEnough(p1.value)&&await markSecure())secured=true;
       close();toast(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
     }catch(e){go.disabled=false;go.textContent=cur?'Change password':'Save password';
-      err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?'Too many wrong passwords for this login. Try again later.':'Couldn\u2019t save. Check your connection and try again.'}};
+      err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'Couldn\u2019t save. Check your connection and try again.'}};
 }
 /* ---------- recovery-email codes and moving to a new device; keys move between your devices, never through readable server data ----------
    Codes are used only for the optional recovery email: to confirm it in Settings, and for "Forgot password?". The
@@ -3244,7 +3248,7 @@ function showOnboard(adding,notice){
       if(r.kind==='wrongpw'){busy(go);err.textContent='That password isn’t right. Try again, or tap “Forgot password?”';return}
       if(r.kind==='new'){busy(go);err.textContent='There’s no account with that '+loginKind(l)+'. Check it, or tap “Sign up” to create one.';return}
       busy(go,'Unlocking your account…');
-      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value,l))markSecure()}else busy(go)}
+      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value))markSecure()}else busy(go)}
       catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account was set up fresh. Tap “Forgot password?”':'Couldn’t log in. Check your connection and try again.'}};
   };
   // Sign-up, in two quick screens and no code: an email or a phone number (one is required) and a password, then a
@@ -3302,7 +3306,7 @@ function showOnboard(adding,notice){
         let all={};try{all=await saveLoginBoxes(id,reserved?[handle,contact]:[handle],pw);rememberPw(handle,pw)}catch{}
         su=null;if(all[handle])rememberLogin(handle,{login:handle,loc:all[handle],all},true);else rememberLogin(handle,{login:handle});
         S.freshSignup=handle; // a brand-new account starts with Message backup on (loadContacts); accounts from before keep their choice
-        await enterAccount(id);if(pwStrongEnough(pw,contact,handle))markSecure();
+        await enterAccount(id);if(pwStrongEnough(pw))markSecure();
         if(!reserved)toast('That '+loginKind(contact)+' couldn’t be saved, so log in with your username for now.');else if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };

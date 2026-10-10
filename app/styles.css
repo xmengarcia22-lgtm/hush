@@ -114,6 +114,7 @@ html.kb-up,html.kb-up body{overflow:hidden;overscroll-behavior:none}
 .onboard h1{margin:0 0 8px;text-align:center;font-size:26px}
 .onboard .lead{margin:0 0 26px;text-align:center;color:var(--muted)}
 .field{display:block;margin-bottom:14px}
+.field[hidden]{display:none}
 .field span{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
 .field input{width:100%;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:12px 14px;outline:none}
 .field input:focus{border-color:var(--accent)}

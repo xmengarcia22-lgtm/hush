@@ -431,7 +431,7 @@ function pwProblem(pw,login,handle){ // null when the password is acceptable, el
     else{const d=l.replace(/\D/g,''),pd=low.replace(/\D/g,'');if(d.length>=7&&(pd.includes(d)||pd.includes(d.slice(-7))))return 'Password can\u2019t contain your phone number.'}}
   return null;
 }
-const pwStrongEnough=(pw,login,handle)=>pw.length>=12&&!pwProblem(pw,login,handle); // what a power role asks for
+const pwStrongEnough=pw=>pw.length>=12&&!/^[a-z]+$/.test(pw)&&!COMMON_PW.has(pw.toLowerCase()); // what a power role asks of a password, new or already in use
 function pwStrength(pw,login,handle){ // 0 empty, 1 weak, 2 fair, 3 good, 4 strong; weak whenever pwProblem would refuse it
   if(!pw)return {level:0,label:''};
   if(pwProblem(pw,login,handle))return {level:1,label:'Weak'};
