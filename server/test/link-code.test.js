@@ -11,7 +11,7 @@ const a = src.indexOf('/* ===== HUSH LINKCODE BEGIN ===== */'), b = src.indexOf(
 assert.ok(a > 0 && b > a, 'link-code markers present in app/crypto.js');
 const unb64u = (s) => new Uint8Array(Buffer.from(s, 'base64url'));
 const b64u = (u) => Buffer.from(u).toString('base64url');
-const { linkCode, parseLinkCode, linkFp, devShort } = new Function('unb64u', 'enc', 'b64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode, linkFp, devShort };')(unb64u, new TextEncoder(), b64u);
+const { linkCode, parseLinkCode, linkFp, devShort, linkConfirm } = new Function('unb64u', 'enc', 'b64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode, linkFp, devShort, linkConfirm };')(unb64u, new TextEncoder(), b64u);
 
 const fresh = () => ({ secret: new Uint8Array(randomBytes(16)), fp: randomBytes(32).toString('base64url') });
 
@@ -88,4 +88,21 @@ test('the device key is shown as eight symbols, the same on both devices, differ
   assert.match(k, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
   assert.equal(await devShort({ ...DEVK }), k);
   assert.notEqual(await devShort({ ...DEVK, sx: 'e'.repeat(43) }), k);
+});
+
+// ---- release 11: the new device's proof for a code shown by the other device ----
+
+test('the proof is bound to the request, its fingerprint and what it is for', async () => {
+  const { createHmac } = await import('node:crypto');
+  const secret = new Uint8Array(16).map((_, i) => 200 - i), tag = 'T'.repeat(43), ts = 1791600000000, fp = Buffer.alloc(32, 7).toString('base64url');
+  const cf = await linkConfirm(secret, tag, ts, fp);
+  assert.match(cf, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(await linkConfirm(secret, tag, ts, fp), cf, 'the same request gives the same proof');
+  assert.notEqual(await linkConfirm(secret, 'U'.repeat(43), ts, fp), cf, 'another request address');
+  assert.notEqual(await linkConfirm(secret, tag, ts + 1, fp), cf, 'a newer request at the same address');
+  assert.notEqual(await linkConfirm(secret, tag, ts, Buffer.alloc(32, 8).toString('base64url')), cf, 'other keys');
+  assert.notEqual(await linkConfirm(new Uint8Array(16), tag, ts, fp), cf, 'another secret');
+  const unlabelled = createHmac('sha256', Buffer.from(secret)).update(tag + '|' + ts + '|' + fp).digest('base64url');
+  assert.notEqual(unlabelled, cf, 'the label is part of it, so the same HMAC can’t stand for anything else');
+  assert.equal(createHmac('sha256', Buffer.from(secret)).update('hush-link-confirm-v3|' + tag + '|' + ts + '|' + fp).digest('base64url'), cf, 'it is exactly the labelled HMAC');
 });

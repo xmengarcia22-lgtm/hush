@@ -112,7 +112,7 @@ function box(what) {
 
 function linkreqs(ctx, d) {
   const w = 'linkreqs';
-  only(d, new Set(['state', 'pub', 'ts', 'dev', 'devk', 'epub', 'iv', 'ct']), w); need(d, ['state'], w);
+  only(d, new Set(['state', 'pub', 'ts', 'dev', 'devk', 'epub', 'iv', 'ct', 'cf']), w); need(d, ['state'], w);
   if (!['wait', 'ok', 'no'].includes(d.state)) bad(w, 'state');
   if (d.ts !== undefined && !num(d.ts)) bad(w, 'ts');
   if (d.dev !== undefined && !str(d.dev, 0, 80)) bad(w, 'dev');
@@ -121,6 +121,7 @@ function linkreqs(ctx, d) {
   if (d.devk !== undefined && !isPlain(d.devk)) bad(w, 'devk');
   if (d.iv !== undefined && !str(d.iv, 1, 64)) bad(w, 'iv');
   if (d.ct !== undefined && !str(d.ct, 1)) bad(w, 'ct');
+  if (d.cf !== undefined && !(str(d.cf, 43, 43) && ID.ADDR43.test(d.cf))) bad(w, 'cf');   // the new device's proof for a shown code (SPEC.md 14.10)
   // A new waiting request replaces an older one. Writing one takes an email confirmed by code on this connection
   // (authz.js), so whoever replaces it can already read the email the account is recovered with; refusing them only
   // locked a person out of a retry for ten minutes. The device whose request was replaced sees it and stops.

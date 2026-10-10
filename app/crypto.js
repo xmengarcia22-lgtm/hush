@@ -645,6 +645,14 @@ async function devShort(dk){
   for(const b of h.slice(0,5)){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
   const s=v.map(x=>LC_ABC[x]).join('');return s.slice(0,4)+'-'+s.slice(4,8);
 }
+// The reverse direction (the approving device shows the code, the new device scans it): the new device's proof that it
+// read the code and that the code named its own keys. An HMAC under the shown secret, bound to this one request (its tag
+// and creation time) and its fingerprint, with a label saying what it is for, so it can't be replayed for another request
+// or passed off as anything else. Only the two screens ever hold the secret, so the server can't make one.
+async function linkConfirm(secret,tag,ts,fp){
+  const k=await crypto.subtle.importKey('raw',secret,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return b64u(new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode('hush-link-confirm-v3|'+tag+'|'+ts+'|'+fp))));
+}
 /* ===== HUSH LINKCODE END ===== */
 const pubFp=async j=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(String(j.x)+'.'+String(j.y)))));
 /* ---------- private inbox (SPEC.md 6) ----------

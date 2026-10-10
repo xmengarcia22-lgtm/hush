@@ -18,6 +18,7 @@ This list is only ever added to, never edited. A page whose hash is not here is 
 | 2026-10-10 | New-device login: retry after backing out, own read allowance for login requests, clear error messages, sign-in after a long wait, update notice | `d169c3e5d851e266ca77c76e0a498c8ae489c2d39c631bac2a503c1c1a015c63` |
 | 2026-10-10 | Security fixes: approval code covers the device key, phone matching off, password gate with a per-login limit, secured accounts for owners and admins, tighter code limits | `9b26c5dbb2ad4898944a729cbd1fdde0782b8bc4d410e53fd2c22789f42d6e7e` |
 | 2026-10-10 | Secure-your-account gate checks the current password first and keeps it when it is strong enough | `beced5d3e3890bc07c46f6a52ce4a3d674d66330db0617f7de7e824333f2affc` |
+| 2026-10-10 | Link a new device from a computer with no camera: it shows the code and the new device scans it; a device that logged in by username keeps the account’s other logins | `1cde82386cadf1358e98a05eba4405a27252cb734e5e0b06f79cfea1386e6def` |
 
 To check what you are served: `curl -s https://hushappofficial.com/ | sha256sum`, or save the page from the
 browser and run `certutil -hashfile index.html SHA256` on Windows, then compare with the last line above.

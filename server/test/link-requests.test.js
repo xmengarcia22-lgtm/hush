@@ -167,3 +167,26 @@ test('a waiting request can be refused or removed only by the new device or a de
     assert.equal(T.srv.store.get(htag, SYSTEM).d, null);
   } finally { pages.forEach((p) => p.close()); await T.stop(); }
 });
+
+// ---- release 11: a waiting request may carry the new device's proof, and only a well-formed one ----
+
+test('a waiting request takes a 43-character proof from the new device, nothing else', async () => {
+  const T = await startServer({ authz: 'standard' });
+  const pg = page(T.url);
+  const pages = [pg];
+  try {
+    await pg.db.ready;
+    await signUpWith(pg, EMAIL, PW, 'jordanhale', 'Jordan Hale');
+    const at = 'linkreqs/' + await pg.auth.loginTag(EMAIL);
+    const dev = await confirmedNewDevice(T); pages.push(dev.fresh);
+    await dev.fresh.db.doc(at).set(ask('a'));
+    for (const bad of ['short', 'x'.repeat(44), 'not base64url !'.padEnd(43, '?'), 7]) {
+      assert.equal((await dev.fresh.db.doc(at).update({ cf: bad }).catch((e) => e)).code, 'invalid', JSON.stringify(bad));
+    }
+    await dev.fresh.db.doc(at).update({ cf: 'P'.repeat(43) });
+    assert.equal(T.srv.store.get(at, SYSTEM).d.cf, 'P'.repeat(43));
+    const outsider = await connect(T.url); await outsider.hello();
+    assert.equal((await outsider.call('update', { p: at, d: { cf: 'Q'.repeat(43) } })).e, 'denied', 'an outsider can’t write one');
+    await outsider.close();
+  } finally { pages.forEach((p) => p.close()); await T.stop(); }
+});

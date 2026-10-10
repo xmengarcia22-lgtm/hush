@@ -4,6 +4,7 @@
 // replaces the box behind every login, and the device notes keep every box's address (SPEC.md 14.10).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { startServer, sleep } from './helpers.js';
 import { SYSTEM } from '../src/store.js';
@@ -134,4 +135,27 @@ test('healLogin puts back every reservation, and asks for the password again whe
       assert.deepEqual(pg2.calls.setup, ['again']);
     } finally { pg2.close(); }
   } finally { pg.close(); await T.stop(); }
+});
+
+
+// ---- release 11: reading the vault back keeps every login of the account ----
+
+test('a device that logged in by username keeps the account\u2019s other logins when the vault is read back', () => {
+  const pg = page('ws://127.0.0.1:1');
+  try {
+    const ui = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
+    const line = ui.split('\n').find((l) => l.startsWith('const loginPref='));
+    assert.ok(line, 'loginPref present in app/ui.js');
+    const loginPref = new Function('normLogin', line + '\nreturn loginPref;')(pg.auth.normLogin);
+    const H = 'H'.repeat(43), E = 'E'.repeat(43);
+    const stored = { login: 'jordanhale', loc: H, all: { jordanhale: H, [EMAIL]: E } };
+    assert.deepEqual(loginPref(stored), stored, 'the email login survives the read');
+    assert.deepEqual(loginPref({ ...stored, all: { jordanhale: H, [EMAIL]: E, 'Not A Login!': E, '+12125550134': 'short', [EMAIL.toUpperCase()]: E } }).all, { jordanhale: H, [EMAIL]: E }, 'only well-formed entries are kept');
+    assert.equal(loginPref(null), undefined);
+    // This device logged in by username, so its own note knows only that; the vault knows both.
+    const local = { login: 'jordanhale', loc: H, all: { jordanhale: H } };
+    const out = pg.auth.reconcileLoginHint(local, loginPref(stored));
+    assert.equal(out.toVault, undefined, 'the vault\u2019s list is not written back shorter');
+    assert.deepEqual(out.toLocal.all, { jordanhale: H, [EMAIL]: E }, 'and this device learns the email login');
+  } finally { pg.close(); }
 });
