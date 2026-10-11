@@ -227,7 +227,9 @@ async function wrapPost(c,p,pid,k){
    Seen marks, typing dots and reactions used to be filed under your username, so the server could watch who
    was reading, typing and reacting in every chat. They now sit under a tag worked out from the chat's own key,
    so only people in the chat can tell whose is whose. Each one carries a signature by the person who left it,
-   so nobody can leave a mark under somebody else's tag. */
+   so nobody can leave a mark under somebody else's tag. From release 18 that signature travels inside the
+   encryption, as a message's does: the server keeps a time and a sealed blob, and nothing it stores can be checked
+   against anyone's account key. */
 const tagCache=new Map();
 function memTag(c,e,h){const k=c.id+'|'+e+'|'+h;
   if(!tagCache.has(k))tagCache.set(k,(async()=>{const ck=await convKey(c,e);if(!ck){tagCache.delete(k);return null}
@@ -235,6 +237,13 @@ function memTag(c,e,h){const k=c.id+'|'+e+'|'+h;
   return tagCache.get(k)}
 async function tagMap(c,e){const out={};for(const h of new Set(c.members||[])){const t=await memTag(c,e,h);if(t)out[t]=h}return out}
 const sideSig=async(label,parts)=>b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},await myKey('s'),enc.encode(label+'|'+parts.join('|'))));
+const sideAD=(label,cid,tag)=>enc.encode(label+'|'+cid+'|'+tag);
+async function sealSide(c,e,tag,label,ts){ // a seen mark or typing dot: its time, and the signature sealed under the chat key
+  const ck=await convKey(c,e);if(!ck)throw new Error('nokey');const iv=crypto.getRandomValues(new Uint8Array(12));
+  return {ts,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:sideAD(label,c.id,tag)},ck.key,enc.encode(await sideSig(label,[c.id,tag,ts]))))}}
+async function sideSigOf(c,e,tag,label,v){ // the signature inside a sealed mark, or the plain one an app from before release 18 left
+  if(!v.ct)return v.sg;
+  try{const ck=await convKey(c,e);if(!ck)return null;return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:sideAD(label,c.id,tag)},ck.key,unb64(v.ct)))}catch{return null}}
 const dirMiss=new Map(); // handles whose profile was not found, and when: no point asking again for a minute
 async function senderKeys(h){ // the public keys of whoever signed something; fetched on demand for a person this page has never looked up
   let s=peerKeys(h);

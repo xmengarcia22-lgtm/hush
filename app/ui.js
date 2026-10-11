@@ -266,7 +266,7 @@ function markRead(){
 }
 async function writeSeen(c,ts){ // "read up to here", filed under a tag only the people in this chat can work out
   try{const e=epochOf(c),t=await memTag(c,e,S.me.handle);if(!t)return;
-    await S.db.doc(`channels/${c.id}/reads/${e}~${t}`).set({ts,sg:await sideSig('hush-seen-v1',[c.id,t,ts])});
+    await S.db.doc(`channels/${c.id}/reads/${e}~${t}`).set(await sealSide(c,e,t,'hush-seen-v1',ts));
     S.db.doc(`channels/${c.id}/reads/${S.me.handle}`).delete().catch(()=>{}); // tidy away the old named mark
   }catch{}}
 const typeOf=c=>(c&&c.type)||'channel';
@@ -968,7 +968,7 @@ async function readSide(cid,docs,label,done){ // turn the tags back into names, 
     else{const e=+i.slice(0,cut);tag=i.slice(cut+1);
       if(!Number.isInteger(e))continue;
       const m=maps[e]||(maps[e]=await tagMap(c,e));h=m[tag];
-      if(h&&!(await sideOk(h,v.sg,label,[cid,tag,ts])))h=null}
+      if(h&&!(await sideOk(h,await sideSigOf(c,e,tag,label,v),label,[cid,tag,ts])))h=null}
     if(h&&ts>(r[h]||0))r[h]=ts}
   if(sideSeq.get(label)!==my||S.chan!==cid)return;done(r);
 }
@@ -991,7 +991,7 @@ function setTyping(on){
   const c=curConv();if(!S.db||!c||!isMember(c)||typeOf(c)==='channel'||isSelf(c))return;
   const now=Date.now();if(on&&now-typingAt<2500)return;if(!on&&!typingAt)return;typingAt=on?now:0;
   (async()=>{try{const e=epochOf(c),t=await memTag(c,e,S.me.handle);if(!t)return;const ts=on?now:0;
-    await S.db.doc(`channels/${c.id}/typing/${e}~${t}`).set({ts,sg:await sideSig('hush-type-v1',[c.id,t,ts])});
+    await S.db.doc(`channels/${c.id}/typing/${e}~${t}`).set(await sealSide(c,e,t,'hush-type-v1',ts));
     S.db.doc(`channels/${c.id}/typing/${S.me.handle}`).delete().catch(()=>{});
   }catch{}})();
 }
@@ -1678,8 +1678,9 @@ async function setAct(c,postId,kind,payload){
   const tag=await memTag(c,e,S.me.handle);if(!tag)throw new Error('nokey');
   const ref=S.db.doc(`channels/${c.id}/acts/${postId}~${tag}~${kind}`);
   const iv=crypto.getRandomValues(new Uint8Array(12));
-  const ct=b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(`${c.id}|${postId}|${tag}|${kind}`)},ck.key,enc.encode(JSON.stringify(payload))));
-  await ref.set({post:postId,kind,e,iv:b64(iv),ct,ts:Date.now(),sg:await sideSig('hush-act-v1',[c.id,postId,kind,tag,ct])});
+  const p=JSON.stringify(payload); // the signature travels inside, with exactly what it signs
+  const ct=b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(`${c.id}|${postId}|${tag}|${kind}`)},ck.key,enc.encode(JSON.stringify({p,sg:await sideSig('hush-act-v2',[c.id,postId,kind,tag,p])}))));
+  await ref.set({post:postId,kind,e,iv:b64(iv),ct,ts:Date.now()});
   S.db.doc(`channels/${c.id}/acts/${postId}~${S.me.handle}~${kind}`).delete().catch(()=>{}); // tidy away the old named one
 }
 function openAct(c,v){
@@ -1688,9 +1689,10 @@ function openAct(c,v){
     const e=v.e??0;let by=v.by,who=v.by;
     if(!by){const parts=String(v._id||'').split('~');if(parts.length!==3)throw 0;who=parts[1];
       by=(await tagMap(c,e))[who];
-      if(!by||!(await sideOk(by,v.sg,'hush-act-v1',[c.id,v.post,v.kind,who,v.ct])))throw 0}
+      if(!by||(v.sg&&!(await sideOk(by,v.sg,'hush-act-v1',[c.id,v.post,v.kind,who,v.ct]))))throw 0} // a plain signature: left by an app from before release 18
     const ck=await convKey(c,e);if(!ck)throw 0;
-    const o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode(`${c.id}|${v.post}|${who}|${v.kind}`)},ck.key,unb64(v.ct))));
+    let o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode(`${c.id}|${v.post}|${who}|${v.kind}`)},ck.key,unb64(v.ct))));
+    if(!v.by&&!v.sg){if(typeof o.p!=='string'||!(await sideOk(by,o.sg,'hush-act-v2',[c.id,v.post,v.kind,who,o.p])))throw 0;o=JSON.parse(o.p)} // signed inside
     if(v.kind==='r'&&typeof o.emoji==='string'&&o.emoji.length<=16)return {post:v.post,by,kind:'r',emoji:o.emoji};
     if(v.kind==='v'&&Array.isArray(o.opts))return {post:v.post,by,kind:'v',opts:[...new Set(o.opts.filter(n=>Number.isInteger(n)&&n>=0&&n<10))]};
   }catch{}S.cache.delete(key);return null})());

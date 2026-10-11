@@ -507,8 +507,8 @@ The server enforces the piece size, the piece count, the per-chat allowance and 
 - `directory`: must contain `handle == <h>`, `ecdh{x,y}`, `sig{x,y}`; optional `name, disp, bio, photo, devs, findable, requests, kv, ts`.
 - `channels/<cid>`: fields from 5.3 only; no-names denylist; `type` and `visibility` enumerated; `epoch` integer; `keys` and `akeys` values must be wrap objects or `{ v:2, d:{…} }`; whenever `meta` is written (create, update, `chat.rotate`) its `e` must equal the record's epoch after the write.
 - posts: exactly the shapes in 5.7; `e <= epoch`.
-- acts: id pattern and key set `{ post, kind, e, iv, ct, ts, sg }`, all required except `e`.
-- reads and typing: id `^[0-9]+~[A-Za-z0-9_-]{22}$`, body exactly `{ ts, sg }`.
+- acts: id pattern and key set `{ post, kind, e, iv, ct, ts }`, all required except `e`. From release 18 the author’s signature travels sealed inside `ct` with what it signs, so nothing stored ties a reaction or a poll vote to an account key; a plain `sg` is refused.
+- reads and typing: id `^[0-9]+~[A-Za-z0-9_-]{22}$`, body exactly `{ ts, iv, ct }`: the signature over the chat, the tag and the time is sealed under the chat key (release 18), so only people in the chat can check it; a plain `sg` is refused.
 - media piece: over HTTP, a body of at least 28 bytes (iv and tag) and at most `pieceBytes + 28`; stored as `{ i, iv, d }`. Nothing else, ever: no content type, size hint, file name, duration or kind. Whether a media id is a photo, a document or a voice message is known only to the sealed post that references it. The only per-media facts the server keeps are in `media_ids` (8.2): total size and an optional expiry.
 - `accounts`, `vault`, `backup`: exactly `{ iv, ct }` or `{ iv, ct, ts }`.
 - `logins`: exactly `{ ts }`.

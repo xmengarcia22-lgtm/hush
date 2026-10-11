@@ -237,18 +237,18 @@ function comments(ctx, d) {
 
 function acts(ctx, d) {
   const w = 'act';
-  only(d, new Set(['post', 'kind', 'e', 'iv', 'ct', 'ts', 'sg']), w); need(d, ['post', 'kind', 'iv', 'ct', 'ts', 'sg'], w);
+  only(d, new Set(['post', 'kind', 'e', 'iv', 'ct', 'ts']), w); need(d, ['post', 'kind', 'iv', 'ct', 'ts'], w);   // the author's signature is sealed inside ct (release 18)
   const [post, , kind] = ctx.id.split('~');
   if (d.post !== post) bad(w, 'post');
   if (d.kind !== kind) bad(w, 'kind');
   if (d.e !== undefined && !int(d.e, 0, 31)) bad(w, 'e');
-  if (!str(d.iv, 1, 64) || !str(d.ct, 1) || !str(d.sg, 1, 256) || !num(d.ts)) bad(w, 'fields');
+  if (!str(d.iv, 1, 64) || !str(d.ct, 1) || !num(d.ts)) bad(w, 'fields');
 }
 
 function sideRow(what) {
   return (ctx, d) => {
-    only(d, new Set(['ts', 'sg']), what); need(d, ['ts', 'sg'], what);
-    if (!num(d.ts) || !str(d.sg, 1, 256)) bad(what, 'fields');
+    only(d, new Set(['ts', 'iv', 'ct']), what); need(d, ['ts', 'iv', 'ct'], what);   // the signature is sealed inside ct (release 18)
+    if (!num(d.ts) || !str(d.iv, 1, 64) || !str(d.ct, 1, 512)) bad(what, 'fields');
   };
 }
 

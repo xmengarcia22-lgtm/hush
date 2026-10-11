@@ -110,7 +110,7 @@ test('a writer who subscribes sees its own push before the acknowledgement', asy
   const order = [];
   const setId = c.i + 1;   // the id the next call will use
   c.ws.on('message', (m) => { const f = JSON.parse(String(m)); if (f.s === 7 && f.t === 'set') order.push('push'); if (f.i === setId && f.ok) order.push('ack'); });
-  await c.ok('set', { p: `channels/${CID}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now(), sg: 'sig' } });
+  await c.ok('set', { p: `channels/${CID}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now() } });
   await c.waitPush((f) => f.s === 7 && f.t === 'set');
   assert.deepEqual(order, ['push', 'ack']);
   await c.close();
@@ -145,7 +145,7 @@ test('typing rows are pushed live and vanish on their own', async () => {
     await a.hello(); await b.hello();
     await a.ok('sub', { s: 1, p: `channels/${CID}/typing`, l: 200 });
     await a.waitPush((f) => f.t === 'init');
-    await b.ok('set', { p: `channels/${CID}/typing/0~${TAG}`, d: { ts: Date.now(), sg: 'sig' } });
+    await b.ok('set', { p: `channels/${CID}/typing/0~${TAG}`, d: { ts: Date.now(), iv: 'aXY=', ct: 'c2ln' } });
     await a.waitPush((f) => f.s === 1 && f.t === 'set');
     await sleep(350);
     T.srv.prune();

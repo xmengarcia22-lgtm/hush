@@ -155,8 +155,8 @@ test('presence and typing live in memory only and expire', async () => {
   store.set('presence/alice', { ts: now() });
   assert.equal(typeof store.get('presence/alice').d.ts, 'number');
   const tp = `channels/${CID}/typing/0~${TAG}`;
-  store.set(tp, { ts: now(), sg: 'sig' });
-  assert.equal(store.get(tp).d.sg, 'sig');
+  store.set(tp, { ts: now(), iv: 'aXY=', ct: 'c2ln' });
+  assert.equal(store.get(tp).d.ct, 'c2ln');
   const db = new DatabaseSync(join(dir, 'hush.db'), { readOnly: true });
   const n = db.prepare("SELECT COUNT(*) AS n FROM docs WHERE parent = 'presence' OR parent LIKE '%/typing'").get().n;
   db.close();

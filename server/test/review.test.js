@@ -85,7 +85,7 @@ test('searches, chat creation, posts, side marks and profile reads each have the
     assert.equal((await A.call('set', { p: `channels/${gid(1)}/posts/pOsT00000001`, d: post() })).ok, true);
     assert.equal((await A.call('set', { p: `channels/${gid(1)}/posts/pOsT00000002`, d: post() })).ok, true);
     assert.equal((await A.call('add', { p: `channels/${gid(1)}/posts`, d: post() })).e, 'ratelimit', 'posts, add included');
-    const mark = { ts: Date.now(), sg: 'c2ln' };
+    const mark = { ts: Date.now(), iv: 'aXY=', ct: 'c2ln' };
     assert.equal((await A.call('set', { p: `channels/${gid(1)}/typing/0~${TAG}`, d: mark })).ok, true);
     assert.equal((await A.call('set', { p: `channels/${gid(1)}/reads/0~${TAG}`, d: mark })).ok, true);
     assert.equal((await A.call('set', { p: `channels/${gid(1)}/typing/0~${TAG}`, d: mark })).e, 'ratelimit', 'side marks');

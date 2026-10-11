@@ -52,12 +52,21 @@ test('a key opens a chat at its level; a wrong key does not; the record is trimm
   assert.equal((await A.ok('chat.open', { cid: CID2, cap: caps.o })).level, 'owner');
 });
 
+test('a read mark or a reaction with its signature in the clear is refused (release 18)', async () => {
+  // B is a member of CID2. The signature must travel sealed inside ct, so nothing stored ties a mark to an account key.
+  for (const [p, d] of [
+    [`channels/${CID2}/acts/${PID}~${TAG}~react`, { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now(), sg: 'c2ln' }],
+    [`channels/${CID2}/reads/0~${TAG}`, { ts: Date.now(), sg: 'c2ln' }],
+    [`channels/${CID2}/reads/0~${TAG}`, { ts: Date.now(), iv: 'aXY=', ct: 'c2ln', sg: 'c2ln' }],
+  ]) assert.equal((await B.call('set', { p, d })).e, 'invalid', JSON.stringify(d));
+});
+
 test('levels decide who may do what in a channel', async () => {
   // B is a member of CID2, C an admin, A the owner (opened above)
   assert.equal((await B.call('set', { p: `channels/${CID2}/posts/${PID}`, d: post() })).e, 'denied', 'members do not post in channels');
   await C.ok('set', { p: `channels/${CID2}/posts/${PID}`, d: post() });
-  await B.ok('set', { p: `channels/${CID2}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now(), sg: 'sig' } });
-  await B.ok('set', { p: `channels/${CID2}/reads/0~${TAG}`, d: { ts: Date.now(), sg: 'sig' } });
+  await B.ok('set', { p: `channels/${CID2}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now() } });
+  await B.ok('set', { p: `channels/${CID2}/reads/0~${TAG}`, d: { ts: Date.now(), iv: 'aXY=', ct: 'c2ln' } });
   await B.ok('update', { p: `channels/${CID2}`, d: { ts: 5, last: { ts: 5, sl: 1 } } });
   assert.equal((await B.call('update', { p: `channels/${CID2}`, d: { pins: [PID] } })).e, 'denied', 'pins are an admin matter outside DMs');
   await C.ok('update', { p: `channels/${CID2}`, d: { pins: [PID], reactions: { mode: 'off' } } });
