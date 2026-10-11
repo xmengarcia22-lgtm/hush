@@ -79,27 +79,42 @@ const ksKey=()=>'hush:ks:'+S.me.handle;
 function ksMap(){if(S.ksFor!==S.me.handle){S.ksFor=S.me.handle;S.ks=ls.get(ksKey(),{})}return S.ks}
 function ksGet(cid,e){const m=ksMap();return (m[cid]&&m[cid][e])||null}
 function ksPut(cid,e,raw){const m=ksMap();if(m[cid]&&m[cid][e]===raw)return;(m[cid]=m[cid]||{})[e]=raw;ls.set(ksKey(),m);scheduleBackup()}
-/* "Message backup": off by default. When it's on, the chat-key store is also kept on the server in a box that only
-   your account keys can open, so restoring with your recovery words (or password) brings past messages back too.
-   Off means recovery brings back your account, contacts and groups, but a new phone starts with empty chats. */
+/* "Message backup": on from the start for new accounts (accounts from before keep their choice). When it's on, the
+   chat-key store is also kept on the server in a box that only your account keys can open, so logging in on a new
+   device with your password or recovery words brings past messages back too. Off means a new device that logs in that
+   way starts with empty chats. A save merges, never replaces: the device takes the keys the backup has and adds the
+   ones it lacks, and each write names the version it merged, so two devices saving at once can't drop each other's
+   keys. Every app open does the same. */
 const backupOn=()=>!!(S.prefs&&S.prefs.backup);
 function backupKey(id){const k='backup:'+id.handle;
   if(!S.chanKeys.has(k))S.chanKeys.set(k,(async()=>aesKey(await crypto.subtle.importKey('jwk',id.ecdhPriv,EC,false,['deriveBits']),await pubKey(id.ecdh,'e'),'hush-backup:'+id.handle))());
   return S.chanKeys.get(k)}
 let backupT=null;
-function scheduleBackup(){if(!backupOn()||!S.db)return;clearTimeout(backupT);backupT=setTimeout(()=>uploadBackup().catch(()=>{}),2500)}
-async function uploadBackup(){if(!S.db||!S.me)return;const me=S.me,iv=crypto.getRandomValues(new Uint8Array(12));
-  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('backup|'+me.handle)},await backupKey(me),enc.encode(JSON.stringify({v:1,ks:ksMap()})));
-  await S.db.doc(await backupPath(me)).set({iv:b64(iv),ct:b64(ct),ts:Date.now()})}
+function scheduleBackup(){if(!backupOn()||!S.db)return;clearTimeout(backupT);backupT=setTimeout(()=>syncBackup().catch(()=>{}),2500)}
+async function backupKeys(id,v){ // the key store inside a backup; null when this account can't open it
+  try{const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('backup|'+id.handle)},await backupKey(id),unb64(v.ct));
+    const o=JSON.parse(dec.decode(pt));return o&&o.v===1&&o.ks&&typeof o.ks==='object'?o.ks:null}catch{return null}}
+function mergeKeys(into,from){let n=0; // adds the keys `into` lacks; a key already there is never replaced
+  for(const [cid,es] of Object.entries(from||{})){if(!es||typeof es!=='object')continue;
+    for(const [e,raw] of Object.entries(es)){if(typeof raw!=='string'||!/^[A-Za-z0-9+/=]{40,48}$/.test(raw)||(into[cid]&&into[cid][e]))continue;(into[cid]=into[cid]||{})[e]=raw;n++}}
+  return n}
+async function syncBackup(){ // both ways; gives back how many keys this device gained
+  if(!S.db||!S.me||!backupOn())return 0;const me=S.me,ref=S.db.doc(await backupPath(me));let got=0;
+  for(let i=0;i<6;i++){
+    const s=await ref.get(),v=s.exists?s.data():null,theirs=v?await backupKeys(me,v):{};if(S.me!==me||!backupOn())return got; // nothing is written once it's turned off
+    if(!theirs){badBackupNotice();return got} // one this account can't open is left alone, and said so once
+    if(!v&&(await backupStillOn(me.handle))!==true)return got; // creating one from nothing: the setting as the server has it, in case another device turned it off since this page loaded
+    const mine=ksMap(),n=mergeKeys(mine,theirs);if(n){ls.set(ksKey(),mine);got+=n}
+    const all=JSON.parse(JSON.stringify(theirs));if(!mergeKeys(all,mine))return got; // the backup already has every key here
+    const iv=crypto.getRandomValues(new Uint8Array(12)),ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('backup|'+me.handle)},await backupKey(me),enc.encode(JSON.stringify({v:1,ks:all})));
+    try{await ref.set({iv:b64(iv),ct:b64(ct),ts:Math.max(Date.now(),((v&&v.ts)||0)+1)},{was:(v&&v.ts)||0});return got}
+    catch(e){if(!(e&&e.code==='conflict'))throw e;await new Promise(r=>setTimeout(r,200+Math.random()*800))} // another device wrote in between: merge again
+  }
+  return got}
 async function restoreBackup(id){ // on a fresh login or recovery: bring back the saved chat keys, if "Message backup" was on
   try{const rd=async()=>S.db.doc(await backupPath(id)).get();let s;try{s=await rd()}catch{await new Promise(r=>setTimeout(r,800));s=await rd()} // the sign-in may still be settling
-    if(!s.exists)return 0;const v=s.data();
-    const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('backup|'+id.handle)},await backupKey(id),unb64(v.ct));
-    const o=JSON.parse(dec.decode(pt));if(!o||o.v!==1||!o.ks||typeof o.ks!=='object')return 0;
-    const key='hush:ks:'+id.handle,m=ls.get(key,{});let n=0;
-    for(const [cid,es] of Object.entries(o.ks)){if(!es||typeof es!=='object')continue;
-      for(const [e,raw] of Object.entries(es)){if(typeof raw!=='string'||!/^[A-Za-z0-9+/=]{40,48}$/.test(raw)||(m[cid]&&m[cid][e]))continue;(m[cid]=m[cid]||{})[e]=raw;n++}}
-    ls.set(key,m);S.ksFor=null;return n;
+    if(!s.exists)return 0;const ks=await backupKeys(id,s.data());if(!ks)return 0;
+    const key='hush:ks:'+id.handle,m=ls.get(key,{}),n=mergeKeys(m,ks);ls.set(key,m);S.ksFor=null;return n;
   }catch{return 0}}
 async function safetyNumber(a,b,override){
   const src=[a,b].sort().map(h=>{const d=(override&&override[h])||peerKeys(h);return [h,d.ecdh.x,d.ecdh.y,d.sig.x,d.sig.y].join(',')}).join('|');

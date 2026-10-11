@@ -125,6 +125,7 @@ const HANDLERS = {
     if (typeof f.p === 'string' && f.p.startsWith('inbox/') && !c.drops.take()) fail('ratelimit', 'too many pointers dropped; slow down');
     takeWrite(c, f.p);
     const actor = c.actor(), creating = isSignup(c, f.p);
+    if (f.was !== undefined) actor.was = f.was;   // the version a write was merged from (backups); checked, never stored
     if (creating) {
       actor.signupProof = c.signupProofOk(f.pow);
       if (actor.signupProof && !c.ctx.signups.take(c.dayTag)) fail('ratelimit', 'too many new accounts from here today');   // the backstop

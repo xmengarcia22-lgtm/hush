@@ -158,7 +158,7 @@ test('blind-address boxes follow their fixed rules and need no sign-in', async (
   await anon.ok('set', { p: 'vault/' + vault, d: { iv: 'aXY=', ct: 'Y3Q=', ts: 1 } });
   await anon.ok('update', { p: 'vault/' + vault, d: { ts: 2 } });
   assert.equal((await anon.call('delete', { p: 'vault/' + vault })).e, 'denied');
-  await anon.ok('set', { p: 'backup/' + backup, d: { iv: 'aXY=', ct: 'Y3Q=', ts: 1 } });
+  await anon.ok('set', { p: 'backup/' + backup, d: { iv: 'aXY=', ct: 'Y3Q=', ts: 1 }, was: 0 });
   await anon.ok('delete', { p: 'backup/' + backup });
   // A request at a login's tag: a reserved login is not enough, and since release 16 nothing opens one (SPEC.md 14.14).
   const waiting = { state: 'wait', ts: Date.now(), pub: { x: 'x'.repeat(43), y: 'y'.repeat(43) } };
@@ -166,6 +166,26 @@ test('blind-address boxes follow their fixed rules and need no sign-in', async (
   await anon.ok('set', { p: 'logins/' + ltag, d: { ts: 1 } });
   assert.equal((await anon.call('set', { p: 'linkreqs/' + ltag, d: waiting })).e, 'denied');
   await anon.close();
+});
+
+test('a backup write names the version it merged, so two devices never write over each other (release 19)', async () => {
+  const one = await connect(S.url), two = await connect(S.url);
+  await one.hello(); await two.hello();
+  const p = 'backup/b' + 'e'.repeat(32), box = (ct, ts) => ({ iv: 'aXY=', ct, ts });
+  assert.equal((await one.call('set', { p, d: box('YQ==', 5) })).e, 'invalid', 'a write that names no version is refused');
+  assert.equal((await one.call('set', { p, d: box('YQ==', 5), was: 3 })).e, 'conflict', 'nothing is stored yet, so only 0 is current');
+  await one.ok('set', { p, d: box('YQ==', 5), was: 0 });
+  // both devices read version 5; the first write wins, and the second must read and merge again
+  await one.ok('set', { p, d: box('YWI=', 6), was: 5 });
+  assert.equal((await two.call('set', { p, d: box('Yg==', 6), was: 5 })).e, 'conflict', 'a write from a version that changed is refused');
+  assert.equal(S.srv.store.get(p, SYSTEM).d.ct, 'YWI=', 'and the first write stays');
+  await two.ok('set', { p, d: box('YWJj', 7), was: 6 });
+  assert.equal((await two.call('update', { p, d: { ct: 'eg==' } })).e, 'invalid', 'a patch can’t skip the check');
+  assert.equal((await one.call('set', { p, d: box('eA==', 8), was: '7' })).e, 'invalid', 'the version is a number');
+  assert.deepEqual(Object.keys(S.srv.store.get(p, SYSTEM).d).sort(), ['ct', 'iv', 'ts'], 'the version is checked, never stored');
+  await two.ok('delete', { p });
+  await one.ok('set', { p, d: box('YQ==', 9), was: 0 });   // after Message backup is turned off and on again, a fresh start
+  await one.close(); await two.close();
 });
 
 test('chats need a signed-in connection and a room key; owners and uids are gone', async () => {

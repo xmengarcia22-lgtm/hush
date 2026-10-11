@@ -204,6 +204,12 @@ function standardCheck(a, op, p, ctx) {
       return;
     case 'backup':
       if (list) noList();
+      // A backup is merged by the page, never written blind: a write names the version it merged (`was`: the stored
+      // `ts`, 0 for none) and is refused if another device wrote in between, so no device's keys are lost (release 19).
+      if (op === 'set' || op === 'update') {
+        if (typeof a.was !== 'number' || !Number.isFinite(a.was)) fail('invalid', 'a backup write names the version it merged');
+        if (((ctx.prev && ctx.prev.ts) || 0) !== a.was) fail('conflict', 'the backup changed since it was read; merge again');
+      }
       return;
     case 'inbox':
       // Your own notes are yours to read, tidy, and (a note to yourself) write. A note to anyone else

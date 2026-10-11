@@ -336,7 +336,7 @@ async function renderList(){
     else if(l.exp&&l.exp<=now)sub='Message disappeared';
     else if(hiddenPost(l,pvs[i]))sub='New message';
     else if(!mine&&isBlocked(l.from))sub='Message from someone you blocked';
-    else{const txt=previewText(pvs[i]);sub=t==='channel'||isSelf(c)?txt:t==='group'?(mine?'You':displayName(l.from))+': '+txt:(mine?'You: ':'')+txt}
+    else{if(pvs[i]&&pvs[i].nokey)noKeyNotice(c,l.e??0);const txt=previewText(pvs[i]);sub=t==='channel'||isSelf(c)?txt:t==='group'?(mine?'You':displayName(l.from))+': '+txt:(mine?'You: ':'')+txt}
     const dr=c.id!==S.chan&&ls.get(draftKey(c.id),'');
     if(dr){const se=el('span','t-sub');se.append(el('span','draft','Draft: '),plainText(dr));bot.append(se)}else bot.append(el('span','t-sub',sub));
     if((S.mentions.get(c.id)||0)&&c.id!==S.chan)bot.append(el('span','unread at','@'));
@@ -1608,7 +1608,7 @@ function msgNode(c,p,o,cont){
   else if(t==='group'&&!mine&&!cont){const n=el('div','post-from',displayName(p.from));n.style.color=`hsl(${hue(p.from)} 55% 46%)`;withBadge(n,p.from);if(isAdminH(c,p.from))n.append(el('span','role-sm',p.from===c.owner?'owner':'admin'));b.append(n)}
   const parts=[];
   if(S.serverView)b.append(el('span','cipher',p.ct.slice(0,160)+'\u2026'));
-  else if(o.text==null)b.append(el('span','bad',o.nokey?'Sent before this device was added, so its key isn\u2019t on this device.':'Couldn\u2019t decrypt this message.'));
+  else if(o.text==null){if(o.nokey)noKeyNotice(c,p.e??0);b.append(el('span','bad',o.nokey?'Sent before this device was added, so its key isn\u2019t on this device.':'Couldn\u2019t decrypt this message.'))}
   else{
     if(o.fwd){const f=html('div','fwd',I.fwdSm+'<span></span>');f.lastChild.textContent='Forwarded from '+o.fwd.name;b.append(f)}
     if(o.reply){const q=el('button','quote');q.append(withBadge(el('span','q-from',displayName(o.reply.from)),o.reply.from),el('span','q-text',o.reply.snip));
@@ -2258,10 +2258,14 @@ function settingsAdvanced(body,me){
   const rs=html('button','menu-item flush',I.down+'<span>Restore an account</span>');rs.onclick=()=>openRestore();
   body.append(bk,rs);
   {const tg=el('label','toggle');const cb=el('input');cb.type='checkbox';cb.checked=backupOn();
-    cb.onchange=async()=>{if(!S.db){cb.checked=!cb.checked;toast('You need to be online for this.');return}cb.disabled=true;const on=cb.checked;
-      try{P().backup=on;if(on)await uploadBackup();else await S.db.doc(await backupPath(me)).delete().catch(()=>{});await saveContacts();
+    cb.onchange=async()=>{if(!S.db){cb.checked=!cb.checked;toast('You need to be online for this.');return}const on=cb.checked;
+      if(!on&&!(await confirmSheet('Turn off Message backup?','This deletes your Message backup from the server.',{danger:true,yes:'Turn off and delete',no:'Keep it on',
+        note:'After that, a device that logs in with your password or recovery words won\u2019t be able to open older messages. Linking a new device from one you\u2019re logged in on still brings them over, and your devices keep what they have. You can turn it back on at any time.'}))){cb.checked=true;return}
+      cb.disabled=true;
+      try{P().backup=on;await saveContacts(); // the setting first, so a device saving at this moment sees it off before it could put a backup back
+        if(on){if(await syncBackup())keysArrived()}else await S.db.doc(await backupPath(me)).delete(); // a delete that fails leaves it on: never say "off" while the backup is still there
         toast(on?'Message backup is on':'Message backup is off')}
-      catch{P().backup=!on;cb.checked=!on;toast('That didn\u2019t save. Try again.')}cb.disabled=false};
+      catch{P().backup=!on;cb.checked=!on;saveContacts();toast('That didn\u2019t save. Try again.')}cb.disabled=false};
     tg.append(cb,el('span',null,'Message backup'));
     body.append(tg,el('p','hint','On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.'))}
   body.append(el('div','menu-label flush','Security'));
@@ -2374,6 +2378,7 @@ async function loadContacts(){
   catch{toast('Your contacts couldn\u2019t be unlocked on this device.')}
   S.contactsReady=true;
   if(vaultOk&&s&&!s.exists&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;S.prefs.tier='';saveContacts()} // new account: Message backup on from the start, and no power tier yet
+  if(vaultOk&&S.me.handle===me&&backupOn())S.keySync=syncBackup().then(n=>{if(n&&S.me&&S.me.handle===me)keysArrived()}).catch(()=>{}); // every app open: take the keys the backup has, add the ones it lacks
   if(tierQueued&&tierQueued.h===me){const t=tierQueued.t;tierQueued=null;noteTier(t)}
   if(vaultOk&&S.me.handle===me){const r=recLocal(me),v=S.prefs.rec; // tell your other devices about words set up here (and words set up before this update)
     if(r&&r.loc&&r.conf!==false&&(!v||(v.loc!==r.loc&&(r.ts||0)>(v.ts||0)))){S.prefs.rec={loc:r.loc,ts:r.ts||Date.now()};saveContacts()}
@@ -3097,6 +3102,31 @@ function dropUnsealed(){ // nothing unsealed stays in memory: keys, caches, decr
   S.posts=[];S.rawPosts=[];S.older=[];S.scheduled=[];S.future=[];S.dir={};S.presence={};S.pins={};S.verified={};S._vp=null;for(const k of Object.keys(backupPaths))delete backupPaths[k];
   dirMiss.clear();loginHealed.clear();healed.clear();wrapSynced.clear();baseDone.clear();dmRenoted.clear();rebuildNames();
 }
+// Keys came in from Message backup: what was locked on this device may open now. The open chat is opened again, since
+// without its key this device may not have been let in at all.
+function keysArrived(){if(S.recheckChats)S.recheckChats();if(S.chan)openConv(S.chan);renderList()}
+// Once per device: some older messages can't be opened here. Say why, and what brings them back. Asked only once this
+// open's backup pull is done and the key is still missing, so keys on their way from the backup don't set it off.
+function noKeyNotice(c,e){const h=S.me.handle,k='hush:nokeyTold:'+h;if(ls.get(k,false))return;
+  setTimeout(async()=>{if(S.me&&S.me.handle===h&&!S.contactsReady)return noKeyNotice(c,e); // the vault first: this open's backup pull starts with it
+    await S.keySync;if(!S.me||S.me.handle!==h||ls.get(k,false)||await convKey(c,e))return;ls.set(k,true);
+    const {body,close}=sheet('Some older messages won\u2019t open here');const ok=el('button','primary','OK');ok.style.width='100%';ok.onclick=close;
+    body.append(el('p',null,'They were sent before this device was added, so their keys aren\u2019t on it.'),
+      el('p',null,backupOn()?'To bring them back, open Hush on a device that can still read them. With Message backup on, it adds their keys to your backup, and this device picks them up the next time you open Hush here.'
+        :'To bring them back, turn on Message backup (Settings \u2192 Advanced) on a device that can still read them. This device then picks their keys up the next time you open Hush here.'),ok)},1500)}
+// Message backup as the vault on the server has it right now: true, false, or null when it can't be read. A device left
+// open while another turned it off still believes it's on; told false, it falls in line instead of putting a backup back.
+async function backupStillOn(h){let on;
+  try{const s=await S.db.doc(await vaultPath(h)).get();if(!s.exists)return backupOn(); // no settings saved yet (a brand-new account): what this page knows is all there is
+    const v=s.data(),o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('vault|'+h)},await vaultKey(),unb64(v.ct))));
+    on=!Array.isArray(o)&&!!(o.prefs&&o.prefs.backup===true)}catch{return null}
+  if(on===false&&S.me&&S.me.handle===h&&backupOn()){P().backup=false;if(S.tab==='profile')setTab('profile')}
+  return on}
+// Once per device: there's a Message backup this device's keys can't open. Said plainly, and nothing offered that would
+// delete it, since a device with out-of-date keys could wipe a backup the other devices still open.
+function badBackupNotice(){const k='hush:badBackupTold:'+S.me.handle;if(ls.get(k,false))return;ls.set(k,true);
+  const {body,close}=sheet('Your Message backup can\u2019t be opened here');const ok=el('button','primary','OK');ok.style.width='100%';ok.onclick=close;
+  body.append(el('p',null,'There is a Message backup on the server, but this device\u2019s keys can\u2019t open it, so it can\u2019t bring older messages back here. Nothing was changed: if your other devices can still open it, it keeps working for them.'),ok)}
 function confirmSheet(title,text,opt={}){ // a question with two answers; resolves true only for the first one
   return new Promise(res=>{const {body,close}=sheet(title,{locked:true});
     const end=v=>{document.removeEventListener('keydown',esc);close();res(v)},esc=e=>{if(e.key==='Escape')end(false)};
@@ -3626,15 +3656,16 @@ function watchInbox(id,cb){
     const dm=typeOf(shown)==='dm';dropPointer(h,{t:dm?'dm':'invite',cid,from:h,type:typeOf(shown),peer:dm?(k.p.peer||k.p.from):undefined}).catch(()=>renoted.delete(cid))}
   function settle(cid,verdict,shown){
     if(verdict==='show'){waiting.delete(cid);docs.set(cid,shown);if(typeOf(shown)==='dm')recordBase(shown);adopt(cid,shown)}
-    else if(verdict==='wait'){docs.delete(cid);waiting.add(cid)} // keep the pointer: a wrap for this device, or the record, may still arrive
+    else if(verdict==='wait'){docs.delete(cid);waiting.add(cid);if(shown)noKeyNotice(shown,epochOf(shown))} // keep the pointer: a wrap for this device, or the record, may still arrive
     else{waiting.delete(cid);docs.delete(cid);forget(cid)} // deleted, or we were removed: tidy the pointer away
     emit()}
   // Chats we hold a pointer for but could not show yet: look again now and then with a fresh copy of the record. A
   // watch that ended is started afresh; one still deferred is re-opened, which re-sends it once the chat opens.
-  const retryT=setInterval(()=>{if(dead||!S.db||!S.db.refreshChat)return;
+  const retry=()=>{if(dead||!S.db||!S.db.refreshChat)return;
     for(const cid of [...waiting].slice(0,20)){if(![...ptrs.values()].some(p=>p&&p.cid===cid)){waiting.delete(cid);continue}
       waiting.delete(cid);waiting.add(cid); // twenty at a time, taking turns
-      S.chatDocs.delete(cid);if(subs.has(cid))S.db.refreshChat(cid).catch(()=>{});else start(cid)}},15000);
+      S.chatDocs.delete(cid);if(subs.has(cid))S.db.refreshChat(cid).catch(()=>{});else start(cid)}};
+  const retryT=setInterval(retry,15000);S.recheckChats=retry; // keys came in from the backup: look now, not at the next tick
   return()=>{dead=true;clearInterval(retryT);un();for(const cid of [...subs.keys()])drop(cid)};
 }
 /* ---------- boot ---------- */
