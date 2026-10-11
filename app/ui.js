@@ -2891,7 +2891,7 @@ function watchLinkRequests(){
   clearInterval(linkPollT);linkPollT=null;if(!S.db||!S.me)return;
   const me=S.me;let turn=0;
   linkPollT=setInterval(async()=>{if(S.me!==me||!linkWatchable(me.handle))return;try{const tags=await linkTags(me.handle),tag=tags[turn++%tags.length],s=await S.db.doc('linkreqs/'+tag).get();if(!s.exists)return;const r=s.data();
-    if(r.state!=='wait'||!r.pub||Date.now()-r.ts>5*60e3||linkSeen.has(r.ts+':'+r.pub.x))return;linkSeen.add(r.ts+':'+r.pub.x);askApprove(tag,r)}catch{}},3500);
+    if(r.state!=='wait'||!r.pub||Date.now()-r.ts>LINK_LIFE||linkSeen.has(r.ts+':'+r.pub.x))return;linkSeen.add(r.ts+':'+r.pub.x);askApprove(tag,r)}catch{}},3500);
 }
 function askApprove(tag,r){
   const {body,sh,close}=sheet('Log in on a new device?');sh.parentNode.style.zIndex='70';
@@ -2913,9 +2913,17 @@ async function qrDecoder(){
   if('BarcodeDetector' in window){try{const f=await BarcodeDetector.getSupportedFormats();if(f.includes('qr_code')){const d=new BarcodeDetector({formats:['qr_code']});
     return async src=>{const r=await d.detect(src);return r[0]&&r[0].rawValue||null}}}catch{}}
   const jq=await loadJsQR();const cv=document.createElement('canvas'),cx=cv.getContext('2d',{willReadFrequently:true});
-  return async src=>{const w=src.videoWidth||src.naturalWidth||src.width,h=src.videoHeight||src.naturalHeight||src.height;if(!w||!h)return null;
-    const k=Math.min(1,800/Math.max(w,h));cv.width=Math.round(w*k);cv.height=Math.round(h*k);cx.drawImage(src,0,0,cv.width,cv.height);
+  // Where people aim, at full resolution and enlarged to 800 px: the centre 60%, then a tighter 35% for a small or blurred
+  // code, then the whole frame shrunk for one held off-centre. A camera tries one of these per frame, in turn, so a phone
+  // isn't busy for long; a single photo tries them all.
+  const read=(src,sx,sy,sw,sh,up)=>{const k=up?800/Math.max(sw,sh):Math.min(1,800/Math.max(sw,sh));cv.width=Math.round(sw*k);cv.height=Math.round(sh*k);
+    cx.imageSmoothingQuality='high';cx.drawImage(src,sx,sy,sw,sh,0,0,cv.width,cv.height);
     const r=jq(cx.getImageData(0,0,cv.width,cv.height).data,cv.width,cv.height,{inversionAttempts:'attemptBoth'});return r&&r.data||null};
+  const crop=(src,w,h,f)=>{const s=Math.round(Math.min(w,h)*f);return read(src,Math.round((w-s)/2),Math.round((h-s)/2),s,s,true)};
+  const ways=[(src,w,h)=>crop(src,w,h,0.6),(src,w,h)=>crop(src,w,h,0.35),(src,w,h)=>read(src,0,0,w,h,false)];let turn=0;
+  return async src=>{const w=src.videoWidth||src.naturalWidth||src.width,h=src.videoHeight||src.naturalHeight||src.height;if(!w||!h)return null;
+    if(src.videoWidth)return ways[turn++%ways.length](src,w,h);
+    for(const way of ways){const r=way(src,w,h);if(r)return r}return null};
 }
 // What a refused or dropped request says, for either end. The reason is the server's or the network's; the older texts
 // below it still cover the people-made outcomes (refused, expired, wrong code).
@@ -2949,7 +2957,7 @@ async function approveFromQr(text){
   let tag=null,r=null; // the code must match the device that's asking to log in to this account
   for(const t of await linkTags(S.me.handle)){const s=await S.db.doc('linkreqs/'+t).get();if(s.exists&&s.data().pub&&await fits(s.data())){tag=t;r=s.data();break}}
   if(!r)throw new Error('nomatch');
-  if(r.state!=='wait'||Date.now()-r.ts>5*60e3)throw new Error('expired');
+  if(r.state!=='wait'||Date.now()-r.ts>LINK_LIFE)throw new Error('expired');
   linkSeen.add(r.ts+':'+r.pub.x);await approveLink(tag,r,secret);return {dev:r.dev,key:await devShort(r.devk)};
 }
 function openLinkScanner(){
@@ -2984,8 +2992,9 @@ function openLinkScanner(){
   // The camera is used only if this device has one, and only once the person taps to scan; without one, or if it can't
   // start, this device shows a code for the new device to scan instead (showLinkCode).
   camBtn.onclick=async()=>{err.textContent='';status.textContent='Starting the camera\u2026';cam.hidden=false;
-    try{stopCam=await startQrCamera(vid,t=>{if(done||working)return;if(t.startsWith('hush-link:'))return use(t);status.textContent='That isn\u2019t a Hush login code.'});
-      camBtn.hidden=true;status.textContent='Point the camera at the QR code on your new device.'}
+    try{stopCam=await startQrCamera(vid,t=>{if(done||working)return;if(t.startsWith('hush-link:'))return use(t);status.textContent='That isn\u2019t a Hush login code.'},
+        ()=>{status.textContent='Can\u2019t read it yet. Move closer so the code fills the square, or type the code shown under it below instead.';tf.scrollIntoView({block:'center'})});
+      camBtn.hidden=true;status.textContent='Move closer until the QR code on your new device fills the square.'}
     catch{cam.hidden=true;camBtn.hidden=true;showBtn.hidden=true;status.textContent='The camera couldn\u2019t start, so this device shows a code for your new device to scan instead.';showCode()}};
   showBtn.onclick=()=>{showBtn.hidden=true;showCode()};
   hasCamera().then(yes=>{if(!sh.isConnected)return;
@@ -2995,11 +3004,12 @@ function openLinkScanner(){
 // Whether this device has a camera, without asking for it (no permission prompt; the list only says what kinds exist).
 const hasCamera=async()=>{try{return !!(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices)&&(await navigator.mediaDevices.enumerateDevices()).some(d=>d.kind==='videoinput')}catch{return false}};
 // Starts the camera (this is when the browser asks) and reads QR codes into onText until the returned stop() is called.
-async function startQrCamera(vid,onText){
-  const decode=await qrDecoder(),stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
-  vid.srcObject=stream;await vid.play();let on=true;
-  const tick=async()=>{if(!on)return;if(vid.readyState>=2){try{const t=await decode(vid);if(t)await onText(t)}catch{}}setTimeout(tick,250)};tick();
-  return ()=>{on=false;stream.getTracks().forEach(t=>t.stop())};
+async function startQrCamera(vid,onText,onSlow){ // onSlow: nothing read for 8 seconds
+  const decode=await qrDecoder(),stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1920},height:{ideal:1080}}}); // full HD where the camera has it: without asking, most phones send 640x480
+  vid.srcObject=stream;await vid.play();let on=true,seen=false;
+  const slow=setTimeout(()=>{if(on&&!seen&&onSlow)onSlow()},8000);
+  const tick=async()=>{if(!on)return;if(vid.readyState>=2){try{const t=await decode(vid);if(t){seen=true;await onText(t)}}catch{}}setTimeout(tick,250)};tick();
+  return ()=>{on=false;clearTimeout(slow);stream.getTracks().forEach(t=>t.stop())};
 }
 /* ---------- the reverse direction (SPEC.md 14.10): this device shows a code, the new device scans it ----------
    Same contents as the new device's own code: a fresh 128-bit secret and the fingerprint of the request's keys (linkFp).
@@ -3007,7 +3017,7 @@ async function startQrCamera(vid,onText){
    then is anything signed or sent, and only for the request the code was made for. The code dies with the request (5
    minutes), after one use, or when the sheet closes. With several requests waiting, the person picks one. */
 async function waitingLinkReqs(){const out=[];
-  for(const t of await linkTags(S.me.handle)){try{const s=await S.db.doc('linkreqs/'+t).get(),r=s.exists&&s.data();if(r&&r.state==='wait'&&r.pub&&Date.now()-r.ts<5*60e3)out.push({tag:t,r})}catch{}}
+  for(const t of await linkTags(S.me.handle)){try{const s=await S.db.doc('linkreqs/'+t).get(),r=s.exists&&s.data();if(r&&r.state==='wait'&&r.pub&&Date.now()-r.ts<LINK_LIFE)out.push({tag:t,r})}catch{}}
   return out}
 async function showLinkCode(host,sh,close){
   if(!sh.isConnected)return;host.replaceChildren(el('p','hint center','Looking for your new device\u2019s request\u2026'));
@@ -3019,8 +3029,8 @@ async function showLinkCode(host,sh,close){
     b.style.width='100%';b.style.marginTop='8px';b.onclick=()=>showCodeFor(host,sh,close,q.tag,q.r);host.append(b)}
 }
 async function showCodeFor(host,sh,close,tag,r){
-  let secret=crypto.getRandomValues(new Uint8Array(16));const fp=await linkFp(r.pub,r.devk),end=r.ts+5*60e3,key=await devShort(r.devk);
-  const q=el('div','qr'),left=el('p','hint center'),svg=qrSvg('hush-link:3:'+b64u(secret)+':'+fp,'QR code for your new device to scan');if(svg)q.innerHTML=svg;
+  let secret=crypto.getRandomValues(new Uint8Array(16));const fp=await linkFp(r.pub,r.devk),end=Date.now()+5*60e3,key=await devShort(r.devk); // 5 minutes from showing it
+  const q=el('div','qr big'),left=el('p','hint center'),svg=qrSvg('hush-link:3:'+b64u(secret)+':'+fp,'QR code for your new device to scan');if(svg)q.innerHTML=svg;
   host.replaceChildren(el('p',null,'Scan this with '+(r.dev||'your new device')+' (device key '+key+'), or type the code under it there.'),q,el('div','link-code-text',linkCode(secret,fp)),left,
     el('p','warnbox','Only let a device you\u2019re holding scan this.'));
   const over=msg=>{secret=null;host.replaceChildren(el('p','hint center',msg))};
@@ -3060,7 +3070,9 @@ function scanOtherCode(useText,onOk){
   file.onchange=async()=>{const f=file.files[0];file.value='';if(!f)return;err.textContent='';
     try{const t=await (await qrDecoder())(await createImageBitmap(f));if(!t){err.textContent='No QR code found in that photo. Try a closer, sharper photo.';return}use(t)}catch{err.textContent='Couldn\u2019t read that photo.'}};
   camBtn.onclick=async()=>{status.textContent='Starting the camera\u2026';cam.hidden=false;
-    try{stopCam=await startQrCamera(vid,t=>{if(t.startsWith('hush-link:'))return use(t)});camBtn.hidden=true;status.textContent='Point the camera at the QR code on your other device.'}
+    try{stopCam=await startQrCamera(vid,t=>{if(t.startsWith('hush-link:'))return use(t)},
+        ()=>{status.textContent='Can\u2019t read it yet. Move closer so the code fills the square, or type the code below instead.';tf.scrollIntoView({block:'center'})});
+      camBtn.hidden=true;status.textContent='Move closer until the QR code on your other device fills the square.'}
     catch{cam.hidden=true;status.textContent='The camera couldn\u2019t start. Type the code below, or pick a photo of it.'}};
   hasCamera().then(yes=>{if(!sh.isConnected)return;camBtn.hidden=!yes;
     status.textContent=yes?'Tap to scan the code with this device\u2019s camera. Your browser will ask first.':'No camera here. Type the code shown under the QR on your other device.'});
@@ -3086,25 +3098,38 @@ async function approveLink(tag,r,secret){
   await S.db.doc('linkreqs/'+tag).update({state:'ok',epub:await pubJwk(e),iv:b64u(iv),ct:b64u(ct)});
 }
 // --- the new device: asks, waits, then unlocks what the old device sent ---
-async function requestLink(login,onStatus){
-  const tag=await loginTag(login),e=await ephemeral(),secret=crypto.getRandomValues(new Uint8Array(16)),pub=await pubJwk(e),dv=await newDev();
+const LINK_LIFE=10*60e3; // a new device's request lives this long (the server lets it resume only that long, link.resume)
+async function requestLink(login,onStatus,prev,em){ // prev: the same request, continued after a reload
+  let tag,e,secret,pub,dv,ts;
+  if(prev){({tag,ts,pub,dv}=prev);secret=unb64u(prev.s);e={privateKey:await crypto.subtle.importKey('jwk',prev.e,EC,false,['deriveBits'])}}
+  else{tag=await loginTag(login);e=await ephemeral();secret=crypto.getRandomValues(new Uint8Array(16));pub=await pubJwk(e);dv=await newDev();ts=Date.now()}
   const devk={id:dv.id,x:dv.ecdh.x,y:dv.ecdh.y,sx:dv.sig.x,sy:dv.sig.y},secrets=[secret]; // this device's own code, and one it may scan
-  const ts=Date.now();await S.db.doc('linkreqs/'+tag).set({state:'wait',pub,ts,dev:deviceName(),devk});
+  // The server's record that this device confirmed the email belongs to one connection. After a reload or a reconnect the
+  // device gets it back by signing a fresh challenge with the device key inside this very request (link.resume): bound to
+  // this request, only while it waits, and nothing is kept that someone else could replay.
+  const resume=async()=>{const k=await crypto.subtle.importKey('jwk',dv.sigPriv,DS,false,['sign']);
+    await S.db.linkResume(tag,ts,async m=>b64(new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},k,enc.encode(m)))))};
+  if(prev){try{await resume()}catch{ls.set('hush:linkPending',null);throw new Error('noresume')}}
+  else{await S.db.doc('linkreqs/'+tag).set({state:'wait',pub,ts,dev:deviceName(),devk});
+    // in the sealed store (never sent anywhere) until the request ends, so a reload continues it instead of asking for a new code
+    ls.set('hush:linkPending',{login,em:em||null,tag,ts,pub,dv,s:b64u(secret),e:await crypto.subtle.exportKey('jwk',e.privateKey)})}
+  const forget=()=>{const p=ls.get('hush:linkPending',null);if(p&&p.tag===tag&&p.ts===ts)ls.set('hush:linkPending',null);if(S.linkResume===resume)S.linkResume=null};
+  S.linkResume=resume;
   // The codes commit to both keys (linkFp): the one-time key the handoff is sealed to, and this device's own key, which
   // the approving device signs onto the account. Swapping either on the server makes the code stop matching.
   const fp=await linkFp(pub,devk);onStatus({qr:'hush-link:3:'+b64u(secret)+':'+fp,code:linkCode(secret,fp),dk:await devShort(devk)});
   // Leaving, cancelling or timing out takes this request down, so the next try starts clean. Only this device's own
   // waiting request goes: one that was approved, refused, or replaced by a newer try is left alone.
   let stop=false,finished=false;
-  const withdraw=async()=>{if(finished)return;finished=true;try{const d=S.db.doc('linkreqs/'+tag),s=await d.get();if(s.exists&&s.data().ts===ts&&s.data().state==='wait')await d.delete()}catch{}};
+  const withdraw=async()=>{if(finished)return;finished=true;forget();try{const d=S.db.doc('linkreqs/'+tag),s=await d.get();if(s.exists&&s.data().ts===ts&&s.data().state==='wait')await d.delete()}catch{}};
   const cancel=()=>{stop=true;withdraw()};
   let fails=0; // polls that the server or the network refused, in a row: after ten the person is told why instead of waiting out the clock
-  const done=(async()=>{while(!stop&&Date.now()-ts<5*60e3){await new Promise(r=>setTimeout(r,3000));if(stop)return null;
-      try{const s=await S.db.doc('linkreqs/'+tag).get();fails=0;if(!s.exists)continue;const r=s.data();if(r.ts!==ts){finished=true;throw new Error('replaced')}
-        if(r.state==='no'){finished=true;S.db.doc('linkreqs/'+tag).delete().catch(()=>{});throw new Error('denied')}
+  const done=(async()=>{while(!stop&&Date.now()-ts<LINK_LIFE){await new Promise(r=>setTimeout(r,3000));if(stop)return null;
+      try{const s=await S.db.doc('linkreqs/'+tag).get();fails=0;if(!s.exists)continue;const r=s.data();if(r.ts!==ts){finished=true;forget();throw new Error('replaced')}
+        if(r.state==='no'){finished=true;forget();S.db.doc('linkreqs/'+tag).delete().catch(()=>{});throw new Error('denied')}
         if(r.state==='ok'){finished=true;let pt=null;
           for(const s of secrets){try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(r.iv),additionalData:enc.encode('hush-link-v2')},await linkKey(e.privateKey,r.epub,s),unb64u(r.ct));break}catch{}}
-          if(!pt)continue;
+          if(!pt)continue;forget();
           S.db.doc('linkreqs/'+tag).delete().catch(()=>{});const o=JSON.parse(dec.decode(pt));if(o.v!==2)return idFromBundle(o);
           const id=idFromBundle(o.b);if(o.d&&typeof o.d.s==='string'&&typeof o.d.by==='string'){id.dev=Object.assign(dv,{by:o.d.by,s:o.d.s,ts:Date.now()});id.trust=Array.isArray(o.trust)?o.trust.filter(x=>typeof x==='string'):[]}
           if(o.ks&&typeof o.ks==='object'){const cur=ls.get('hush:ks:'+id.handle,{});for(const [cid,m] of Object.entries(o.ks))if(m&&typeof m==='object')cur[cid]=Object.assign({},cur[cid]||{},m);ls.set('hush:ks:'+id.handle,cur);S.ksFor=null;if(S.me&&S.me.handle===id.handle)scheduleBackup()}
@@ -3117,8 +3142,10 @@ async function requestLink(login,onStatus){
   const useShown=async text=>{
     if(usedShown)throw new Error('used');const {secret:s,fits}=linkProof(text);
     if(!(await fits({pub,devk})))throw new Error('nomatch');
+    const cf=await linkConfirm(s,tag,ts,fp),write=()=>S.db.doc('linkreqs/'+tag).update({cf});
+    // a reconnect lost the confirmation: get it back once and try again. The code counts as used only once the proof is in.
+    try{await write()}catch(err){if(!(err&&err.code==='denied'))throw err;await resume();await write()}
     usedShown=true;secrets.push(s);
-    await S.db.doc('linkreqs/'+tag).update({cf:await linkConfirm(s,tag,ts,fp)});
   };
   return {cancel,done,useShown};
 }
@@ -3299,7 +3326,7 @@ function openDrawer(){
 function showOnboard(adding,notice){
   document.querySelectorAll('.onboard').forEach(x=>x.remove());
   const o=el('div','onboard'),w=el('div','onboard-in');o.append(w);document.body.append(o);
-  let login=null,link=null,proven=null; // proven: an email just confirmed on this connection, so backing out and trying again needn't ask for another code
+  let login=null,link=null,proven=null,linkEm=null; // proven: an email just confirmed on this connection, so backing out and trying again needn't ask for another code
   const head=(t,lead)=>{if(link){link.cancel();link=null}w.replaceChildren(html('div','logo',I.lockBig),el('h1',null,t),el('p','lead',lead))};
   const foot=(back)=>{if(back){const b=el('button','link','Back');b.onclick=back;w.append(b)}if(adding){const c=el('button','link','Cancel');c.onclick=()=>{if(link)link.cancel();o.remove()};w.append(c)}};
   const busy=(b,t)=>{b.disabled=!!t;if(t){b.dataset.t=b.dataset.t||b.textContent;b.textContent=t}else b.textContent=b.dataset.t||b.textContent};
@@ -3419,7 +3446,11 @@ function showOnboard(adding,notice){
     go.onclick=()=>{err.textContent='';const em=normEmail(i.value);if(!em){err.textContent='Enter a valid email address.';return}if(offline(err))return;stepCode(em)};
   };
   const stepCode=(em)=>{
+    linkEm=em;
     if(proven&&proven.em===em&&(proven.typed===login||proven.login===login)&&Date.now()-proven.at<10*60e3){login=proven.login;stepExisting();return} // already confirmed here: a used code can't be typed twice
+    const pend=ls.get('hush:linkPending',null);
+    if(pend&&pend.em===em&&Date.now()-pend.ts<LINK_LIFE){login=pend.login;stepExisting(pend);return} // a reload: the same request goes on, no new code
+    if(pend&&Date.now()-pend.ts>=LINK_LIFE)ls.set('hush:linkPending',null);
     head('Reset your password','Sending a 6-digit code to '+em+'…');
     const lead=w.querySelector('.lead'),demo=el('div');
     const i=el('input','code-in');i.inputMode='numeric';i.autocomplete='one-time-code';i.maxLength=6;i.placeholder='••••••';i.setAttribute('aria-label','6-digit code');
@@ -3429,17 +3460,20 @@ function showOnboard(adding,notice){
         lead.textContent=d?'Enter the 6-digit code for '+em+'.':'We sent a 6-digit code to '+em+'. It can take a minute to arrive; check your spam folder too.';
         if(d)demo.append(demoBox(d,em));i.disabled=false;i.value='';setTimeout(()=>i.focus(),50)}
       catch(e){const w=cooldownSecs(e);
-        if(w){lead.textContent='A code was sent to '+em+' a moment ago. Enter it below, or ask for another when the timer ends.';i.disabled=false;setTimeout(()=>i.focus(),50);resendCooldown(again,w)}
+        if(w){const used=ls.get('hush:codeUsed',null);resendCooldown(again,w);
+          if(used&&used.em===em&&Date.now()-used.at<10*60e3)lead.textContent='The code sent to '+em+' a moment ago has been used. Ask for a new one when the timer ends.';
+          else{lead.textContent='A code was sent to '+em+' a moment ago. Enter it below, or ask for another when the timer ends.';i.disabled=false;setTimeout(()=>i.focus(),50)}}
         else{lead.textContent='We couldn’t send a code to '+em+' yet.';err.textContent=codeSendError(e);again.disabled=false}}};
     again.onclick=send;send();
     i.oninput=async()=>{i.value=i.value.replace(/\D/g,'').slice(0,6);err.textContent='';if(i.value.length<6)return;
       i.disabled=true;let r;
       try{r=await S.db.checkCode(em,i.value,isHandleLogin(login)?login:undefined)}catch(e){i.disabled=false;err.textContent=codeCheckError(e);i.select();return}
+      ls.set('hush:codeUsed',{em,at:Date.now()}); // a code works once: after a reload, don't invite typing it again
       if(!r.link){stepForgot('Email recovery isn’t set up for '+(isHandleLogin(login)?atOf(login):'that account')+' with that email. Use your recovery words instead.');return}
       const typed=login;if(r.via==='email')login=em; // the email is the account's own login: its devices watch for requests there
       proven={em,typed,login,at:Date.now()};stepExisting()};
   };
-  const stepExisting=()=>{
+  const stepExisting=(prev)=>{
     S.resetFor={login};
     head('Get back in','On a device where you’re still logged in, open Link a new device. Scan the code it shows, or let it scan this one. Then you’ll pick a new password.');
     const num=el('div','qr'),manual=el('div','link-code'),box=el('div','link-wait');box.append(el('span','spin'),el('span',null,'Waiting for you to scan…'));const err=el('div','err');
@@ -3450,9 +3484,10 @@ function showOnboard(adding,notice){
     w.append(scanBack,num,manual,box,el('p','hint center','Your other device will pop up an alert — tap Scan or type code. Or go to Settings → Login and devices → Link a new device.'),err);
     const bk=el('button','link','Use my recovery words'),fresh=el('button','link','I don’t have my other device');
     bk.onclick=()=>openRestore();fresh.onclick=()=>stepFresh();w.append(bk,fresh);foot(()=>stepLogin());
-    (async()=>{try{link=await requestLink(login,({qr,code,dk})=>{const q=qrSvg(qr,'QR code to log in on this device');if(q)num.innerHTML=q;else num.textContent='The QR code couldn’t be drawn. Use another option below.';showCode(code,dk)});const id=await link.done;if(!id)return;
+    (async()=>{try{link=await requestLink(login,({qr,code,dk})=>{const q=qrSvg(qr,'QR code to log in on this device');if(q)num.innerHTML=q;else num.textContent='The QR code couldn’t be drawn. Use another option below.';showCode(code,dk)},prev,linkEm);const id=await link.done;if(!id)return;
         link=null;if(await enterAccount(id))toast('Welcome back, '+id.name)}
-      catch(e){if(e&&e.code==='denied')proven=null; // the server forgot the confirmation (a dropped connection): ask for a code again
+      catch(e){if(e&&e.message==='noresume'){link=null;return stepCode(linkEm)} // the request ended meanwhile: start again
+        if(e&&e.code==='denied')proven=null; // the server forgot the confirmation (a dropped connection): ask for a code again
         box.remove();num.remove();manual.remove();err.textContent=linkWaitErr(e)||(e&&e.message==='denied'?'The other device said this wasn’t you, so nothing was shared.':e&&e.message==='timeout'?'No approval came through. Go back to try again, or use another option below.':e&&e.message==='stale'?'This account was set up fresh on another device since then.':e&&e.code==='denied'?'The code for your recovery email has to be confirmed again. Go back and send a new one.':'Couldn’t reach your other device. Use another option below.')}})();
   };
   const stepFresh=()=>{

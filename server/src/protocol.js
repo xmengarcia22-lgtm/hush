@@ -10,7 +10,7 @@ import { HushError, fail } from './errors.js';
 import { log } from './log.js';
 import { TokenBucket } from './limits.js';
 import { SYSTEM } from './store.js';
-import { verifyProof, HANDLE } from './identity.js';
+import { verifyProof, verifySig, HANDLE } from './identity.js';
 import { ID } from './paths.js';
 import { rankOf } from './authz.js';
 import { clientLimits } from './media.js';
@@ -63,6 +63,7 @@ function takeWrite(c, p) {
 // password, so it checks the mark the account sets once its password was checked as strong.
 // powerNeedsSecure: false switches the rule off for development and tests only; production ignores it.
 const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
+const LINK_RESUME_MS = 10 * 60_000;   // how long a new device's request can be continued (the page waits as long)
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
 
 const HANDLERS = {
@@ -133,6 +134,21 @@ const HANDLERS = {
     }
     c.ctx.store.set(f.p, f.d, actor);
     if (creating) c.signupPow = null;
+    return {};
+  },
+
+  // ---- a new device's request, continued after a reload or a reconnect (SPEC.md 14.10) ----
+  // The confirmation of the email (linkOk) belongs to the connection that typed the code. A new connection of the same
+  // device gets it back by signing this connection's challenge with the device key inside the waiting request: bound to
+  // that one request, only while it waits and is young, and nothing is stored anywhere that someone else could replay.
+  async 'link.resume'(c, f) {
+    if (typeof f.t !== 'string' || !ID.ADDR43.test(f.t) || typeof f.sig !== 'string' || f.sig.length > 200) fail('invalid', 'link.resume: "t" and "sig" are required');
+    if (!c.ctx.blindReads.take(c.addrTag)) fail('ratelimit', 'too many lookups from here; slow down');
+    if (!c.nonce || c.ctx.now() - c.nonceAt > c.limits.nonceTtlMs) fail('unauth', 'the sign-in challenge expired; reconnect');
+    const r = c.ctx.store.get('linkreqs/' + f.t, SYSTEM).d, k = r && r.devk;
+    if (!r || r.state !== 'wait' || typeof r.ts !== 'number' || Math.abs(c.ctx.now() - r.ts) > LINK_RESUME_MS || !k || typeof k.sx !== 'string' || typeof k.sy !== 'string') fail('notfound', 'no waiting request to continue');
+    if (!(await verifySig({ x: k.sx, y: k.sy }, f.sig, 'hush-link-resume-v1|' + c.nonce + '|' + f.t + '|' + r.ts))) fail('denied', 'that is not the device that asked');
+    c.linkOk.add(f.t);
     return {};
   },
 

@@ -190,3 +190,41 @@ test('a waiting request takes a 43-character proof from the new device, nothing 
     await outsider.close();
   } finally { pages.forEach((p) => p.close()); await T.stop(); }
 });
+
+// ---- release 13: a new device continues its own request after a reload or a reconnect, and nothing else can ----
+
+test('continuing a request needs the device key inside it, only while it waits and is young', async () => {
+  const { makeIdentity, makeDevice, signText } = await import('./helpers.js');
+  const T = await startServer({ authz: 'standard' });
+  const pg = page(T.url);
+  const pages = [pg];
+  const conns = [];
+  try {
+    await pg.db.ready;
+    await signUpWith(pg, EMAIL, PW, 'jordanhale', 'Jordan Hale');
+    const tag = await pg.auth.loginTag(EMAIL), at = 'linkreqs/' + tag;
+    const d = await makeDevice(await makeIdentity('jordanhale')), other = await makeDevice(await makeIdentity('jordanhale'));
+    const devk = { id: d.id, x: d.entry.x, y: d.entry.y, sx: d.entry.sx, sy: d.entry.sy };
+    const dev = await confirmedNewDevice(T); pages.push(dev.fresh);
+    const ts = Date.now();
+    await dev.fresh.db.doc(at).set({ ...ask('a'), ts, devk });
+    // a reload: a new connection that never typed the code
+    const again = await connect(T.url); conns.push(again);
+    const { nonce } = await again.hello();
+    const msg = (n, t = tag, s = ts) => 'hush-link-resume-v1|' + n + '|' + t + '|' + s;
+    assert.equal((await again.call('update', { p: at, d: { cf: 'C'.repeat(43) } })).e, 'denied', 'a new connection starts without the confirmation');
+    assert.equal((await again.call('link.resume', { t: tag, sig: await signText(other.sigKey, msg(nonce)) })).e, 'denied', 'another device’s key is refused');
+    assert.equal((await again.call('link.resume', { t: tag, sig: await signText(d.sigKey, msg('stale-nonce')) })).e, 'denied', 'a signature over another challenge is refused');
+    await again.ok('link.resume', { t: tag, sig: await signText(d.sigKey, msg(nonce)) });
+    await again.ok('update', { p: at, d: { cf: 'C'.repeat(43) } });
+    // once the request has ended, it can't be continued
+    T.srv.store.update(at, { state: 'no' }, SYSTEM);
+    const third = await connect(T.url); conns.push(third);
+    const n3 = (await third.hello()).nonce;
+    assert.equal((await third.call('link.resume', { t: tag, sig: await signText(d.sigKey, msg(n3)) })).e, 'notfound', 'a refused request is over');
+    T.srv.store.set(at, { ...ask('a'), ts: Date.now() - 11 * 60_000, devk }, SYSTEM);
+    assert.equal((await third.call('link.resume', { t: tag, sig: await signText(d.sigKey, msg(n3, tag, Date.now() - 11 * 60_000)) })).e, 'notfound', 'and so is one older than ten minutes');
+    T.srv.store.delete(at, {}, SYSTEM);
+    assert.equal((await third.call('link.resume', { t: tag, sig: await signText(d.sigKey, msg(n3)) })).e, 'notfound', 'and one that is gone');
+  } finally { for (const c of conns) await c.close(); pages.forEach((p) => p.close()); await T.stop(); }
+});

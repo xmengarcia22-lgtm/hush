@@ -20,6 +20,7 @@ This list is only ever added to, never edited. A page whose hash is not here is 
 | 2026-10-10 | Secure-your-account gate checks the current password first and keeps it when it is strong enough | `beced5d3e3890bc07c46f6a52ce4a3d674d66330db0617f7de7e824333f2affc` |
 | 2026-10-10 | Link a new device from a computer with no camera: it shows the code and the new device scans it; a device that logged in by username keeps the account’s other logins | `1cde82386cadf1358e98a05eba4405a27252cb734e5e0b06f79cfea1386e6def` |
 | 2026-10-10 | Linking a new device: a big Scan button on the new device, and the typing box tucked behind Can’t scan? on the computer | `6a675e1220f954635629b0ab844e096606677667d532b0710416625f7eb27cc7` |
+| 2026-10-11 | Scanning to link a new device: full-HD camera and enlarged crops, a bigger code, move-closer guidance, and retries that survive a reload or a dropped connection without new codes | `38982f39bc73cd6b273478b0061f0465c3a9c030013eb7c8dafe29c76b05315c` |
 
 To check what you are served: `curl -s https://hushappofficial.com/ | sha256sum`, or save the page from the
 browser and run `certutil -hashfile index.html SHA256` on Windows, then compare with the last line above.

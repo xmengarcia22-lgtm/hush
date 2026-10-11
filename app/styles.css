@@ -203,6 +203,7 @@ html.kb-up,html.kb-up body{overflow:hidden;overscroll-behavior:none}
 .seg button[aria-pressed="true"]{background:var(--bg);color:var(--text);box-shadow:var(--shadow)}
 .qr{display:grid;place-items:center;margin:4px 0 14px}
 .qr svg{width:min(240px,70vw);height:auto;border-radius:14px;border:1px solid var(--line)}
+.qr.big svg{width:min(420px,84vw)} /* the code a phone scans off the computer: big enough to read from a normal distance */
 .linkbox{width:100%;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:11px 12px;font-size:13px;outline:none}
 .row2{display:flex;gap:8px;margin:10px 0 12px}
 .row2 button{flex:1}
