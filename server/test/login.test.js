@@ -88,6 +88,9 @@ test('reconcileLoginHint keeps the local note and the vault copy in step', () =>
     assert.deepEqual(reconcileLoginHint(null, { login: '+1', loc: 'L' }), { toLocal: { login: '+1', loc: 'L' } }, 'local lost -> restore from the vault (the bug)');
     assert.deepEqual(reconcileLoginHint({ login: '+1', loc: 'L' }, { login: '+1', loc: 'L' }), {}, 'already in step -> nothing to do');
     assert.deepEqual(reconcileLoginHint(null, null), {}, 'nothing either place');
+    const moved = { login: '+1', loc: 'NEW', all: { '+1': 'NEW' } };
+    assert.deepEqual(reconcileLoginHint({ login: '+1', loc: 'OLD', all: { '+1': 'OLD' } }, { login: '+1', loc: 'NEW', all: { '+1': 'NEW' } }), { toLocal: moved },
+      'password changed on another device -> the settings’ address wins for this device’s own login too');
   } finally { pg.close(); }
 });
 

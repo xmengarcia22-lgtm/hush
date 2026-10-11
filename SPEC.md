@@ -131,6 +131,8 @@ From release 9 the box lives at `accounts/<HMAC-SHA-256(gate key, "hush-login-ga
 
 Trade-off, stated plainly: the server now learns, when a box is opened or saved, which login tag the box belongs to. It could already see this on the live connection (the page reads the reservation and the box together); now it is a property of the address. Separate logins of one account still have separate, unlinked boxes.
 
+A signed-in device that answers a new device’s request at an email (14.10) shows the server it holds that login’s box the same way: `login.gate` for that one login only, with the address from the account’s encrypted settings as they are at that moment (a password changed on another device moves every box), and never about an address the page already found to have no box behind it (`healLogin` looks each one up on load), so a refused answer spends no password tries beyond the one ask that first finds a box gone. It adds the new device to its profile only after the server took the approval. Saving the settings keeps the box addresses another device saved after a password change.
+
 Boxes from before the gate are moved the first time they are opened (`findBox`: read `accounts/<x>`, write it behind the gate, delete the old one), and a signed-in device moves the boxes of all its logins on its next load, without the password. Until a box has moved, its old address can still be guessed without a limit: accounts with no device that loads release 9 stay exposed this way until they log in once.
 
 ---

@@ -519,7 +519,7 @@ function rememberLogin(h,rec,replace){
   const v=hintOf(rec.login,rec.loc,all);
   ls.set('hush:login:'+h,v);
   if(S.me&&S.me.handle===h&&S.contactsReady){const p=P();
-    if(!sameHint(p.login,v)){p.login=hintOf(v.login,v.loc,replace?all:Object.assign({},(p.login&&p.login.all)||{},all));saveContacts()}}
+    if(!sameHint(p.login,v)){p.login=hintOf(v.login,v.loc,replace?all:Object.assign({},(p.login&&p.login.all)||{},all));saveContacts(!!replace)}} // replace: a password change made here, its addresses win
 }
 // Every login the account is known to have here, the username always among them.
 const loginsOf=h=>{const li=loginInfo(h)||{};return [...new Set([h,...(li.login?[li.login]:[]),...Object.keys(li.all||{})])]};
@@ -527,7 +527,7 @@ const loginsOf=h=>{const li=loginInfo(h)||{};return [...new Set([h,...(li.login?
 // vault is shared by all of the account's devices, so for the box addresses it wins; this device adds what it alone knows.
 function reconcileLoginHint(local,vault){
   if(local&&local.login){
-    const all=Object.assign({},local.all||{},(vault&&vault.all)||{}),merged=hintOf(local.login,local.loc,all),out={};
+    const all=Object.assign({},local.all||{},(vault&&vault.all)||{}),merged=hintOf(local.login,all[local.login]||local.loc,all),out={}; // its own login's box too: a password changed elsewhere moved it
     if(!sameHint(vault,merged))out.toVault=merged;
     if(!sameHint(local,merged))out.toLocal=merged;
     return out}
