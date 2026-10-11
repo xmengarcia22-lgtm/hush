@@ -37,6 +37,44 @@ test('box addresses come only from the server, and only guesses that find nothin
   } finally { await c.close(); await T.stop(); }
 });
 
+test('asking about a box a password change deleted, or the same address again within the hour, is not a new guess; every new wrong guess still counts', async () => {
+  const T = await startServer({ authz: 'standard', limits: { pwMissesPerLogin: 3, blindReadsPerMinPerAddr: 400 } });   // many asks from one test address
+  const c = await connect(T.url);
+  try {
+    await c.hello();
+    const t = A43('T'), t2 = A43('U'), t3 = A43('V');
+    // A box, then a password change that deletes it: a device still holding the old address asks about it.
+    const old = (await c.ok('login.gate', { t, x: A43('a') })).loc;                     // miss 1: no box yet
+    await c.ok('set', { p: 'accounts/' + old, d: { iv: 'aXY=', ct: 'Y3Q=' } });
+    await c.ok('delete', { p: 'accounts/' + old });
+    for (let n = 0; n < 6; n++) assert.equal((await c.ok('login.gate', { t, x: A43('a') })).loc, old, 'the same answer as for any address');
+    await c.ok('login.gate', { t, x: A43('b') });                                         // miss 2: a new wrong guess
+    await c.ok('login.gate', { t, x: A43('c') });                                         // miss 3
+    assert.equal((await c.call('login.gate', { t, x: A43('d') })).e, 'ratelimit', 'the old address cost nothing; the new guesses did');
+    // The same wrong address again within the hour counts once; each different one counts.
+    await c.ok('login.gate', { t: t2, x: A43('z') });                                     // miss 1
+    for (let n = 0; n < 6; n++) await c.ok('login.gate', { t: t2, x: A43('z') });         // a device asking again: not counted
+    await c.ok('login.gate', { t: t2, x: A43('y') });                                     // miss 2
+    await c.ok('login.gate', { t: t2, x: A43('w') });                                     // miss 3
+    assert.equal((await c.call('login.gate', { t: t2, x: A43('v') })).e, 'ratelimit', 'every new wrong guess still counts');
+    // An old address proves nothing: the connection may not answer a device request at that login.
+    const gone = (await c.ok('login.gate', { t: t3, x: A43('a') })).loc;
+    await c.ok('set', { p: 'accounts/' + gone, d: { iv: 'aXY=', ct: 'Y3Q=' } });
+    await c.ok('delete', { p: 'accounts/' + gone });
+    const other = await connect(T.url); await other.hello();
+    T.srv.store.set('linkreqs/' + t3, { state: 'wait', ts: Date.now() }, SYSTEM);
+    await other.ok('login.gate', { t: t3, x: A43('a') });
+    assert.equal((await other.call('update', { p: 'linkreqs/' + t3, d: { state: 'no' } })).e, 'denied', 'an old box proves nothing');
+    await other.close();
+    // Remembered for 30 days, then forgotten.
+    const store = T.srv.store, day = 86400_000, now = Date.now();
+    assert.ok(store.boxWasHere(old, now + 29 * day));
+    assert.ok(!store.boxWasHere(old, now + 31 * day));
+    assert.ok(store.sweepGone(now + 31 * day) >= 2, 'and swept');
+    assert.ok(!store.boxWasHere(old, now));
+  } finally { await c.close(); await T.stop(); }
+});
+
 test('another server, with another secret, makes other addresses: nobody can work one out without asking', async () => {
   const T1 = await startServer({ authz: 'standard' }), T2 = await startServer({ authz: 'standard' });
   const c1 = await connect(T1.url), c2 = await connect(T2.url);
@@ -48,7 +86,7 @@ test('another server, with another secret, makes other addresses: nobody can wor
 });
 
 test('the page: wrong passwords for one login run out, the right one then waits too, other logins still work', async () => {
-  const T = await startServer({ authz: 'standard', limits: { pwMissesPerLogin: 4 } });
+  const T = await startServer({ authz: 'standard', limits: { pwMissesPerLogin: 4, blindReadsPerMinPerAddr: 400 } });   // the per-login count is under test, not the per-address one
   const pg = page(T.url);
   try {
     await pg.db.ready;

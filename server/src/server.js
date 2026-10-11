@@ -117,6 +117,7 @@ export function createServer(cfg) {
   const linkReads = new BucketMap(limits.linkReadsPerMinPerAddr, limits.linkReadsPerMinPerAddr / 60);
   const linkPaths = new BucketMap(limits.linkReadsPerHourPerPath, limits.linkReadsPerHourPerPath / 3600, 3600_000);
   const pwMisses = new BucketMap(limits.pwMissesPerLogin, limits.pwMissesPerLogin / 3600, 3600_000);   // per login tag, SPEC.md 4.5
+  const pwRepeats = new BucketMap(1, 1 / 3600, 3600_000);   // login tag | box address of a counted miss: the same one again within the hour is not counted
   const signups = new BucketMap(limits.signupsPerDayPerAddr, limits.signupsPerDayPerAddr / 86400, 86400_000);
   const invites = new BucketMap(limits.invitesPerMinPerAddr, limits.invitesPerMinPerAddr / 60);
   // Verification codes (SPEC.md 14.10): sent through Resend when there is a key, shown on screen otherwise.
@@ -184,7 +185,7 @@ export function createServer(cfg) {
     const address = clientAddress(req, trustProxy);
     const addrTag = tagger.tag(address), dayTag = tagger.tagDay(address);   // the address itself goes no further
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges: cfg.badges || {}, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
+      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges: cfg.badges || {}, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
       conns.add(conn);
     });
   };
@@ -205,9 +206,9 @@ export function createServer(cfg) {
   };
   every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); tickets.prune(); codes.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
   every(Math.max(250, Math.min(5000, limits.typingTtlMs)), () => store.prune(), 'prune');
-  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); pwMisses.prune(); invites.prune(); drops.prune(); codeSends.prune(); codeSendsTo.prune(); codeMisses.prune(); codeChecks.prune(); }, 'rotate');
+  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); pwMisses.prune(); pwRepeats.prune(); invites.prune(); drops.prune(); codeSends.prune(); codeSendsTo.prune(); codeMisses.prune(); codeChecks.prune(); }, 'rotate');
   every(86400_000, () => { tagger.rotateDay(); signups.prune(); }, 'rotateDay');
-  every(3600_000, () => store.sweepInbox(), 'inboxSweep');   // notes older than 30 days (SPEC.md 8.6)
+  every(3600_000, () => { store.sweepInbox(); store.sweepGone(); }, 'inboxSweep');   // notes older than 30 days (SPEC.md 8.6)
 
   return {
     store, subs, conns, limits, tagger, authz, staticRoot, drops, tickets, codes, mailer,

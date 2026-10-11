@@ -74,6 +74,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   codeMissesPerDayPerLogin: 10, // wrong codes per email or number a day, whoever types them (each code also dies after 5)
   codeChecksPer10MinPerAddr: 30,// code checks per address tag; each code also dies after 5 wrong tries
   powerNeedsSecure: true,       // owners and admins of groups and channels need a secured account (SPEC.md 4.6); always on in production
+  boxGoneMs: 30 * 86400_000,   // a deleted password box's address is remembered this long: asking about it is not a wrong password (SPEC.md 4.5)
   pwMissesPerLogin: 10,         // wrong passwords per login (SPEC.md 4.5), whoever tries them; they come back at this many an hour
   codeTtlMs: 10 * 60_000,       // a code works for this long
   codeCooldownMs: 60_000,       // and a new one can't be asked for the same email or number sooner than this

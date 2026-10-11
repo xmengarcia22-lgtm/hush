@@ -166,8 +166,11 @@ const HANDLERS = {
       fail('ratelimit', 'too many wrong passwords for this login; wait ' + mins + ' minute' + (mins === 1 ? '' : 's'));
     }
     const loc = createHmac('sha256', store.addrKey).update('hush-login-gate-v1|' + f.t + '|' + f.x).digest('base64url');
-    if (!store.get('accounts/' + loc, SYSTEM).d) pwMisses.take(f.t);
-    else c.linkOk.add(f.t);   // holding this login's box proves it is the account: this connection may answer its device requests
+    if (store.get('accounts/' + loc, SYSTEM).d) c.linkOk.add(f.t);   // holding this login's box proves it is the account: this connection may answer its device requests
+    // No box: a wrong guess, counted. Two asks are not new guesses and are not counted, and prove nothing: an address
+    // whose box this login had until a password change (a device still holding it), and the same address asked again
+    // within the hour. The answer is the same either way.
+    else if (!store.boxWasHere(loc) && c.ctx.pwRepeats.take(f.t + '|' + loc)) pwMisses.take(f.t);
     return { loc };
   },
 
@@ -304,7 +307,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges, onClose }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;

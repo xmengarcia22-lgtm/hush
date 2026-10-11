@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS chats(
   cap_b TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS gone(k TEXT PRIMARY KEY, ts REAL NOT NULL) WITHOUT ROWID;
 `;
 
 const SCHEMA_MEDIA = `
@@ -192,6 +193,9 @@ export class Store extends EventEmitter {
       get: this.db.prepare('SELECT d FROM docs WHERE path = ?'),
       put: this.db.prepare('INSERT INTO docs(path, parent, id, d, ts, exp) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET d = excluded.d, ts = excluded.ts, exp = excluded.exp'),
       del: this.db.prepare('DELETE FROM docs WHERE path = ?'),
+      goneAdd: this.db.prepare('INSERT OR REPLACE INTO gone(k, ts) VALUES (?, ?)'),
+      goneGet: this.db.prepare('SELECT ts FROM gone WHERE k = ?'),
+      goneSweep: this.db.prepare('DELETE FROM gone WHERE ts < ?'),
       delUnder: this.db.prepare("DELETE FROM docs WHERE parent = ? OR parent LIKE ? ESCAPE '\\'"),
       expired: this.db.prepare('SELECT path, parent, id FROM docs WHERE exp > 0 AND exp < ? LIMIT 500'),
       count: this.db.prepare('SELECT COUNT(*) AS n FROM docs'),
@@ -390,6 +394,7 @@ export class Store extends EventEmitter {
       this.emit('evict', { cid: p.id, keep: null });
       return true;
     }
+    if (p.kind === 'accounts') this.q.goneAdd.run(keyedId(this.addrKey, 'gone', p.id), now);   // see boxWasHere
     this._remove(p);
     this._emit(p, null, 'del');
     return true;
@@ -717,6 +722,15 @@ export class Store extends EventEmitter {
   }
 
   // ---- housekeeping -------------------------------------------------------------------
+
+  // Whether a password box stood at this address until it was deleted, within boxGoneMs (SPEC.md 4.5). A password change
+  // deletes a login's old boxes; a device still holding an old address that asks the gate about it is not guessing.
+  // Kept under the address key, like the boxes themselves.
+  boxWasHere(loc, now = this.now()) {
+    const r = this.q.goneGet.get(keyedId(this.addrKey, 'gone', loc));
+    return !!r && now - r.ts < this.limits.boxGoneMs;
+  }
+  sweepGone(now = this.now()) { return Number(this.q.goneSweep.run(now - this.limits.boxGoneMs).changes); }
 
   // Deletes documents whose `exp` has passed. Returns how many were removed.
   sweep(now = this.now()) {

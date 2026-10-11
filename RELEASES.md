@@ -22,6 +22,7 @@ This list is only ever added to, never edited. A page whose hash is not here is 
 | 2026-10-10 | Linking a new device: a big Scan button on the new device, and the typing box tucked behind Can’t scan? on the computer | `6a675e1220f954635629b0ab844e096606677667d532b0710416625f7eb27cc7` |
 | 2026-10-11 | Scanning to link a new device: full-HD camera and enlarged crops, a bigger code, move-closer guidance, and retries that survive a reload or a dropped connection without new codes | `38982f39bc73cd6b273478b0061f0465c3a9c030013eb7c8dafe29c76b05315c` |
 | 2026-10-11 | Linking a new device finishes after a password change made on another device; Not me only says it blocked a login when it did; the new device no longer shows its own code; no alert pops over the code the computer shows | `e82073aaac936067cd2271713623f2e9c623480d1c25df512d64ce6a1f68ae14` |
+| 2026-10-11 | Linking a new device when this device’s saved login is out of date: it asks for your password once and puts the saved login right for every device; Try again keeps the scan; a newer code replaces the old one; Start over on the new device; checks of an old or repeated password address no longer count as wrong guesses | `ab705bef6ff22aa203431bdcb5cf4dab0366171254da5b04ad0f425cf829e9e1` |
 
 To check what you are served: `curl -s https://hushappofficial.com/ | sha256sum`, or save the page from the
 browser and run `certutil -hashfile index.html SHA256` on Windows, then compare with the last line above.
