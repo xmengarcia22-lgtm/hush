@@ -10,12 +10,11 @@ import { HushError, fail } from './errors.js';
 import { log } from './log.js';
 import { TokenBucket } from './limits.js';
 import { SYSTEM } from './store.js';
-import { verifyProof, verifySig, HANDLE } from './identity.js';
+import { verifyProof, HANDLE } from './identity.js';
 import { ID } from './paths.js';
 import { rankOf } from './authz.js';
 import { clientLimits } from './media.js';
 import { leadingZeroBits } from './drops.js';
-import { codeLogin, EMAIL, loginTag, recoveryTag } from './codes.js';
 
 const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -63,7 +62,6 @@ function takeWrite(c, p) {
 // password, so it checks the mark the account sets once its password was checked as strong.
 // powerNeedsSecure: false switches the rule off for development and tests only; production ignores it.
 const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
-const LINK_RESUME_MS = 10 * 60_000;   // how long a new device's request can be continued (the page waits as long)
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
 
 const HANDLERS = {
@@ -137,21 +135,6 @@ const HANDLERS = {
     return {};
   },
 
-  // ---- a new device's request, continued after a reload or a reconnect (SPEC.md 14.10) ----
-  // The confirmation of the email (linkOk) belongs to the connection that typed the code. A new connection of the same
-  // device gets it back by signing this connection's challenge with the device key inside the waiting request: bound to
-  // that one request, only while it waits and is young, and nothing is stored anywhere that someone else could replay.
-  async 'link.resume'(c, f) {
-    if (typeof f.t !== 'string' || !ID.ADDR43.test(f.t) || typeof f.sig !== 'string' || f.sig.length > 200) fail('invalid', 'link.resume: "t" and "sig" are required');
-    if (!c.ctx.blindReads.take(c.addrTag)) fail('ratelimit', 'too many lookups from here; slow down');
-    if (!c.nonce || c.ctx.now() - c.nonceAt > c.limits.nonceTtlMs) fail('unauth', 'the sign-in challenge expired; reconnect');
-    const r = c.ctx.store.get('linkreqs/' + f.t, SYSTEM).d, k = r && r.devk;
-    if (!r || r.state !== 'wait' || typeof r.ts !== 'number' || Math.abs(c.ctx.now() - r.ts) > LINK_RESUME_MS || !k || typeof k.sx !== 'string' || typeof k.sy !== 'string') fail('notfound', 'no waiting request to continue');
-    if (!(await verifySig({ x: k.sx, y: k.sy }, f.sig, 'hush-link-resume-v1|' + c.nonce + '|' + f.t + '|' + r.ts))) fail('denied', 'that is not the device that asked');
-    c.linkOk.add(f.t);
-    return {};
-  },
-
   // ---- password boxes (SPEC.md 4.5) ----
   // A box lives at HMAC(server secret, login tag | stretched password). The page sends the tag and the stretched password
   // (never the password); only this server can turn them into an address, so guesses have to come through here, and a
@@ -166,64 +149,16 @@ const HANDLERS = {
       fail('ratelimit', 'too many wrong passwords for this login; wait ' + mins + ' minute' + (mins === 1 ? '' : 's'));
     }
     const loc = createHmac('sha256', store.addrKey).update('hush-login-gate-v1|' + f.t + '|' + f.x).digest('base64url');
-    if (store.get('accounts/' + loc, SYSTEM).d) c.linkOk.add(f.t);   // holding this login's box proves it is the account: this connection may answer its device requests
-    // No box: a wrong guess, counted. Two asks are not new guesses and are not counted, and prove nothing: an address
-    // whose box this login had until a password change (a device still holding it), and the same address asked again
-    // within the hour. The answer is the same either way.
-    else if (!store.boxWasHere(loc) && c.ctx.pwRepeats.take(f.t + '|' + loc)) pwMisses.take(f.t);
+    // No box: a wrong guess, counted. Two asks are not new guesses and are not counted: an address whose box this login
+    // had until a password change (a device still holding it), and the same address asked again within the hour. The
+    // answer is the same either way. A box found proves nothing about who asks: anyone may store one (4.3).
+    if (!store.get('accounts/' + loc, SYSTEM).d && !store.boxWasHere(loc) && c.ctx.pwRepeats.take(f.t + '|' + loc)) pwMisses.take(f.t);
     return { loc };
   },
 
   // The sign-up puzzle, for a page to solve while the person is still filling in the form.
   'signup.pow'(c) { return c.signupChallenge(); },
 
-  // ---- verification codes (SPEC.md 14.10): sent by email through Resend; on screen (`demoCode`) only when no mail
-  // key is set, or for a phone number until texting exists. The reply never says whether the login has an account.
-  async 'code.send'(c, f) {
-    const to = codeLogin(f.to);
-    if (!to) fail('invalid', 'code.send: "to" must be an email address or a phone number');
-    const { codes, codeSends, codeSendsTo } = c.ctx;
-    if (!codes) fail('invalid', 'codes are not sent here');
-    // One code per address per cooldown, however many connections ask. Checked first so a refused ask costs no allowance.
-    const wait = codes.wait(to);
-    if (wait > 0) fail('ratelimit', `wait ${Math.ceil(wait / 1000)} seconds before asking for another code`);
-    if (!codeSends.take(c.addrTag)) fail('ratelimit', 'too many codes asked for from here; wait a while');
-    if (!codeSendsTo.take(codes.tag(to))) fail('ratelimit', 'too many codes sent to that address; wait a while');
-    const code = codes.issue(to), mailer = c.ctx.mailer;
-    if (!mailer || !EMAIL.test(to)) return { sent: false, demoCode: code };
-    try { await mailer.send({ to, code }); }
-    catch (e) { log.error('code.mail.failed', e); codes.release(to); fail('unavailable', 'the code could not be sent; try again in a moment'); }
-    return { sent: true };
-  },
-  'code.check'(c, f) {
-    const to = codeLogin(f.to);
-    if (!to) fail('invalid', 'code.check: "to" must be an email address or a phone number');
-    const { codes, codeChecks, codeMisses } = c.ctx;
-    if (!codes) fail('invalid', 'codes are not sent here');
-    if (!codeChecks.take(c.addrTag)) fail('ratelimit', 'too many code checks from here; wait a few minutes');
-    if (!codeMisses.peek(codes.tag(to))) fail('ratelimit', 'too many wrong codes for this address today; try again tomorrow');
-    const r = codes.check(to, typeof f.code === 'string' ? f.code : '');
-    if (r === 'wrong') { codeMisses.take(codes.tag(to)); fail('denied', 'that code is not right'); }
-    if (r === 'none') fail('notfound', 'no code is waiting; ask for a new one');
-    // What a confirmed email unlocks on this connection, and nothing more (SPEC.md 14.10):
-    //  - signed in: saving this email as the account's recovery email;
-    //  - "forgot password" for username `h`: asking that account's devices to let a new one in, when `h` has set up
-    //    this email for recovery;
-    //  - "forgot password" for an account that logs in with this very email (given at sign-up, or an account from before
-    //    usernames): the same request at the email's own tag, which that account's devices watch.
-    // `link` says whether the second or third applied, and `via` which: 'username' or 'email'. Recovery records are never
-    // readable, so this answer, given only to someone who can read the email, is the one way to learn that an email is
-    // set up for an account.
-    let link = false, via;
-    if (EMAIL.test(to)) {
-      const st = c.ctx.store;
-      if (c.proven) c.recoveryOk.add(recoveryTag(c.proven, to));
-      const rec = typeof f.h === 'string' && HANDLE.test(f.h) ? st.get('recovery/' + recoveryTag(f.h, to), SYSTEM).d : null;
-      if (rec && rec.h === f.h) { c.linkOk.add(loginTag(f.h)); link = true; via = 'username'; }
-      else if (st.get('logins/' + loginTag(to), SYSTEM).d) { c.linkOk.add(loginTag(to)); link = true; via = 'email'; }
-    }
-    return link ? { link, via } : { link };
-  },
   update(c, f) { takeWrite(c, f.p); c.ctx.store.update(f.p, f.d, c.actor()); return {}; },
   delete(c, f) { c.ctx.store.delete(f.p, { ot: f.ot }, c.actor()); return {}; },
   add(c, f) { takeWrite(c, f.p); return c.ctx.store.add(f.p, f.d, c.actor()); },
@@ -307,7 +242,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, codes, mailer, codeSends, codeSendsTo, codeMisses, codeChecks, addrTag, dayTag, now, badges, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, onClose }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
@@ -322,8 +257,6 @@ export class Connection {
     this.pub = null;           // the account public key behind the proof
     this.mayCreate = null;     // handle this connection may create (sign-up)
     this.signupPow = null;     // { salt, bits }: the puzzle a sign-up on this connection solves, once
-    this.recoveryOk = new Set(); // recovery records this connection may write: emails confirmed by code while signed in
-    this.linkOk = new Set();     // link-request addresses this connection may open: emails confirmed by code (SPEC.md 14.10)
     this.proving = false;
     this.chats = new Map();    // cid → { level, epoch, type }
     this.closed = false;

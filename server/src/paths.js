@@ -29,7 +29,7 @@ const KINDS = Object.freeze({
   logins:    { top: 'logins',    depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   accounts:  { top: 'accounts',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   linkreqs:  { top: 'linkreqs',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
-  // Email recovery (SPEC.md 14.10): one record per account and email, at SHA-256("hush-recover-v1:<username>|<email>").
+  // Email recovery (SPEC.md 14.10), retired in release 16: records from before, at SHA-256("hush-recover-v1:<username>|<email>").
   recovery:  { top: 'recovery',  depth: 2, id: ADDR43, backend: 'docs', keyed: true },
   // A power role needs a secured account (SPEC.md 4.6): the mark that the account's password was checked as strong.
   secure:    { top: 'secure',    depth: 2, id: HANDLE, backend: 'docs' },

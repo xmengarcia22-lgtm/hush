@@ -15,10 +15,6 @@
 //   HUSH_TLS_PORT      also listen with HTTPS on this port (development over the local network; unset = off)
 //   HUSH_TLS_HOST      bind address for it         default 0.0.0.0 (every network this PC is on)
 //   HUSH_TLS_DIR       folder holding key.pem and cert.pem (`npm run dev:lan` makes them)
-//   RESEND_API_KEY     sends verification codes by email through Resend (SPEC.md 14.10); unset = the code is shown on
-//                      screen instead (local testing only). Kept in server/.env, which is never committed
-//   HUSH_MAIL_FROM     the sender of those emails  default "Hush <onboarding@resend.dev>" (Resend's test sender, which
-//                      only delivers to the Resend account's own address; set one on a domain verified with Resend)
 
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
@@ -70,7 +66,6 @@ export function loadConfig(env = process.env) {
     limits,
     badges: parseBadges(env.HUSH_BADGES),
     tls: env.HUSH_TLS_PORT ? loadTls(env) : null,
-    mail: { apiKey: (env.RESEND_API_KEY || '').trim(), from: (env.HUSH_MAIL_FROM || '').trim() || 'Hush <onboarding@resend.dev>' },
   };
 }
 

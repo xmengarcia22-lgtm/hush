@@ -39,7 +39,7 @@ async function aesKey(priv,pub,salt){return aesKeyFrom(await crypto.subtle.deriv
    A device's entry on your profile is signed by your account key (your first device) or by one of your
    existing devices (one added with the QR handoff), so others know which devices are really yours. */
 const devMsg=(h,d)=>enc.encode(['hush-dev-v1',h,d.id,d.ecdh.x,d.ecdh.y,d.sig.x,d.sig.y,d.by||''].join('|'));
-const devEntry=d=>({x:d.ecdh.x,y:d.ecdh.y,sx:d.sig.x,sy:d.sig.y,by:d.by||'',s:d.s,ts:d.ts||Date.now()});
+const devEntry=d=>({x:d.ecdh.x,y:d.ecdh.y,sx:d.sig.x,sy:d.sig.y,by:d.by||'',s:d.s,ts:d.ts||Date.now(),...(d.nm?{nm:d.nm}:{})}); // nm: the device's name, sealed (sealDevName)
 async function newDev(){const k=await newIdentity();return {id:rid().slice(0,12),ecdhPriv:k.ecdhPriv,ecdh:k.ecdh,sigPriv:k.sigPriv,sig:k.sig,by:'',s:'',ts:Date.now()}}
 async function ensureDev(id){ // this account's key for THIS device; a first device signs its own entry with the account key
   const d=id.dev||await newDev();
@@ -66,8 +66,9 @@ function verifiedDevs(h){ // someone's devices whose entries check out; others g
 }
 async function publishDev(){ // put this device's entry on my profile (and forget devices nobody has used in four months)
   if(!S.db||!S.me||!S.me.dev||!S.me.dev.s||!S.dirReady)return;const m=S.me,d=S.dir[m.handle];if(!d||(d.kv||1)>(m.kv||1))return;
+  if(!m.dev.nm)try{m.dev.nm=await sealDevName(m.dev.id,deviceName())}catch{} // its name, for the other devices' notice
   const e=devEntry(m.dev),cur=d.devs&&d.devs[m.dev.id];
-  if(cur&&cur.x===e.x&&cur.s===e.s&&Date.now()-(cur.ts||0)<864e5)return;
+  if(cur&&cur.x===e.x&&cur.s===e.s&&cur.nm===e.nm&&Date.now()-(cur.ts||0)<864e5)return;
   e.ts=Date.now();const devs={[m.dev.id]:e};
   for(const [i,v] of Object.entries(d.devs||{}))if(i!==m.dev.id&&v&&(v.ts||0)<Date.now()-120*864e5)devs[i]=null;
   try{await S.db.doc('directory/'+m.handle).update({devs});d.devs=Object.assign({},d.devs,devs);for(const i in d.devs)if(d.devs[i]==null)delete d.devs[i];m.dev.ts=e.ts;ls.set('hush:ids',S.ids)}catch{}
@@ -543,37 +544,19 @@ async function saveLoginBoxes(id,logins,pw){
 }
 /* After a server reset the profile comes back by itself (republishSelf puts the keys back), so the login has to
    come back too, or nobody could log in with it again once this device logs out. The reservation is re-made from
-   this device's copy of the login. The password box can't be, since the password never stays on the device: when
-   it is gone as well, the password is asked for once more. Checked once per account per page load. */
+   this device's copy of the login. The password box can't be, since the password never stays on the device, and it
+   isn't looked for either: asking the gate about a saved address that is out of date (a password changed on another
+   device) would count as a wrong password, and no way in depends on it (SPEC.md 14.14). Nothing asks for the password.
+   Checked once per account per page load. */
 const loginHealed=new Set();
 async function healLogin(id){
   const h=id.handle,li=loginInfo(h);if(!S.db||!li||!li.login||loginHealed.has(h))return;loginHealed.add(h);
   try{for(const l of loginsOf(h)){if(isHandleLogin(l))continue; // a username needs no reservation: the profile itself holds the name
       const ref=S.db.doc('logins/'+await loginTag(l));if(!(await ref.get()).exists)await ref.set({ts:Date.now()})}
-    // Every box this device knows of: moved behind the gate if it is from before it, and the password asked for again
-    // when the server has lost the one this device logs in with.
-    const boxes=Object.assign({},li.all||{},li.loc?{[li.login]:li.loc}:{});let lost=false;
-    for(const [l,x] of Object.entries(boxes))if(!(await findBox(l,x))&&l===li.login)lost=true;
-    if(lost&&S.me===id){
-      rememberLogin(h,{login:li.login});setTimeout(()=>{if(S.me===id)openSetupLogin('again')},700)}
+    // A box from before the gate, still at its old address (a plain read), is moved behind it.
+    const boxes=Object.assign({},li.all||{},li.loc?{[li.login]:li.loc}:{});
+    for(const [l,x] of Object.entries(boxes)){const o=await S.db.doc('accounts/'+x).get();if(o.exists)await moveBox(x,await boxLoc(l,x),o.data())}
   }catch{loginHealed.delete(h)}
-}
-/* ---------- email recovery (SPEC.md 14.10): optional, set up in Settings ----------
-   Proving an email (a code the server mails to it) and then saving a record at a blind address made from the
-   username and the email. The record names only the username; the email itself is never stored on the server, and
-   the server lets a connection write the record only after that connection confirmed the email with a code. When the
-   password is forgotten, the same email and a fresh code let a new device ask this account's devices to let it in. */
-const recoveryTag=async(h,email)=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-recover-v1:'+h+'|'+email))));
-const recEmailOf=h=>{const v=S.me&&S.me.handle===h&&S.prefs&&S.prefs.recEmail;return (v&&v.email)||((ls.get('hush:recEmail:'+h,null)||{}).email)||null};
-async function saveRecoveryEmail(h,email){ // after code.check on this connection; replaces an earlier email
-  const old=recEmailOf(h);await S.db.doc('recovery/'+await recoveryTag(h,email)).set({h,ts:Date.now()});
-  if(old&&old!==email)S.db.doc('recovery/'+await recoveryTag(h,old)).delete().catch(()=>{});
-  const v={email,ts:Date.now()};ls.set('hush:recEmail:'+h,v);
-  if(S.me&&S.me.handle===h&&S.contactsReady){P().recEmail=v;saveContacts()}
-}
-async function removeRecoveryEmail(h){
-  const old=recEmailOf(h);if(old)await S.db.doc('recovery/'+await recoveryTag(h,old)).delete();
-  ls.set('hush:recEmail:'+h,null);if(S.me&&S.me.handle===h&&S.contactsReady&&S.prefs&&S.prefs.recEmail){delete P().recEmail;saveContacts()}
 }
 async function rememberPw(login,pw){ // offers to save it in iCloud Keychain / Google Password Manager; Hush itself never stores it
   try{if(window.PasswordCredential&&navigator.credentials)await navigator.credentials.store(new PasswordCredential({id:login,password:pw,name:login}))}catch{}}
@@ -612,27 +595,29 @@ const pubJwk=async k=>{const j=await crypto.subtle.exportKey('jwk',k.publicKey);
 // handoff is sealed to and the device's own key, which the approving device signs onto the account. A server, or
 // anyone who can edit the request, that swapped either key would make the code stop matching. Codes before that
 // (version 2) covered only the one-time key; their check symbols differ, so they are told apart and refused.
+// Version 4 (SPEC.md 14.14) is the code a signed-in device shows to link a new one: its 128-bit secret alone, 26 symbols
+// plus 2 check symbols, since the new device's keys don't exist yet when it is shown.
 // Crockford base32 (no I, L, O or U; a typed O reads as 0, I and L as 1), 52 symbols plus 2 check symbols, shown in
 // groups of six. A mistyped symbol fails the check here instead of approving a request nobody can open.
 const LC_ABC='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-const lcCheck=(v,ver=3)=>{let a=ver===3?7:0,b=0;for(const x of v){a=(a+x+1)%32;b=(b+a)%32}return [a,b]};
-function linkCode(secret,fp,ver=3){ // secret: 16 bytes; fp: the linkFp string
-  const bytes=new Uint8Array(32);bytes.set(secret,0);bytes.set(unb64u(fp).slice(0,16),16);
+const lcCheck=(v,ver=3)=>{let a=ver===3?7:ver===4?13:0,b=0;for(const x of v){a=(a+x+1)%32;b=(b+a)%32}return [a,b]};
+function linkCode(secret,fp,ver=3){ // secret: 16 bytes; fp: the linkFp string (versions 2 and 3; version 4 has none)
+  const bytes=new Uint8Array(ver===4?16:32);bytes.set(secret,0);if(ver!==4)bytes.set(unb64u(fp).slice(0,16),16);
   const v=[];let acc=0,bits=0;
   for(const b of bytes){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
   if(bits)v.push((acc<<(5-bits))&31);
   v.push(...lcCheck(v,ver));
   return v.map(x=>LC_ABC[x]).join('').replace(/(.{6})(?=.)/g,'$1-');
 }
-function parseLinkCode(text,ver=3){ // {secret, fp} (16 bytes each), or null when it isn't a whole, correct code of that version
-  const t=String(text||'').toUpperCase().replace(/[\s-]+/g,'').replace(/O/g,'0').replace(/[IL]/g,'1');
-  if(t.length!==54)return null;
+function parseLinkCode(text,ver=3){ // {secret, fp} (16 bytes each; version 4: {secret}), or null when it isn't a whole, correct code of that version
+  const t=String(text||'').toUpperCase().replace(/[\s-]+/g,'').replace(/O/g,'0').replace(/[IL]/g,'1'),k=ver===4?26:52;
+  if(t.length!==k+2)return null;
   const v=[];for(const ch of t){const i=LC_ABC.indexOf(ch);if(i<0)return null;v.push(i)}
-  const [a,b]=lcCheck(v.slice(0,52),ver);if(a!==v[52]||b!==v[53])return null;
-  const out=new Uint8Array(32);let acc=0,bits=0,n=0;
-  for(const x of v.slice(0,52)){acc=(acc<<5)|x;bits+=5;if(bits>=8){if(n<32)out[n++]=(acc>>(bits-8))&255;bits-=8}acc&=(1<<bits)-1}
-  if(acc!==0)return null; // the four spare bits are always zero
-  return {secret:out.slice(0,16),fp:out.slice(16)};
+  const [a,b]=lcCheck(v.slice(0,k),ver);if(a!==v[k]||b!==v[k+1])return null;
+  const out=new Uint8Array(ver===4?16:32);let acc=0,bits=0,n=0;
+  for(const x of v.slice(0,k)){acc=(acc<<5)|x;bits+=5;if(bits>=8){if(n<out.length)out[n++]=(acc>>(bits-8))&255;bits-=8}acc&=(1<<bits)-1}
+  if(acc!==0)return null; // the spare bits (four; two in version 4) are always zero
+  return ver===4?{secret:out}:{secret:out.slice(0,16),fp:out.slice(16)};
 }
 // A new device's own key as one string, for the fingerprints below; '-' when a request carries none.
 const devkStr=dk=>dk&&typeof dk==='object'?[dk.id,dk.x,dk.y,dk.sx,dk.sy].map(v=>String(v)).join('|'):'-';
@@ -653,6 +638,13 @@ async function linkConfirm(secret,tag,ts,fp){
   const k=await crypto.subtle.importKey('raw',secret,{name:'HMAC',hash:'SHA-256'},false,['sign']);
   return b64u(new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode('hush-link-confirm-v3|'+tag+'|'+ts+'|'+fp))));
 }
+// Where a link offer lives (SPEC.md 14.14): its name is made from the code's secret with a label, so the secret itself
+// never reaches the server, and its address from the name in a space of its own, so no login's tag can be one.
+async function offerName(secret){
+  const k=await crypto.subtle.importKey('raw',secret,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return b64u(new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode('hush-link-offer-name-v1'))));
+}
+const offerTag=async n=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-link-offer-v1|'+n))));
 /* ===== HUSH LINKCODE END ===== */
 const pubFp=async j=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(String(j.x)+'.'+String(j.y)))));
 /* ---------- private inbox (SPEC.md 6) ----------

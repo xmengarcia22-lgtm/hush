@@ -40,6 +40,14 @@ test('set, get, update (merge), delete', () => {
   throwsCode(() => store.update(p, { name: 'x' }), 'notfound');
 });
 
+test('a device entry may carry its sealed name: a string of at most 400 characters, nothing else', () => {
+  const p = 'directory/nmtest', devs = (nm) => ({ dev1aaaa: { x: 'a', y: 'b', sx: 'c', sy: 'd', s: 'e', nm } });
+  store.set(p, { handle: 'nmtest', ecdh: { x: 'x1', y: 'y1' }, sig: { x: 'x2', y: 'y2' }, devs: devs('aXY.Y3Q') });
+  for (const nm of ['', 'n'.repeat(401), 7, { a: 1 }]) assert.throws(() => store.update(p, { devs: devs(nm) }), /devs/, JSON.stringify(nm));
+  assert.equal(store.get(p).d.devs.dev1aaaa.nm, 'aXY.Y3Q');
+  store.delete(p);
+});
+
 test('rejects documents that break the collection rules', () => {
   assert.throws(() => store.set('directory/bob', { handle: 'alice', ecdh: { x: 'x', y: 'y' }, sig: { x: 'x', y: 'y' } }), /handle/);
   assert.throws(() => store.set('directory/bob', { handle: 'bob', ecdh: { x: 'x', y: 'y' }, sig: { x: 'x', y: 'y' }, _uid: 'u' }), /bad field name/);

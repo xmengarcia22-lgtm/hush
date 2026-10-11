@@ -110,8 +110,8 @@ If you delete `server/data` while a browser is still logged in, the page puts
 that account's profile back on the next connection (it still holds the keys),
 re-makes the login reservation for its phone or email, and asks for the
 password once more so the password box exists again. Until that happens the
-account can be reached only with its recovery words, which is also why the
-login screen always offers "Use my recovery words".
+account can be reached only with its recovery words, which is also why
+"Forgot password?" on the login screen always offers "Use my recovery words".
 
 ## Badges and @mentions
 
@@ -309,8 +309,6 @@ All through environment variables. Defaults are safe for local use.
 | `HUSH_TLS_PORT` | (none) | Also listen with HTTPS on this port; `npm run dev:lan` sets 8443. Development only. |
 | `HUSH_TLS_HOST` | `0.0.0.0` | Bind address for the HTTPS listener. |
 | `HUSH_TLS_DIR` | `server/devcert` | Folder with `key.pem` and `cert.pem`. |
-| `RESEND_API_KEY` | (none, but required when `NODE_ENV=production`: the server refuses to start without it) | Sends the codes that confirm an optional recovery email by email through Resend (SPEC.md 14.10); sign-up never sends one. Put it in `server/.env` (one line, `RESEND_API_KEY=...`), which the server reads at startup and `.gitignore` keeps out of the repository; a value already in the environment wins. Without it no email is sent and the code is shown on screen, for local testing only. |
-| `HUSH_MAIL_FROM` | `Hush <onboarding@resend.dev>` | The sender of those emails. The default is Resend's test sender, which only delivers to the Resend account's own address; use an address on a domain verified with Resend. |
 
 ## What the server will and will not do yet
 

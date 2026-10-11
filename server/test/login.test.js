@@ -203,7 +203,7 @@ test('the login still opens when the server lost its reservation, and healLogin 
     assert.deepEqual(pg.calls.setup, [], 'the password box is there, so nothing is asked');
     assert.equal(pg.auth.loginInfo('jordan').loc, loc);
 
-    // The box is gone as well: the reservation comes back and the password is asked for once more.
+    // The box is gone as well: the reservation comes back. The saved address is left alone and nothing asks for the password.
     const pg2 = page(T.url);
     try {
       await pg2.db.ready;
@@ -212,14 +212,16 @@ test('the login still opens when the server lost its reservation, and healLogin 
       await pg2.db.prove(await pg2.auth.proofFor(r.id));
       pg2.S.me = r.id;
       pg2.ls.set('hush:login:jordan', { login, loc });
+      const left = () => [...T.srv.conns][0].ctx.pwMisses.tokensLeft(tag), before = left();
       await pg2.auth.healLogin(r.id);
+      assert.ok(left() >= before - 0.01, 'no wrong-password try is spent on a saved address that has no box');
       assert.equal((await pg2.db.doc('logins/' + tag).get()).exists, true);
       await sleep(900);
-      assert.deepEqual(pg2.calls.setup, ['again']);
-      assert.equal(pg2.auth.loginInfo('jordan').loc, undefined, 'the stale box address is dropped');
+      assert.deepEqual(pg2.calls.setup, [], 'nothing asks for the password');
+      assert.equal(pg2.auth.loginInfo('jordan').loc, loc, 'not looked up at the gate, so no wrong-password try is spent on it');
       await pg2.auth.healLogin(r.id);
       await sleep(900);
-      assert.deepEqual(pg2.calls.setup, ['again'], 'asked once per page load, not on every start');
+      assert.deepEqual(pg2.calls.setup, [], 'not on a later start either');
     } finally { pg2.close(); }
   } finally { pg.close(); await T.stop(); }
 });

@@ -132,7 +132,7 @@ test('healLogin puts back every reservation, and asks for the password again whe
       pg2.ls.set('hush:login:jordanhale', { login: 'jordanhale', loc: all.jordanhale, all });
       await pg2.auth.healLogin(id);
       await sleep(900);
-      assert.deepEqual(pg2.calls.setup, ['again']);
+      assert.deepEqual(pg2.calls.setup, [], 'a lost box is dropped quietly; nothing asks for the password');
     } finally { pg2.close(); }
   } finally { pg.close(); await T.stop(); }
 });

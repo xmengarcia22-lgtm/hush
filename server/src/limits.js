@@ -67,17 +67,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   postsPerMin: 60,              // posts and comments per connection (SPEC.md 9.4 counts per chat; a connection is one person)
   sideWritesPerMin: 120,        // reactions, read marks and typing marks per connection
   invitesPerMinPerAddr: 20,     // chat.invite lookups per address tag (SPEC.md 5.5)
-  codeSendsBurstPerAddr: 6,     // verification codes sent, per address tag (SPEC.md 14.10): this many at once,
-  codeSendsPerDayPerAddr: 20,   // then this many a day
-  codeSendsBurstPerLogin: 3,    // and per email or number, whoever asks, so nobody can flood one inbox
-  codeSendsPerDayPerLogin: 8,
-  codeMissesPerDayPerLogin: 10, // wrong codes per email or number a day, whoever types them (each code also dies after 5)
-  codeChecksPer10MinPerAddr: 30,// code checks per address tag; each code also dies after 5 wrong tries
   powerNeedsSecure: true,       // owners and admins of groups and channels need a secured account (SPEC.md 4.6); always on in production
   boxGoneMs: 30 * 86400_000,   // a deleted password box's address is remembered this long: asking about it is not a wrong password (SPEC.md 4.5)
   pwMissesPerLogin: 10,         // wrong passwords per login (SPEC.md 4.5), whoever tries them; they come back at this many an hour
-  codeTtlMs: 10 * 60_000,       // a code works for this long
-  codeCooldownMs: 60_000,       // and a new one can't be asked for the same email or number sooner than this
   subsPerConn: 600,
   docsPerSub: 1000,
   queryLimitMax: 1000,

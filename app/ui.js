@@ -2245,20 +2245,16 @@ function settingsLogin(body,me){
     if(li){ // every way in, the username first: each works with the same password
       for(const l of loginsOf(me.handle).sort((a,b)=>isHandleLogin(b)-isHandleLogin(a))){const r=el('div','menu-item flush static');r.innerHTML=I.lockMd;
         r.append(el('span',null,isHandleLogin(l)?'Username':isEmailLogin(l)?'Email':'Phone number'),el('span','role',isHandleLogin(l)?atOf(l):l));body.append(r)}
-      body.append(el('p','hint','Log in on another device with any of these and your password. Forgot it? With an email to recover with, the new device scans a code this one shows. Your chats come along.'));
-      const lk=html('button','menu-item flush',I.device+'<span>Link a new device</span>');lk.append(el('span','role','Show code'));lk.onclick=openLinkScanner;body.append(lk)}
+      body.append(el('p','hint','Log in on another device with any of these and your password. Or with no password: on the new device tap Log in \u2192 Log in with my other device, and scan the code this one shows. Your chats come along.'))}
     else{const r=html('button','menu-item flush',I.lockMd+'<span>Add a password</span>');r.append(el('span','role','Not set up'));r.onclick=()=>openSetupLogin();body.append(r)}}
+  {const lk=html('button','menu-item flush',I.device+'<span>Link a new device</span>');lk.append(el('span','role','Show code'));lk.onclick=openLinkScanner;body.append(lk)}
   {const li=loginInfo(me.handle);if(li){const r=html('button','menu-item flush',I.lockMd+'<span>'+(li.loc?'Change password':'Add a password')+'</span>');r.append(el('span','role',li.loc?'On':'Optional'));r.onclick=openSetupLogin;body.append(r)}}
 }
 function settingsAdvanced(body,me){
   body.append(el('div','menu-label flush','Account recovery'));
   const bk=html('button','menu-item flush',I.key+'<span>Recovery words</span>');bk.append(el('span','role'+(hasRecovery(me.handle)?'':' warn'),hasRecovery(me.handle)?'On':'Not set up'));bk.onclick=()=>openBackup();
   const rs=html('button','menu-item flush',I.down+'<span>Restore an account</span>');rs.onclick=()=>openRestore();
-  // Optional: a confirmed email that makes “Forgot password?” work (SPEC.md 14.10). An account from before usernames
-  // that logs in with its email already has that email for recovery.
-  const re=html('button','menu-item flush',I.lockMd+'<span>Recovery email</span>');
-  {const cur=recEmailOf(me.handle)||loginsOf(me.handle).find(isEmailLogin);re.append(el('span','role',cur||'Not set up'))}re.onclick=openRecoveryEmail;
-  body.append(bk,re,rs);
+  body.append(bk,rs);
   {const tg=el('label','toggle');const cb=el('input');cb.type='checkbox';cb.checked=backupOn();
     cb.onchange=async()=>{if(!S.db){cb.checked=!cb.checked;toast('You need to be online for this.');return}cb.disabled=true;const on=cb.checked;
       try{P().backup=on;if(on)await uploadBackup();else await S.db.doc(await backupPath(me)).delete().catch(()=>{});await saveContacts();
@@ -2335,6 +2331,13 @@ function openPhoneInvite(){
   };
 }
 /* ---------- contacts: your address book, encrypted with a key only you can work out ---------- */
+// A device's name on the account's profile (the notice when a device is added), sealed under the account's own key
+// so only its devices can read it: the profile itself is public.
+async function sealDevName(id,name){const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('hush-devname-v1|'+S.me.handle+'|'+id)},await vaultKey(),enc.encode(String(name||'').slice(0,80)));
+  return b64u(iv)+'.'+b64u(new Uint8Array(ct))}
+async function openDevName(id,nm){if(typeof nm!=='string'||nm.split('.').length!==2)return null;const [a,b]=nm.split('.');
+  try{return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(a),additionalData:enc.encode('hush-devname-v1|'+S.me.handle+'|'+id)},await vaultKey(),unb64u(b)))}catch{return null}}
 function vaultKey(){
   const k='vault:'+S.me.handle;
   if(!S.chanKeys.has(k))S.chanKeys.set(k,(async()=>aesKey(await myKey('e'),await pubKey(S.me.ecdh,'e'),'hush-vault:'+S.me.handle))());
@@ -2375,11 +2378,17 @@ async function loadContacts(){
     // Keep the login note and its vault copy in step, so a login saved on the server survives a cleared browser.
     const hint=reconcileLoginHint(loginInfo(me),S.prefs.login);
     if(hint.toLocal)ls.set('hush:login:'+me,hint.toLocal);
-    if(hint.toVault){S.prefs.login=hint.toVault;saveContacts();renderBanner()}}
+    if(hint.toVault){S.prefs.login=hint.toVault;saveContacts();renderBanner()}
+    // Logged in here with the password just now: that login's box address is right, whatever older settings say. It
+    // goes back into the settings quietly, for every device; nothing asks for the password to repair them.
+    const pv=pwVerified.get(me),pli=loginInfo(me);pwVerified.delete(me);
+    if(pv&&pli&&(pli.all||{})[pv.login]!==pv.loc){const all=Object.assign({},pli.all||{},{[pv.login]:pv.loc}),fixed=hintOf(pli.login,pli.login===pv.login?pv.loc:pli.loc,all);
+      ls.set('hush:login:'+me,fixed);S.prefs.login=fixed;saveContacts(true)}}
   renderBanner();
   S.cache.clear();S.chanKeys.clear();tagCache.clear();rebuildNames();refreshDir().then(refreshPresence);pinAll();renderContacts();renderList();updateTitle();matchContacts();if(S.chan){const id=S.chan;openConv(id)}
 }
 let vaultQ=Promise.resolve();
+const pwVerified=new Map(); // account -> {login, loc}: a box address just proven right by logging in here with the password
 function saveContacts(keepLogin){ // keepLogin: this save carries a password change made here, so its box addresses win
   if(!S.contactsReady||!S.db)return Promise.resolve();
   const me=S.me.handle,doc=JSON.parse(JSON.stringify({v:3,contacts:S.contacts,prefs:P(),pins:S.pins,verified:S.verified}));rebuildNames();renderContacts();renderList();
@@ -2780,6 +2789,7 @@ function openRestore(prefill){
       if(!S.db)throw new Error('offline');
       ls.set('hush:backedUp:'+id.handle,Date.now());
       if(lastRecLoc)ls.set('hush:recovery:'+id.handle,{loc:lastRecLoc,ts:Date.now(),conf:true}); // these words work, so they count as set up
+      ls.set('hush:recovered:'+id.handle,Date.now());S.resetFor={handle:id.handle}; // path three: the password was forgotten, so a new one is set next
       if(!(await enterAccount(id))){go.disabled=false;go.textContent='Restore account';return}
       close();toast(S.backupRestored?'Welcome back, '+id.name+'. Your past messages are back too.':'Welcome back, '+id.name);
     }catch(e){err.textContent=e&&e.message==='nomatch'?'Those words don\u2019t match an account. Check the order and spelling.':'Couldn\u2019t restore. Check your connection and try again.';
@@ -2826,15 +2836,18 @@ function askPower(cid,held){ // the server opened a chat at member level: this a
   ensureSecure(held,c.name||'this chat',typeOf(c)==='channel'?'channel':'group',true).then(()=>{S.securing=false});
 }
 const powerLead=p=>'You\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \u201c'+p.name+'\u201d. '+(p.role==='owner'?'Owners':'Admins')+' hold the keys to this '+p.kind+', so your password needs to be stronger: at least 12 characters, to keep it safe.';
-function openSetupLogin(reset,power){ // reset: true after a password reset, 'again' when the server lost the saved box; power: {role,name,kind,done} securing for a power role
-  const me=S.me,li=loginInfo(me.handle)||{login:me.handle};const cur=li.loc&&!reset?li:null,again=reset==='again',strong=!!power||isSecure(me.handle);
-  const {body,sh,close}=sheet(power?'Secure your account':again?'Save your password again':reset?'Choose a new password':cur?'Change password':'Add a password');
-  body.append(el('p',null,power?powerLead(power):again?'This device\u2019s saved login no longer matches the server: your password was changed on another device, or the server lost it. Enter your current password to bring it up to date.':reset?'You\u2019re back in. Pick a new password so you can log in with it next time.':cur?'Enter your current password, then choose a new one.':'Optional. A password lets you log in on a new device even when your other devices aren\u2019t around. It locks your account on this device first, so Hush never sees it and can\u2019t reset it.'));
+function openSetupLogin(reset,power){ // reset: true after a recovery with the words (path three); power: {role,name,kind,done} securing for a power role
+  const me=S.me,li=loginInfo(me.handle)||{login:me.handle};
+  // Back with the recovery words and no new password yet: the old one is forgotten, so it is never asked for (SPEC.md 14.14)
+  if(ls.get('hush:recovered:'+me.handle,null))reset=reset||true;
+  const cur=li.loc&&!reset?li:null,strong=!!power||isSecure(me.handle);
+  const {body,sh,close}=sheet(power?'Secure your account':reset?'Choose a new password':cur?'Change password':'Add a password');
+  body.append(el('p',null,power?powerLead(power):reset?'You\u2019re back in. Pick a new password so you can log in with it next time.':cur?'Enter your current password, then choose a new one.':'Optional. A password lets you log in on a new device even when your other devices aren\u2019t around. It locks your account on this device first, so Hush never sees it and can\u2019t reset it.'));
   const {f:fo,i:po}=pwField('Current password','current-password');
   const {f:f1,i:p1}=pwField(strong?'New password (at least 12 characters)':cur?'New password':'Password (at least 8 characters)','new-password');
   const {f:f2,i:p2}=pwField('Type it again','new-password');
   const go=el('button','primary',power?'Secure my account':cur?'Change password':'Save password');go.style.width='100%';const err=el('div','err');
-  const askCur=cur||power;if(power)f1.hidden=f2.hidden=true; // power: the current password is checked first; new fields only if it is too weak
+  const askCur=cur||(power&&!reset);if(askCur&&power)f1.hidden=f2.hidden=true; // power: the current password is checked first (not when it was forgotten: back with the recovery words); new fields only if it is too weak
   body.append(...(askCur?[fo]:[]),f1,f2,go,err);setTimeout(()=>(askCur?po:p1).focus(),50);
   let secured=false;
   if(power){
@@ -2862,67 +2875,26 @@ function openSetupLogin(reset,power){ // reset: true after a password reset, 'ag
     go.disabled=true;go.textContent='Locking your account\u2026';
     try{
       if(cur){try{await openLoginBox(login,po.value)}catch(e){throw e&&e.code==='ratelimit'?e:new Error('oldpw')}}
-      const old=Object.assign({},li.all||{},li.loc?{[login]:li.loc}:{});
+      const old=new Set(Object.entries(Object.assign({},li.all||{},li.loc?{[login]:li.loc}:{})).map(([l,x])=>l+'|'+x));
+      // and the current password's own boxes, worked out from it for every login: settings left out of date (release 13)
+      // may not name them, and the old password must stop working everywhere
+      if(cur)for(const l of logins)old.add(l+'|'+(await loginSecrets(l,po.value)).loc);
       const all=await saveLoginBoxes(me,logins,p1.value);rememberPw(login,p1.value);
-      for(const [l,loc] of Object.entries(old))if(all[l]!==loc)dropLoginBox(l,loc);
-      rememberLogin(me.handle,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+me.handle,Date.now());renderBanner();
+      for(const e of old){const i=e.lastIndexOf('|'),l=e.slice(0,i),loc=e.slice(i+1);if(all[l]!==loc)dropLoginBox(l,loc)}
+      rememberLogin(me.handle,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+me.handle,Date.now());ls.set('hush:recovered:'+me.handle,null);renderBanner();
       if(pwStrongEnough(p1.value)&&await markSecure())secured=true;
       close();toast(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
     }catch(e){go.disabled=false;go.textContent=cur?'Change password':'Save password';
       err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'Couldn\u2019t save. Check your connection and try again.'}};
 }
-/* ---------- recovery-email codes and moving to a new device; keys move between your devices, never through readable server data ----------
-   Codes are used only for the optional recovery email: to confirm it in Settings, and for "Forgot password?". The
-   server makes the 6-digit code, emails it (SPEC.md 14.10) and checks it; the page never knows it. Only when the
-   server has no mail key (local testing) does it hand the code back as demoCode, and the page shows it on screen. */
+/* ---------- moving to a new device; keys move between your devices, never through readable server data ----------
+   No screen sends or checks an emailed code any more: a new device is let in by one where the account is logged in
+   (SPEC.md 14.14), or comes back with the recovery words. */
 const isEmailLogin=l=>!!l&&l.includes('@');
 const loginKind=l=>isEmailLogin(l)?'email':isHandleLogin(l)?'username':'phone number';
-async function sendLoginCode(login){const r=await S.db.sendCode(login);return r&&typeof r.demoCode==='string'&&/^\d{6}$/.test(r.demoCode)?r.demoCode:null}
-// The resend button waits out the server's cooldown: off and counting down ("Resend in 45s"), then live again. It reads the
-// clock rather than counting ticks, so a tab that slept still shows the true wait, and it stops when the screen is gone.
-const RESEND_LABEL='Resend code',RESEND_WAIT=60;
-function resendCooldown(btn,secs){
-  clearInterval(btn._cd);const end=Date.now()+secs*1000;
-  const tick=()=>{const left=Math.ceil((end-Date.now())/1000);
-    if(left<=0||!btn.isConnected){clearInterval(btn._cd);btn.disabled=false;btn.textContent=RESEND_LABEL;return}
-    btn.disabled=true;btn.textContent='Resend in '+left+'s'};
-  tick();btn._cd=setInterval(tick,250)}
-const demoBox=(code,login)=>html('div','demo-code','<span>'+(isEmailLogin(login)?'Test mode: the server has no mail key, so no email was sent. Your code is':'Texts aren’t sent yet. Your code is')+'</span><strong>'+code+'</strong>');
-const cooldownSecs=e=>{const m=e&&e.code==='ratelimit'&&/^wait (\d+) seconds?\b/.exec(e.message||'');return m?+m[1]:0};   // the server's "wait 42 seconds before asking for another code"
-const codeSendError=e=>cooldownSecs(e)?'A code was just sent. Wait for the countdown, then ask again.':e&&e.code==='ratelimit'?'Too many codes were asked for. Wait a while, then try again.':e&&e.code==='unavailable'?'The code couldn’t be sent. Try again in a moment.':'Couldn’t send the code. Check your connection and try again.';
-const codeCheckError=e=>e&&e.code==='denied'?'That code isn’t right. Check it and try again.':e&&e.code==='notfound'?'That code has expired or was tried too often. Tap “Resend code”.':e&&e.code==='ratelimit'?'Too many tries. Wait a few minutes, then try again.':'Couldn’t check that. Check your connection and try again.';
 function deviceName(){const u=navigator.userAgent;const os=/iPhone/.test(u)?'iPhone':/iPad/.test(u)?'iPad':/Android/.test(u)?'Android':/Mac/.test(u)?'Mac':/Windows/.test(u)?'Windows PC':'a device';
   const br=/CriOS|Chrome/.test(u)&&!/Edg/.test(u)?'Chrome':/Edg/.test(u)?'Edge':/Firefox|FxiOS/.test(u)?'Firefox':/Safari/.test(u)?'Safari':'a browser';return br+' on '+os}
 
-// --- the device that's already logged in: watches for "let me in" requests and asks you to approve ---
-let linkPollT=null;const linkSeen=new Set();
-let linkSheet=null; // the open Link a new device sheet: it lists every waiting request itself, so no alert pops over its code. A request
-// skipped meanwhile isn't marked seen: still waiting once the sheet closes, it alerts then
-// Where a new device's request for this account lands: at the username, or at an email the account logs in with. A
-// request needs an email confirmed by code (SPEC.md 14.10), so a phone number never gets one, and the server is only
-// asked while the account has an email to recover with; with several places they are asked in turn, every 3.5 s in all.
-const linkTags=h=>Promise.all(loginsOf(h).filter(l=>isHandleLogin(l)||isEmailLogin(l)).map(loginTag));
-const linkWatchable=h=>!!recEmailOf(h)||loginsOf(h).some(isEmailLogin);
-function watchLinkRequests(){
-  clearInterval(linkPollT);linkPollT=null;if(!S.db||!S.me)return;
-  const me=S.me;let turn=0;
-  linkPollT=setInterval(async()=>{if(S.me!==me||!linkWatchable(me.handle)||(linkSheet&&linkSheet.isConnected))return;try{const tags=await linkTags(me.handle),tag=tags[turn++%tags.length],s=await S.db.doc('linkreqs/'+tag).get();if(!s.exists)return;const r=s.data();
-    if(r.state!=='wait'||!r.pub||Date.now()-r.ts>LINK_LIFE||linkSeen.has(r.ts+':'+r.pub.x))return;linkSeen.add(r.ts+':'+r.pub.x);askApprove(tag,r)}catch{}},3500);
-}
-function askApprove(tag,r){
-  const {body,sh,close}=sheet('Log in on a new device?');sh.parentNode.style.zIndex='70';
-  const kl=el('p','hint');devShort(r.devk).then(k=>{kl.textContent='Its device key is '+k+'. The new device shows its key under its code: if they differ, tap Not me.'});
-  body.append(el('p',null,(r.dev||'A device')+' is trying to log in to your account. To let it in, show a code here for it to scan, or type the code on its screen.'),kl,
-    el('p','warnbox','If someone asked you to scan or approve something, tap Not me. Hush will never ask you to.'));
-  const row=el('div','reqbtns'),no=el('button','secondary','Not me'),yes=el('button','primary','Show code'),err=el('div','err');row.append(no,yes);body.append(row,err);
-  try{navigator.vibrate&&navigator.vibrate([30,60,30])}catch{}
-  no.onclick=async()=>{no.disabled=yes.disabled=true;err.textContent='';
-    try{await answerLink(tag,{state:'no'},r.dev)}
-    catch(e){if(e&&e.code==='notfound'){close();toast('That request had already ended. Nothing was shared.');return}
-      no.disabled=yes.disabled=false;err.textContent='The request is still open. '+linkFailMsg(e)+' It ends by itself within 10 minutes.';return}
-    close();toast('Login blocked. Nothing was shared.')};
-  yes.onclick=()=>{close();openLinkScanner()};
-}
 // --- QR reading: the phone's built-in reader when there is one, otherwise a small library loaded on demand ---
 let jsqrP=null;
 function loadJsQR(){if(window.jsQR)return Promise.resolve(window.jsQR);
@@ -2945,65 +2917,81 @@ async function qrDecoder(){
     if(src.videoWidth)return ways[turn++%ways.length](src,w,h);
     for(const way of ways){const r=way(src,w,h);if(r)return r}return null};
 }
-// What a refused or dropped request says, for either end. The reason is the server's or the network's; the older texts
-// below it still cover the people-made outcomes (refused, expired, wrong code).
+// What linking a device says when it doesn't work. The server's or the network's reason first, then the people-made ones.
 const linkNetErr=e=>e&&e.code==='ratelimit'?'Too many lookups from this network just now. Wait a minute, then try again.'
   :e&&e.code==='offline'?'Can\u2019t reach the Hush server. Check your connection, then try again.':'';
-const linkWaitErr=e=>linkNetErr(e)
-  ||(e&&e.message==='replaced'?'A newer login request for this account replaced this one. Go back to start again.'
-  :e&&e.message==='format'?'The approval arrived damaged, so nothing was changed. Go back and try again.'
-  :e&&e.code==='conflict'?'Another login request for this account is still waiting. Try again in a few minutes.':'');
 const linkScanErr=e=>linkNetErr(e)||linkScanMsg(e);
-// Why this device's answer to a new device (approval or Not me) didn't go through. Nothing is ever shared when it doesn't.
-const linkFailMsg=e=>e&&e.code==='nopw'?'Without your password this device can\u2019t answer, so nothing was shared.'
-  :e&&e.code==='denied'?'The server didn\u2019t accept this device\u2019s answer, so nothing was shared.'
-  :e&&e.code==='notfound'?'That request ended before this device\u2019s answer reached it, so nothing was shared.'
-  :e&&e.code==='ratelimit'&&/wrong passwords/.test(e.message||'')?'Too many wrong passwords were tried for this login lately, so the server isn\u2019t taking answers for it for a while. Nothing was shared.'
-  :(linkNetErr(e)||'The approval didn\u2019t go through.')+' Nothing was shared.';
 const linkScanMsg=e=>{const m=e&&e.message;return m==='notqr'?'That isn\u2019t a Hush login code.'
-  :m==='nomatch'?'That code isn\u2019t from a login to your account. Never scan a code someone else sends you.'
-  :m==='expired'?'That login request expired or was cancelled. Start again on the new device.'
-  :m==='oldcode'?'That code is from an older version of Hush. Reload Hush on the new device, then use the code it shows.'
-  :m==='badcode'?'That code doesn\u2019t look right. Check each character against the new device\u2019s screen.'
-  :m==='nologin'?'Log in first.':'That didn\u2019t go through. Check your connection and try again.'};
-// What a scan or a typed code says: the secret, and a test that a request is the one the new device showed. The test is
-// on linkFp, which covers both of the device's keys; the QR names all 256 bits of it, the typed code its first 128.
-// Codes from before (version 2) covered only the one-time key and are refused, with a word about why.
+  :m==='expired'||(e&&e.code==='denied')?'That code has expired or was already used. Show a new one on your other device.'
+  :m==='oldcode'?'That code is from an older version of Hush. Reload Hush on your other device, then show a new code.'
+  :m==='badcode'?'That code doesn\u2019t look right. Check each character against your other device\u2019s screen.'
+  :'That didn\u2019t go through. Check your connection and try again.'};
+const linkWaitMsg=e=>e&&e.message==='denied'?'Your other device didn\u2019t let this one in, so nothing was shared.'
+  :e&&e.message==='timeout'?'No answer came from your other device. Check it still shows the code, then scan again.'
+  :e&&e.message==='ended'?'Your other device stopped showing that code, so nothing was shared. Show a new one and scan again.'
+  :e&&e.message==='format'?'What arrived couldn\u2019t be opened, so nothing was used. Scan again.'
+  :'Couldn\u2019t finish. Check your connection, then scan again.';
+// A scanned or typed code (SPEC.md 14.14): the 128-bit secret of the code a signed-in device shows. Codes from before
+// (versions 2 and 3, made by a new device for its own request) are refused with a word about why.
 function linkProof(text){
-  const t=String(text||'').trim(),m=/^hush-link:3:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})$/.exec(t);
-  if(m)return {secret:unb64u(m[1]),fits:async r=>await linkFp(r.pub,r.devk)===m[2]};
-  if(/^hush-link:2:/.test(t))throw new Error('oldcode');
-  const c=parseLinkCode(t);
-  if(!c)throw new Error(/^hush-link:/.test(t)?'notqr':parseLinkCode(t,2)?'oldcode':'badcode');
-  return {secret:c.secret,fits:async r=>{const h=unb64u(await linkFp(r.pub,r.devk));return c.fp.every((x,i)=>x===h[i])}};
+  const t=String(text||'').trim(),m=/^hush-link:4:([A-Za-z0-9_-]{22})$/.exec(t);
+  if(m)return {secret:unb64u(m[1])};
+  if(/^hush-link:[23]:/.test(t))throw new Error('oldcode');
+  const c=parseLinkCode(t,4);
+  if(!c)throw new Error(/^hush-link:/.test(t)?'notqr':parseLinkCode(t,3)||parseLinkCode(t,2)?'oldcode':'badcode');
+  return {secret:c.secret};
 }
-async function approveFromQr(text){
-  const {secret,fits}=linkProof(text);
-  if(!S.me||!S.db)throw new Error('nologin');
-  let tag=null,r=null; // the code must match the device that's asking to log in to this account
-  for(const t of await linkTags(S.me.handle)){const s=await S.db.doc('linkreqs/'+t).get();if(s.exists&&s.data().pub&&await fits(s.data())){tag=t;r=s.data();break}}
-  if(!r)throw new Error('nomatch');
-  if(r.state!=='wait'||Date.now()-r.ts>LINK_LIFE)throw new Error('expired');
-  linkSeen.add(r.ts+':'+r.pub.x);await approveLink(tag,r,secret);return {dev:r.dev,key:await devShort(r.devk)};
-}
+/* ---------- path one, the signed-in device's side: "Link a new device" (SPEC.md 14.14) ----------
+   This device shows a code: a fresh 128-bit secret, which never goes through the server. The offer lives at an address
+   made from it (offerName, offerTag), opened by this account's session. The new device that scans the code claims it
+   with its keys and its proof that it read the code (linkConfirm); this device checks the proof and lets it in from its
+   own session. Nothing else is asked, no password and no recovery words, so nothing here depends on the password-box
+   addresses in the settings. The code works once, for 5 minutes, while this sheet is open; closing it takes it down. */
 function openLinkScanner(){
-  const {body,sh,close}=sheet('Link a new device');sh.parentNode.style.zIndex='70';linkSheet=sh;
-  if(!linkWatchable(S.me.handle)){body.append(el('p',null,'Set up a recovery email first, in Settings → Advanced. Then, on the new device, tap Log in → Forgot password? and confirm that email; it then scans a code this device shows.'));return}
-  body.append(el('p','hint','On the new device, tap Log in → Forgot password? and confirm your recovery email. Then scan the code below with it.'));
-  const showBox=el('div'),err=el('div','err');
-  const cantScan=el('button','link','Can\u2019t scan? Type the new device\u2019s code instead');
-  cantScan.onclick=()=>{cantScan.hidden=true;tf.hidden=tgo.hidden=false;ti.focus()};
-  const tf=el('label','field'),ti=el('input','code-in');ti.autocapitalize='characters';ti.autocomplete='off';ti.spellcheck=false;ti.placeholder='XXXXXX-XXXXXX-\u2026';ti.setAttribute('aria-label','Code from the new device');ti.style.letterSpacing='1px';ti.style.fontSize='15px';
-  tf.append(el('span',null,'Type or paste the code shown on the new device'),ti);const tgo=el('button','secondary','Approve with code');tgo.style.width='100%';
-  tf.hidden=tgo.hidden=true; // the fallback, behind Can't scan?
-  body.append(showBox,cantScan,err,tf,tgo,el('p','hint','Only use a code from a device you\u2019re holding yourself. Anyone who gets you to enter their code gets your account.'));
-  let working=false;
-  const use=async text=>{if(working||!text)return;working=true;err.textContent='';
-    try{const {dev,key}=await approveFromQr(text);close();toast('Approved. Your account is opening on '+(dev||'the new device')+', device key '+key+'.')}
-    catch(e){err.textContent=e&&e.message==='notqr'?linkScanErr(new Error('badcode')):e&&e.code?linkFailMsg(e):linkScanErr(e);setTimeout(()=>{working=false},300)}};
-  tgo.onclick=async()=>{const v=ti.value.trim();if(!v){err.textContent='Type or paste the code first.';return}await use(v)};
-  ti.onkeydown=e=>{if(e.key==='Enter')tgo.click()};
-  showLinkCode(showBox,sh,close);
+  const {body,sh,close}=sheet('Link a new device');sh.parentNode.style.zIndex='70';
+  body.append(el('p','hint','On the new device, tap Log in \u2192 Log in with my other device, then scan this code with it.'));
+  const host=el('div');body.append(host);showOffer(host,sh,close);
+}
+async function showOffer(host,sh,close){
+  host.replaceChildren(el('p','hint center','Making a code\u2026'));
+  const secret=crypto.getRandomValues(new Uint8Array(16)),n=await offerName(secret),tag=await offerTag(n),ref=S.db.doc('linkreqs/'+tag),end=Date.now()+5*60e3;
+  try{await ref.set({state:'offer',ts:Date.now(),h:S.me.handle,n})}
+  catch(e){host.replaceChildren(el('p','hint center',linkNetErr(e)||'Couldn\u2019t make a code. Check your connection, then close this and try again.'));return}
+  const q=el('div','qr big'),left=el('p','hint center'),svg=qrSvg('hush-link:4:'+b64u(secret),'QR code for your new device to scan');if(svg)q.innerHTML=svg;
+  host.replaceChildren(el('p',null,'Scan this with your new device, or type the code under it there.'),q,el('div','link-code-text',linkCode(secret,null,4)),left,
+    el('p','warnbox','Only let a device you\u2019re holding scan this: whoever scans it first is let into your account.'));
+  let over=false;
+  const stop=msg=>{over=true;ref.delete().catch(()=>{});if(msg)host.replaceChildren(el('p','hint center',msg))};
+  const approve=async d=>{const key=await devShort(d.devk);left.textContent='Letting '+(d.dev||'the new device')+' in (device key '+key+')\u2026';
+    try{await approveLink(tag,d,secret)}
+    catch(e){const again=el('button','primary','Try again');again.style.width='100%';again.onclick=()=>{host.replaceChildren(left);approve(d)};
+      host.replaceChildren(el('p','hint center',(linkNetErr(e)||'That didn\u2019t go through.')+' Nothing was shared yet.'),again);return}
+    setTimeout(()=>ref.delete().catch(()=>{}),60e3); // the new device clears it once it has read it; this is in case it can't
+    const k='hush:devsSeen:'+S.me.handle,seen=ls.get(k,null);if(seen)ls.set(k,[...new Set([...seen,d.devk.id])]); // its notice is this toast
+    close();toast('Approved. Your account is opening on '+(d.dev||'the new device')+', device key '+key+'.')};
+  // Claimed, with the proof that the code was read: the person is asked once. The new device shows its key while it
+  // waits; only "Let it in" approves. "Not mine", or closing the sheet, takes the offer down and nothing is shared.
+  const ask=async d=>{const key=await devShort(d.devk),yes=el('button','primary','Let it in'),no=el('button','secondary','Not mine');
+    yes.style.width=no.style.width='100%';no.style.marginTop='8px';
+    host.replaceChildren(el('p',null,'Let '+(d.dev||'this device')+' in? Its screen shows key '+key+'.'),yes,no,el('p','hint','Not a device you\u2019re holding, or a different key? Tap Not mine: nothing is shared.'));
+    // The new device waits 5 minutes from its claim, so the question ends a little before it gives up.
+    let done=false;const until=Date.now()+5*60e3-10e3,watch=setInterval(()=>{if(done||sh.isConnected&&Date.now()<until)return;done=true;clearInterval(watch);ref.delete().catch(()=>{});
+      host.replaceChildren(el('p','hint center','No answer in time, so nothing was shared. Close this and tap Link a new device again.'))},400);
+    yes.onclick=()=>{if(done)return;done=true;clearInterval(watch);host.replaceChildren(left);approve(d)};
+    no.onclick=async()=>{if(done)return;done=true;clearInterval(watch);
+      try{await ref.update({state:'no'});setTimeout(()=>ref.delete().catch(()=>{}),60e3)}catch{ref.delete().catch(()=>{})}
+      host.replaceChildren(el('p','hint center','Not let in. Nothing was shared, and this code no longer works.'))}};
+  const tick=async()=>{if(over)return;if(!sh.isConnected)return stop();
+    if(Date.now()>end)return stop('This code has expired. Close this and tap Link a new device again for a new one.');
+    left.textContent='Works once, for '+Math.ceil((end-Date.now())/60e3)+' more minute'+(end-Date.now()>60e3?'s':'')+'.';
+    try{const s=await ref.get(),d=s.exists&&s.data();
+      if(!d)return stop('This code was taken down. Close this and tap Link a new device again.');
+      if(d.state==='wait'){over=true; // claimed: used either way, and let in only with the proof that the code was read
+        if(!(d.cf&&d.cf===await linkConfirm(secret,tag,d.ts,await linkFp(d.pub,d.devk))))return stop('A device answered this code without proof that it read it, so nothing was shared.');
+        return ask(d)}
+    }catch{}
+    setTimeout(tick,2000)};
+  tick();
 }
 // Whether this device has a camera, without asking for it (no permission prompt; the list only says what kinds exist).
 const hasCamera=async()=>{try{return !!(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices)&&(await navigator.mediaDevices.enumerateDevices()).some(d=>d.kind==='videoinput')}catch{return false}};
@@ -3015,56 +3003,7 @@ async function startQrCamera(vid,onText,onSlow){ // onSlow: nothing read for 8 s
   const tick=async()=>{if(!on)return;if(vid.readyState>=2){try{const t=await decode(vid);if(t){seen=true;await onText(t)}}catch{}}setTimeout(tick,250)};tick();
   return ()=>{on=false;clearTimeout(slow);stream.getTracks().forEach(t=>t.stop())};
 }
-/* ---------- the reverse direction (SPEC.md 14.10): this device shows a code, the new device scans it ----------
-   Same contents as the new device's own code: a fresh 128-bit secret and the fingerprint of the request's keys (linkFp).
-   The new device checks the fingerprint against its own keys and answers with linkConfirm, bound to this request. Only
-   then is anything signed or sent, and only for the request the code was made for. The code dies with the request (5
-   minutes), after one use, or when the sheet closes. With several requests waiting, the person picks one. */
-async function waitingLinkReqs(){const out=[];
-  for(const t of await linkTags(S.me.handle)){try{const s=await S.db.doc('linkreqs/'+t).get(),r=s.exists&&s.data();if(r&&r.state==='wait'&&r.pub&&Date.now()-r.ts<LINK_LIFE)out.push({tag:t,r})}catch{}}
-  return out}
-async function showLinkCode(host,sh,close){
-  if(!sh.isConnected)return;host.replaceChildren(el('p','hint center','Looking for your new device\u2019s request\u2026'));
-  const reqs=await waitingLinkReqs();if(!sh.isConnected)return;
-  if(!reqs.length){host.replaceChildren(el('p','hint center','No new device is asking yet. On the new device, tap Log in \u2192 Forgot password? and confirm your recovery email; its request shows up here.'));setTimeout(()=>showLinkCode(host,sh,close),3500);return}
-  if(reqs.length===1)return showCodeFor(host,sh,close,reqs[0].tag,reqs[0].r);
-  host.replaceChildren(el('p',null,'More than one new device is asking. Pick the one you\u2019re holding: its key is on its screen.'));
-  for(const q of reqs){const b=el('button','secondary',(q.r.dev||'A device')+' \u00b7 key '+await devShort(q.r.devk)+' \u00b7 asked '+Math.max(1,Math.round((Date.now()-q.r.ts)/60e3))+' min ago');
-    b.style.width='100%';b.style.marginTop='8px';b.onclick=()=>showCodeFor(host,sh,close,q.tag,q.r);host.append(b)}
-}
-async function showCodeFor(host,sh,close,tag,r){
-  let secret=crypto.getRandomValues(new Uint8Array(16));const fp=await linkFp(r.pub,r.devk),end=Date.now()+5*60e3,key=await devShort(r.devk); // 5 minutes from showing it, until it is scanned
-  const q=el('div','qr big'),left=el('p','hint center'),svg=qrSvg('hush-link:3:'+b64u(secret)+':'+fp,'QR code for your new device to scan');if(svg)q.innerHTML=svg;
-  host.replaceChildren(el('p',null,'Scan this with '+(r.dev||'your new device')+' (device key '+key+'), or type the code under it there.'),q,el('div','link-code-text',linkCode(secret,fp)),left,
-    el('p','warnbox','Only let a device you\u2019re holding scan this.'));
-  const over=msg=>{secret=null;host.replaceChildren(el('p','hint center',msg))};
-  // Once the new device's proof matches, the secret it is bound to stays until the request ends: a refused or failed
-  // approval can be tried again, on the proof already stored, without a new scan.
-  const approve=async d=>{left.textContent='Letting '+(d.dev||'the new device')+' in\u2026';
-    try{await approveLink(tag,d,secret)}catch(e){return failed(e,d)}
-    secret=null;close();toast('Approved. Your account is opening on '+(d.dev||'the new device')+', device key '+key+'.')};
-  const failed=(e,d)=>{
-    if(e&&e.code==='notfound')return over(linkFailMsg(e)+' Start again on the new device.');
-    const again=el('button','primary','Try again');again.style.width='100%';
-    host.replaceChildren(el('p','hint center',linkFailMsg(e)),again);
-    again.onclick=async()=>{again.disabled=true;
-      try{const s=await S.db.doc('linkreqs/'+tag).get(),n=s.exists&&s.data();
-        if(!n||n.ts!==r.ts||n.state!=='wait')return over('That request has ended, so nothing was shared. Start again on the new device.');
-        if(n.cf!==d.cf)return over('The new device has used a newer code since. Let it scan the code shown now.');
-        host.replaceChildren(left);await approve(n)}
-      catch(err){failed(err,d)}}};
-  const tick=async()=>{
-    if(!secret)return;if(!sh.isConnected){secret=null;return}
-    if(Date.now()>end)return over('This code has expired. Start again on the new device.');
-    left.textContent='Works once, for '+Math.ceil((end-Date.now())/60e3)+' more minute'+(end-Date.now()>60e3?'s':'')+'.';
-    try{const s=await S.db.doc('linkreqs/'+tag).get(),d=s.exists&&s.data();
-      if(!d||d.ts!==r.ts||d.state!=='wait')return over('That request has ended, so this code no longer works.');
-      if(d.cf&&await linkFp(d.pub,d.devk)===fp&&d.cf===await linkConfirm(secret,tag,d.ts,fp)){linkSeen.add(d.ts+':'+d.pub.x);return approve(d)}
-    }catch{}
-    setTimeout(tick,2000)};
-  tick();
-}
-// The new device's side of the reverse direction: scan (or type, or pick a photo of) the code the other device shows.
+// The new device's side of path one: scan (or type, or pick a photo of) the code the signed-in device shows.
 function scanOtherCode(useText,onOk){
   const {body,sh,close}=sheet('Scan your other device\u2019s code');sh.parentNode.style.zIndex='70'; // above the sign-in screen it opens from
   const status=el('p','hint center','Looking for a camera\u2026'),err=el('div','err'),cam=el('div','scan-box'),vid=document.createElement('video');vid.setAttribute('playsinline','');vid.muted=true;cam.append(vid);cam.hidden=true;
@@ -3078,8 +3017,7 @@ function scanOtherCode(useText,onOk){
   const watch=setInterval(()=>{if(!sh.isConnected){finish();clearInterval(watch)}},400);
   const use=async(text,typed)=>{if(busy||!text)return;busy=true;err.textContent='';
     try{await useText(text);finish();close();onOk()}
-    catch(e){err.textContent=e&&e.message==='nomatch'?'That code is for a different request. Scan the code on your own other device, the one showing this device\u2019s key.'
-      :e&&e.message==='used'?'A code was already used for this request.':typed&&e&&e.message==='notqr'?linkScanErr(new Error('badcode')):linkScanErr(e);
+    catch(e){err.textContent=typed&&e&&e.message==='notqr'?linkScanErr(new Error('badcode')):linkScanErr(e);
       setTimeout(()=>{busy=false},typed?300:1500)}};
   tgo.onclick=()=>{const v=ti.value.trim();if(!v){err.textContent='Type or paste the code first.';return}use(v,true)};
   ti.onkeydown=e=>{if(e.key==='Enter')tgo.click()};
@@ -3094,51 +3032,6 @@ function scanOtherCode(useText,onOk){
   hasCamera().then(yes=>{if(!sh.isConnected)return;camBtn.hidden=!yes;
     status.textContent=yes?'Tap to scan the code with this device\u2019s camera. Your browser will ask first.':'No camera here. Type the code shown under the QR on your other device.'});
 }
-/* Answers a new device's request (the approval, or Not me). The server takes an answer from a device signed in as the
-   username the request is at or, at an email, from one that shows it holds that login's password box (login.gate). The
-   address comes from the settings as they are now (syncLogin), and only that one login is asked about, never twice about
-   an address already found to have no box. Refused (a reconnect since forgets the proof): refresh, try once more. When
-   the settings' address has no box (the password was changed on another device, and older settings were saved over the
-   new ones), the password proves it instead (linkPassword). who: the new device's name, for that ask. */
-async function answerLink(tag,fields,who){
-  const me=S.me.handle,ref=S.db.doc('linkreqs/'+tag);if(tag===await loginTag(me))return ref.update(fields);
-  let login=null;for(const l of loginsOf(me))if(await loginTag(l)===tag)login=l;
-  const prove=async()=>{await syncLogin(me).catch(()=>{});const li=loginInfo(me)||{},x=login&&((li.all||{})[login]||(li.login===login?li.loc:null));if(!x)return false;
-    const k=tag+'|'+x,known=gated.has(k)&&await gated.get(k).catch(()=>null);
-    if(known&&!(await S.db.doc('accounts/'+known).get()).exists)return false; // already found to have no box: no need to ask again
-    gated.set(k,Promise.resolve(await S.db.loginGate(tag,x)));return true};
-  const send=async()=>{try{await ref.update(fields);return true}catch(e){if(e&&e.code==='denied')return false;throw e}};
-  if(await prove()){if(await send())return;if(await prove()&&await send())return}
-  if(!login)throw Object.assign(new Error('refused'),{code:'denied'});
-  await linkPassword(login,tag,who);
-  if(!(await send()))throw Object.assign(new Error('refused'),{code:'denied'});
-}
-/* The settings' box address for login has no box behind it. The password proves this device holds the account instead:
-   it must open the account's box (a wrong one is a wrong guess, and the server counts it), and then every login's box
-   address is put right in the settings, for every device. Nothing is saved under a password that hasn't opened the
-   account, so a typo can never become a second password. Throws code 'nopw' when the person closes the ask. */
-async function linkPassword(login,tag,who){
-  const me=S.me;let msg='';
-  for(;;){
-    const pw=await askLinkPassword(who,msg);if(pw===null)throw Object.assign(new Error('nopw'),{code:'nopw'});
-    let x;
-    try{const r=await openLoginBox(login,pw);if(r.id.handle!==me.handle)throw new Error('nomatch');x=r.loc}
-    catch(e){if(e&&e.code)throw e;msg='That isn\u2019t your current password.';continue}
-    try{const li=loginInfo(me.handle)||{login},all=await saveLoginBoxes(me,loginsOf(me.handle),pw);rememberLogin(me.handle,{login:li.login,loc:all[li.login],all},true)}catch{} // boxes already there stay as they are
-    gated.set(tag+'|'+x,Promise.resolve(await S.db.loginGate(tag,x))); // the proof, on this connection
-    return;
-  }
-}
-function askLinkPassword(who,msg){ // the password typed, or null when the person closes the ask
-  return new Promise(res=>{
-    const {body,sh,close}=sheet('Enter your password');sh.parentNode.style.zIndex='80'; // above the Link a new device sheet
-    const {f,i}=pwField('Password','current-password'),go=el('button','primary','Continue'),err=el('div','err',msg);go.style.width='100%';
-    body.append(el('p',null,'Your password was changed on another device, so this device needs it once to answer '+(who||'the new device')+'.'),f,go,err,
-      el('p','hint','Don\u2019t know it? Then this device can\u2019t answer. On the new device, use your recovery words instead.'));
-    let done=false;const end=v=>{if(done)return;done=true;clearInterval(watch);close();res(v)};
-    go.onclick=()=>{if(!i.value){err.textContent='Enter your password.';return}end(i.value)};i.onkeydown=e=>{if(e.key==='Enter')go.click()};
-    const watch=setInterval(()=>{if(!sh.isConnected)end(null)},300);setTimeout(()=>i.focus(),50)});
-}
 async function approveLink(tag,r,secret){
   if(!(secret instanceof Uint8Array)||secret.length!==16)throw new Error('notqr');
   const e=await ephemeral(),key=await linkKey(e.privateKey,r.pub,secret),iv=crypto.getRandomValues(new Uint8Array(12));
@@ -3147,71 +3040,40 @@ async function approveLink(tag,r,secret){
     const d={id:dk.id,ecdh:{x:dk.x,y:dk.y},sig:{x:dk.sx,y:dk.sy},by:S.me.dev.id};
     const sg=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},await devKey('s'),devMsg(S.me.handle,d)));
     payload={v:2,b:bundleOf(S.me),d:{by:S.me.dev.id,s:sg},ks:ksMap(),trust:[S.me.dev.id,...(S.me.trust||[])]};
-    ent=devEntry(Object.assign({},d,{s:sg,ts:Date.now()}));
+    ent=devEntry(Object.assign({},d,{s:sg,ts:Date.now(),nm:await sealDevName(dk.id,r.dev)}));
   }
   const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('hush-link-v2')},key,enc.encode(JSON.stringify(payload))));
-  await answerLink(tag,{state:'ok',epub:await pubJwk(e),iv:b64u(iv),ct:b64u(ct)},r.dev);
+  await S.db.doc('linkreqs/'+tag).update({state:'ok',epub:await pubJwk(e),iv:b64u(iv),ct:b64u(ct)}); // the offer is this account's: its session answers
   if(ent){ // trusted and listed only once the approval is in, so a refused one leaves no device behind
     S.me.trust=[...new Set([...(S.me.trust||[]),dk.id])];ls.set('hush:ids',S.ids);wrapSynced.clear();
     if(S.dir[S.me.handle])(S.dir[S.me.handle].devs=S.dir[S.me.handle].devs||{})[dk.id]=ent;
     S.db.doc('directory/'+S.me.handle).update({devs:{[dk.id]:ent}}).catch(()=>{});
   }
 }
-// --- the new device: asks, waits, then unlocks what the old device sent ---
-const LINK_LIFE=10*60e3; // a new device's request lives this long (the server lets it resume only that long, link.resume)
-async function requestLink(login,onStatus,prev,em){ // prev: the same request, continued after a reload
-  let tag,e,secret,pub,dv,ts;
-  if(prev){({tag,ts,pub,dv}=prev);secret=unb64u(prev.s);e={privateKey:await crypto.subtle.importKey('jwk',prev.e,EC,false,['deriveBits'])}}
-  else{tag=await loginTag(login);e=await ephemeral();secret=crypto.getRandomValues(new Uint8Array(16));pub=await pubJwk(e);dv=await newDev();ts=Date.now()}
-  const devk={id:dv.id,x:dv.ecdh.x,y:dv.ecdh.y,sx:dv.sig.x,sy:dv.sig.y},secrets=[secret]; // this device's own code, and one it may scan
-  // The server's record that this device confirmed the email belongs to one connection. After a reload or a reconnect the
-  // device gets it back by signing a fresh challenge with the device key inside this very request (link.resume): bound to
-  // this request, only while it waits, and nothing is kept that someone else could replay.
-  const resume=async()=>{const k=await crypto.subtle.importKey('jwk',dv.sigPriv,DS,false,['sign']);
-    await S.db.linkResume(tag,ts,async m=>b64(new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},k,enc.encode(m)))))};
-  if(prev){try{await resume()}catch{ls.set('hush:linkPending',null);throw new Error('noresume')}}
-  else{await S.db.doc('linkreqs/'+tag).set({state:'wait',pub,ts,dev:deviceName(),devk});
-    // in the sealed store (never sent anywhere) until the request ends, so a reload continues it instead of asking for a new code
-    ls.set('hush:linkPending',{login,em:em||null,tag,ts,pub,dv,s:b64u(secret),e:await crypto.subtle.exportKey('jwk',e.privateKey)})}
-  const forget=()=>{const p=ls.get('hush:linkPending',null);if(p&&p.tag===tag&&p.ts===ts)ls.set('hush:linkPending',null);if(S.linkResume===resume)S.linkResume=null};
-  S.linkResume=resume;
-  // The codes commit to both keys (linkFp): the one-time key the handoff is sealed to, and this device's own key, which
-  // the approving device signs onto the account. Swapping either on the server makes the code stop matching.
-  const fp=await linkFp(pub,devk);onStatus({code:linkCode(secret,fp),dk:await devShort(devk)});
-  // Leaving, cancelling or timing out takes this request down, so the next try starts clean. Only this device's own
-  // waiting request goes: one that was approved, refused, or replaced by a newer try is left alone.
-  let stop=false,finished=false;
-  const withdraw=async()=>{if(finished)return;finished=true;forget();try{const d=S.db.doc('linkreqs/'+tag),s=await d.get();if(s.exists&&s.data().ts===ts&&s.data().state==='wait')await d.delete()}catch{}};
-  const cancel=()=>{stop=true;return withdraw()};
-  let fails=0; // polls that the server or the network refused, in a row: after ten the person is told why instead of waiting out the clock
-  const done=(async()=>{while(!stop&&Date.now()-ts<LINK_LIFE){await new Promise(r=>setTimeout(r,3000));if(stop)return null;
-      try{const s=await S.db.doc('linkreqs/'+tag).get();fails=0;if(!s.exists)continue;const r=s.data();if(r.ts!==ts){finished=true;forget();throw new Error('replaced')}
-        if(r.state==='no'){finished=true;forget();S.db.doc('linkreqs/'+tag).delete().catch(()=>{});throw new Error('denied')}
-        if(r.state==='ok'){finished=true;let pt=null;
-          for(const s of secrets){try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(r.iv),additionalData:enc.encode('hush-link-v2')},await linkKey(e.privateKey,r.epub,s),unb64u(r.ct));break}catch{}}
-          if(!pt)continue;forget();
-          S.db.doc('linkreqs/'+tag).delete().catch(()=>{});const o=JSON.parse(dec.decode(pt));if(o.v!==2)return idFromBundle(o);
-          const id=idFromBundle(o.b);if(o.d&&typeof o.d.s==='string'&&typeof o.d.by==='string'){id.dev=Object.assign(dv,{by:o.d.by,s:o.d.s,ts:Date.now()});id.trust=Array.isArray(o.trust)?o.trust.filter(x=>typeof x==='string'):[]}
-          if(o.ks&&typeof o.ks==='object'){const cur=ls.get('hush:ks:'+id.handle,{});for(const [cid,m] of Object.entries(o.ks))if(m&&typeof m==='object')cur[cid]=Object.assign({},cur[cid]||{},m);ls.set('hush:ks:'+id.handle,cur);S.ksFor=null;if(S.me&&S.me.handle===id.handle)scheduleBackup()}
-          return id}}
-      catch(err){if(['denied','replaced','format'].includes(err.message))throw err;if(err&&err.code&&++fails>=10)throw err}}
-    if(!stop){await withdraw();throw new Error('timeout')}return null})();
-  // The reverse direction: this device scans (or types) a code its other device shows. The code must name this request's
-  // keys; this device then proves it read it (linkConfirm) and accepts the handoff under that code's secret. Each code
-  // once; a newer one replaces the proof (the other device lost the older one's secret, or shows a fresh code).
-  const usedCodes=new Set();
-  const useShown=async text=>{
-    const {secret:s,fits}=linkProof(text),k=b64u(s);if(usedCodes.has(k))throw new Error('used');
-    if(!(await fits({pub,devk})))throw new Error('nomatch');
-    const cf=await linkConfirm(s,tag,ts,fp),write=()=>S.db.doc('linkreqs/'+tag).update({cf});
-    // a reconnect lost the confirmation: get it back once and try again. The code counts as used only once the proof is in.
-    try{await write()}catch(err){if(!(err&&err.code==='denied'))throw err;await resume();await write()}
-    usedCodes.add(k);secrets.push(s);
-  };
-  return {cancel,done,useShown};
+/* ---------- path one, the new device's side: claim the offer the scanned code names, then wait (SPEC.md 14.14) ----------
+   The code's secret names the offer. This device makes its keys and claims the offer with them and with its proof that
+   it read the code (linkConfirm, bound to the offer and to both keys); the signed-in device that showed the code checks
+   the proof and lets it in from its own session. Returns {key, done, cancel}: done resolves to the account once let in. */
+async function claimLink(text){
+  const {secret}=linkProof(text),tag=await offerTag(await offerName(secret)),ref=S.db.doc('linkreqs/'+tag);
+  const s=await ref.get(),o=s.exists&&s.data();if(!o||o.state!=='offer')throw new Error('expired');
+  const e=await ephemeral(),pub=await pubJwk(e),dv=await newDev(),devk={id:dv.id,x:dv.ecdh.x,y:dv.ecdh.y,sx:dv.sig.x,sy:dv.sig.y},ts=Date.now();
+  await ref.update({state:'wait',pub,ts,dev:deviceName(),devk,cf:await linkConfirm(secret,tag,ts,await linkFp(pub,devk))});
+  let stop=false;
+  const done=(async()=>{for(const until=Date.now()+5*60e3;Date.now()<until;){await new Promise(r=>setTimeout(r,2000));if(stop)return null;
+      let r;try{const s=await ref.get();if(!s.exists)throw new Error('ended');r=s.data()}catch(err){if(err.message==='ended')throw err;continue}
+      if(r.state==='no'){ref.delete().catch(()=>{});throw new Error('denied')}
+      if(r.state!=='ok')continue;
+      let pt;try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(r.iv),additionalData:enc.encode('hush-link-v2')},await linkKey(e.privateKey,r.epub,secret),unb64u(r.ct))}catch{throw new Error('format')}
+      ref.delete().catch(()=>{});const p=JSON.parse(dec.decode(pt));if(p.v!==2)return idFromBundle(p);
+      const id=idFromBundle(p.b);if(p.d&&typeof p.d.s==='string'&&typeof p.d.by==='string'){id.dev=Object.assign(dv,{by:p.d.by,s:p.d.s,ts:Date.now()});id.trust=Array.isArray(p.trust)?p.trust.filter(x=>typeof x==='string'):[]}
+      if(p.ks&&typeof p.ks==='object'){const cur=ls.get('hush:ks:'+id.handle,{});for(const [cid,m] of Object.entries(p.ks))if(m&&typeof m==='object')cur[cid]=Object.assign({},cur[cid]||{},m);ls.set('hush:ks:'+id.handle,cur);S.ksFor=null;if(S.me&&S.me.handle===id.handle)scheduleBackup()}
+      return id}
+    throw new Error('timeout')})();
+  return {key:await devShort(devk),done,cancel:()=>{stop=true}};
 }
 function signedOutHere(){
-  const h=S.me.handle;clearInterval(linkPollT);S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);
+  const h=S.me.handle;S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);
   forgetAccountData(h).then(()=>{
     if(S.ids.length){start(S.ids[0]);toast(atOf(h)+' was moved to a new device and logged out here.')}
     else{S.me=null;dropUnsealed();if(S.db&&S.db.prove)S.db.prove(null);showOnboard(false,'Your account was set up fresh on another device, so it was logged out here.')}});
@@ -3231,7 +3093,7 @@ function dropUnsealed(){ // nothing unsealed stays in memory: keys, caches, decr
   S.contacts=[];S.contactsReady=false;S.prefs=null;S.convs=[];S.previews.clear();S.chatDocs.clear();S.dmPeers={};dmIds.clear();
   S.chanKeys.clear();S.keys.clear();S.cache.clear();S.media.clear();S.mediaBlobs.clear();tagCache.clear();unsealCache.clear();metaCache.clear();devCache.clear();
   S.posts=[];S.rawPosts=[];S.older=[];S.scheduled=[];S.future=[];S.dir={};S.presence={};S.pins={};S.verified={};S._vp=null;for(const k of Object.keys(backupPaths))delete backupPaths[k];
-  dirMiss.clear();loginHealed.clear();healed.clear();wrapSynced.clear();baseDone.clear();dmRenoted.clear();linkSeen.clear();rebuildNames();
+  dirMiss.clear();loginHealed.clear();healed.clear();wrapSynced.clear();baseDone.clear();dmRenoted.clear();rebuildNames();
 }
 function confirmSheet(title,text,opt={}){ // a question with two answers; resolves true only for the first one
   return new Promise(res=>{const {body,close}=sheet(title,{locked:true});
@@ -3251,7 +3113,7 @@ async function logOutAccount(h,opt={}){
     if(id.dev&&id.dev.id)await quick(S.db.doc('directory/'+h).update({devs:{[id.dev.id]:null}}));
     await quick(S.db.doc('presence/'+h).set({ts:0,hidden:true}));
   }
-  if(current){clearInterval(linkPollT);linkPollT=null;if(S.unsubConvs){S.unsubConvs();S.unsubConvs=null}closeConv();S.me=null;if(S.db&&S.db.prove)S.db.prove(null);
+  if(current){if(S.unsubConvs){S.unsubConvs();S.unsubConvs=null}closeConv();S.me=null;if(S.db&&S.db.prove)S.db.prove(null);
     dropUnsealed();renderList()} // nothing unlocked stays in memory, and a fresh (empty) draw retires any list draw still in flight with the old chats
   S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);if(ls.get('hush:active',null)===h)ls.set('hush:active',null);
   await forgetAccountData(h);
@@ -3273,10 +3135,24 @@ async function loadDir(handles,force){
   return changed;
 }
 let dirBusy=false;
+// A device added to this account, by any way in, is shown once on every signed-in device, with its name and its key.
+// What is there on this device's first look counts as known; only devices whose entries check out are announced.
+let devNoticeBusy=false;
+async function noticeNewDevices(){
+  const me=S.me,d=me&&S.dir[me.handle];if(!d||devNoticeBusy)return;devNoticeBusy=true;
+  try{const k='hush:devsSeen:'+me.handle,ids=Object.keys(d.devs||{}),seen=ls.get(k,null);ls.set(k,ids);if(!seen)return;
+    const fresh=ids.filter(i=>!seen.includes(i)&&i!==(me.dev&&me.dev.id));if(!fresh.length)return;
+    const ok=new Set((await verifiedDevs(me.handle)).map(v=>v.id));
+    for(const i of fresh){if(!ok.has(i)||S.me!==me)continue;const e=d.devs[i],name=await openDevName(i,e.nm),key=await devShort({id:i,x:e.x,y:e.y,sx:e.sx,sy:e.sy});
+      const {body,close}=sheet('A device was added');const b=el('button','primary','OK');b.style.width='100%';b.onclick=close;
+      body.append(el('p',null,(name||'A device')+' was added to your account. Its key is '+key+'.'),b)}}
+  catch{}finally{devNoticeBusy=false}
+}
 async function refreshDir(force){
   if(dirBusy||!S.db||!S.me)return;dirBusy=true;let changed=false;try{changed=await loadDir(relevantHandles(),force)}finally{dirBusy=false}
   if(S.dir[S.me.handle]&&(S.dir[S.me.handle].kv||1)>(S.me.kv||1)){signedOutHere();return}
   const first=!S.dirReady;if(first){S.dirReady=true}if(first||force){republishSelf().then(publishDev).catch(()=>{});syncSearch()}
+  noticeNewDevices();
   if(!changed&&!first)return;
   pinAll();renderList();renderContacts();
   if(S.chan){const c=curConv();const warn=!!(c&&typeOf(c)==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c)));
@@ -3387,7 +3263,7 @@ function openDrawer(){
 function showOnboard(adding,notice){
   document.querySelectorAll('.onboard').forEach(x=>x.remove());
   const o=el('div','onboard'),w=el('div','onboard-in');o.append(w);document.body.append(o);
-  let login=null,link=null,proven=null,linkEm=null; // proven: an email just confirmed on this connection, so backing out and trying again needn't ask for another code
+  let login=null,link=null; // link: this device's claim on another device's code, while it waits
   const head=(t,lead)=>{if(link){link.cancel();link=null}w.replaceChildren(html('div','logo',I.lockBig),el('h1',null,t),el('p','lead',lead))};
   const foot=(back)=>{if(back){const b=el('button','link','Back');b.onclick=back;w.append(b)}if(adding){const c=el('button','link','Cancel');c.onclick=()=>{if(link)link.cancel();o.remove()};w.append(c)}};
   const busy=(b,t)=>{b.disabled=!!t;if(t){b.dataset.t=b.dataset.t||b.textContent;b.textContent=t}else b.textContent=b.dataset.t||b.textContent};
@@ -3412,12 +3288,12 @@ function showOnboard(adding,notice){
     const {f:pf,i:p}=pwField('Password','current-password');
     const go=el('button','primary','Log in');
     const forgot=el('button','link','Forgot password?');
-    const rec=el('button','link','Use my recovery words');rec.onclick=()=>openRestore(); // always within reach: the words need no email or password
+    const rec=el('button','link','Log in with my other device');rec.onclick=()=>stepLinkScan(); // no password: a device where you're logged in lets this one in
     const su=el('button','link','Don’t have an account? Sign up');su.onclick=()=>stepSignup();
     p.name='password';const form=el('form');form.method='post';form.action='#';form.append(f,pf,go);form.onsubmit=e=>e.preventDefault();go.type='submit';
     w.append(form,err,forgot,rec,su);foot(()=>stepChoose());
     i.onkeydown=e=>{if(e.key==='Enter'&&!p.value){e.preventDefault();p.focus()}};setTimeout(()=>(i.value?p:i).focus(),50);
-    forgot.onclick=()=>{err.textContent='';const l=read();if(!l)return;login=l;stepForgot()};
+    forgot.onclick=()=>{err.textContent='';stepForgot()};
     go.onclick=async()=>{err.textContent='';const l=read();if(!l)return;
       if(!p.value){err.textContent='Enter your password.';p.focus();return}
       if(offline(err))return;login=l;
@@ -3431,13 +3307,12 @@ function showOnboard(adding,notice){
       if(r.kind==='wrongpw'){busy(go);err.textContent='That password isn’t right. Try again, or tap “Forgot password?”';return}
       if(r.kind==='new'){busy(go);err.textContent='There’s no account with that '+loginKind(l)+'. Check it, or tap “Sign up” to create one.';return}
       busy(go,'Unlocking your account…');
-      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value))markSecure()}else busy(go)}
+      try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});pwVerified.set(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value))markSecure()}else busy(go)}
       catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account was set up fresh. Tap “Forgot password?”':'Couldn’t log in. Check your connection and try again.'}};
   };
   // Sign-up, in two quick screens and no code: an email or a phone number (one is required) and a password, then a
   // username and the name people see. The account can then be logged in to with any of the three: the email or number,
-  // the username, each with the password. Nothing is sent to the email or number; confirming an email is the optional
-  // recovery step in Settings.
+  // the username, each with the password. Nothing is sent to the email or number.
   let su=null; // what the first screen collected: {contact, pw}
   const stepSignup=(msg)=>{
     head('Create an account','Your email or phone number, and a password.');
@@ -3493,111 +3368,31 @@ function showOnboard(adding,notice){
         if(!reserved)toast('That '+loginKind(contact)+' couldn’t be saved, so log in with your username for now.');else if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };
-  // Forgot password: only for an account with a recovery email (Settings → Advanced). The email gets a code; once it
-  // is confirmed, the server tells this page whether that email is set up for this account, and only then lets it ask
-  // the account's devices to let it in. Nothing is said about an email that hasn't been confirmed.
-  const stepForgot=(msg)=>{
-    head('Forgot your password?',isHandleLogin(login)?'Enter the email on '+atOf(login)+'’s account, or the recovery email you set up, and we’ll send it a code.':'Enter your account’s email and we’ll send it a code.');
-    const err=el('div','err',msg||'');const f=el('label','field');const i=el('input');i.type='email';i.autocomplete='email';i.autocapitalize='none';i.spellcheck=false;i.placeholder='you@example.com';
-    if(isEmailLogin(login))i.value=login;f.append(el('span',null,'Recovery email'),i);
-    const go=el('button','primary','Send code');go.style.width='100%';
-    const rec=el('button','link','Use my recovery words');rec.onclick=()=>openRestore();
-    w.append(f,go,err,el('p','hint','Signed up with a phone number and no recovery email? Your six recovery words still get you back in.'),rec);foot(()=>stepLogin());
-    i.onkeydown=e=>{if(e.key==='Enter')go.click()};setTimeout(()=>i.focus(),50);
-    go.onclick=()=>{err.textContent='';const em=normEmail(i.value);if(!em){err.textContent='Enter a valid email address.';return}if(offline(err))return;stepCode(em)};
+  // Forgot password: two ways back in, and neither asks for the password. A device where you're still logged in lets this
+  // one in (path one). With none, the six recovery words bring the account back, and then a new password is set (path three).
+  const stepForgot=()=>{
+    head('Forgot your password?','You don\u2019t need it to get back in.');
+    const ln=el('button','primary','Use a device where I\u2019m still logged in'),rw=el('button','secondary','Use my recovery words');
+    ln.style.width=rw.style.width='100%';rw.style.marginTop='10px';ln.onclick=()=>stepLinkScan();rw.onclick=()=>openRestore();
+    w.append(ln,rw,el('p','warnbox','No other device and no recovery words? Then nobody can open this account again, including you: Hush can\u2019t reset it, and that\u2019s what keeps anyone else from taking it.'));
+    foot(()=>stepLogin());
   };
-  const stepCode=(em)=>{
-    linkEm=em;
-    if(proven&&proven.em===em&&(proven.typed===login||proven.login===login)&&Date.now()-proven.at<10*60e3){login=proven.login;stepExisting();return} // already confirmed here: a used code can't be typed twice
-    const pend=ls.get('hush:linkPending',null);
-    if(pend&&pend.em===em&&Date.now()-pend.ts<LINK_LIFE){login=pend.login;stepExisting(pend);return} // a reload: the same request goes on, no new code
-    if(pend&&Date.now()-pend.ts>=LINK_LIFE)ls.set('hush:linkPending',null);
-    head('Reset your password','Sending a 6-digit code to '+em+'…');
-    const lead=w.querySelector('.lead'),demo=el('div');
-    const i=el('input','code-in');i.inputMode='numeric';i.autocomplete='one-time-code';i.maxLength=6;i.placeholder='••••••';i.setAttribute('aria-label','6-digit code');
-    const err=el('div','err'),again=el('button','link',RESEND_LABEL);w.append(demo,i,err,again);foot(()=>stepForgot());
-    const send=async()=>{again.disabled=i.disabled=true;err.textContent='';demo.replaceChildren();
-      try{const d=await sendLoginCode(em);resendCooldown(again,RESEND_WAIT);
-        lead.textContent=d?'Enter the 6-digit code for '+em+'.':'We sent a 6-digit code to '+em+'. It can take a minute to arrive; check your spam folder too.';
-        if(d)demo.append(demoBox(d,em));i.disabled=false;i.value='';setTimeout(()=>i.focus(),50)}
-      catch(e){const w=cooldownSecs(e);
-        if(w){const used=ls.get('hush:codeUsed',null);resendCooldown(again,w);
-          if(used&&used.em===em&&Date.now()-used.at<10*60e3)lead.textContent='The code sent to '+em+' a moment ago has been used. Ask for a new one when the timer ends.';
-          else{lead.textContent='A code was sent to '+em+' a moment ago. Enter it below, or ask for another when the timer ends.';i.disabled=false;setTimeout(()=>i.focus(),50)}}
-        else{lead.textContent='We couldn’t send a code to '+em+' yet.';err.textContent=codeSendError(e);again.disabled=false}}};
-    again.onclick=send;send();
-    i.oninput=async()=>{i.value=i.value.replace(/\D/g,'').slice(0,6);err.textContent='';if(i.value.length<6)return;
-      i.disabled=true;let r;
-      try{r=await S.db.checkCode(em,i.value,isHandleLogin(login)?login:undefined)}catch(e){i.disabled=false;err.textContent=codeCheckError(e);i.select();return}
-      ls.set('hush:codeUsed',{em,at:Date.now()}); // a code works once: after a reload, don't invite typing it again
-      if(!r.link){stepForgot('Email recovery isn’t set up for '+(isHandleLogin(login)?atOf(login):'that account')+' with that email. Use your recovery words instead.');return}
-      const typed=login;if(r.via==='email')login=em; // the email is the account's own login: its devices watch for requests there
-      proven={em,typed,login,at:Date.now()};stepExisting()};
-  };
-  const stepExisting=(prev)=>{
-    S.resetFor={login};
-    head('Get back in','On a device where you’re still logged in, open Link a new device, then scan the code it shows. Then you’ll pick a new password.');
-    const manual=el('div','link-code'),box=el('div','link-wait');box.append(el('span','spin'),el('span',null,'Waiting for you to scan…'));const err=el('div','err');
-    const showCode=(code,dk)=>{const cp=el('button','link sm','Copy code');cp.onclick=async()=>{try{await navigator.clipboard.writeText(code);toast('Code copied')}catch{toast('Select the code and copy it.')}};
-      manual.replaceChildren(el('p','hint center','Can\u2019t scan? Type or paste this code on your other device instead:'),el('div','link-code-text',code),cp,el('p','hint center','This device\u2019s key: '+dk+'. Your other device shows the same key when it asks you to approve.'))};
-    const scanBack=el('button','primary','Scan the code on your other device');scanBack.style.width='100%'; // Hush's own scanner: a phone's camera app can't hand the code to this tab
-    // Start over: this request is withdrawn and a new one made, with no new code while the email's confirmation holds
-    const startOver=()=>{const b=el('button','primary','Start over');b.style.width='100%';b.onclick=async()=>{b.disabled=true;const l=link;link=null;if(l)await l.cancel();stepCode(linkEm)};return b}; // the old request is down first, so taking it down can't remove the new one
-    let slow=null;
-    scanBack.onclick=()=>{if(link)scanOtherCode(t=>link.useShown(t),()=>{box.lastChild.textContent='Code accepted. Waiting for your other device to finish\u2026';
-      if(!slow){const l=link;slow=setTimeout(()=>{if(link===l&&box.isConnected)box.after(el('p','hint center','Taking a while? Check your other device for a message.'),startOver())},60e3)}})};
-    w.append(scanBack,manual,box,el('p','hint center','Your other device will pop up an alert — tap Show code. Or go to Settings → Login and devices → Link a new device.'),err);
-    const bk=el('button','link','Use my recovery words'),fresh=el('button','link','I don’t have my other device');
-    bk.onclick=()=>openRestore();fresh.onclick=()=>stepFresh();w.append(bk,fresh);foot(()=>stepLogin());
-    (async()=>{try{link=await requestLink(login,({code,dk})=>showCode(code,dk),prev,linkEm);const id=await link.done;if(!id)return;
-        link=null;if(await enterAccount(id))toast('Welcome back, '+id.name)}
-      catch(e){if(e&&e.message==='noresume'){link=null;return stepCode(linkEm)} // the request ended meanwhile: start again
-        if(e&&e.code==='denied')proven=null; // the server forgot the confirmation (a dropped connection): ask for a code again
-        box.remove();manual.remove();err.textContent=linkWaitErr(e)||(e&&e.message==='denied'?'The other device said this wasn’t you, so nothing was shared.':e&&e.message==='timeout'?'No approval came through, so nothing was shared.':e&&e.message==='stale'?'This account was set up fresh on another device since then.':e&&e.code==='denied'?'The code for your recovery email has to be confirmed again.':'Couldn’t reach your other device.');
-        if(!(e&&e.message==='stale'))err.after(startOver())}})();
-  };
-  const stepFresh=()=>{
-    head('No other device?','For your safety, Hush can’t reset an account from a stranger’s device. That’s what stops someone who gets into your email from taking your account.');
-    w.append(el('p','warnbox','To get back in you need either a device where you’re still logged in, or your six recovery words. Without one of those, this username stays locked — nobody can take it, including you. This is the same trade-off Signal makes.'));
-    const bk=el('button','primary','I have my recovery words');bk.onclick=()=>openRestore();
-    w.append(bk);foot(()=>stepExisting());
+  // Path one (SPEC.md 14.14): a device where the account is logged in shows a code; this device scans it and is let in.
+  // Nothing else is asked, no password and no recovery words: the scan is the proof, and the other device answers from its
+  // own session. Nothing was forgotten, so no new password is asked for either.
+  const stepLinkScan=()=>{
+    head('Log in with your other device','On a device where you\u2019re logged in, open Settings \u2192 Login and devices \u2192 Link a new device. Then scan the code it shows.');
+    const go=el('button','primary','Scan the code');go.style.width='100%';const box=el('div','link-wait'),err=el('div','err');box.hidden=true;
+    const bk=el('button','link','No other device? Use my recovery words');bk.onclick=()=>openRestore();
+    w.append(go,box,err,bk);foot(()=>stepLogin());
+    go.onclick=()=>scanOtherCode(async t=>{link=await claimLink(t)},async()=>{
+      const c=link;if(!c)return;go.hidden=true;err.textContent='';box.hidden=false;
+      box.replaceChildren(el('span','spin'),el('span',null,'Code accepted. On your other device, tap Let it in. It shows this device\u2019s key: '+c.key+'.'));
+      try{const id=await c.done;if(link!==c||!id)return;link=null;if(await enterAccount(id))toast('Welcome, '+id.name)}
+      catch(e){if(link!==c)return;link=null;box.hidden=true;go.hidden=false;go.textContent='Scan again';err.textContent=linkNetErr(e)||linkWaitMsg(e)}});
   };
   stepChoose();
 }
-/* ---------- recovery email (SPEC.md 14.10): optional, in Settings → Advanced ----------
-   Proven with a code the server emails to it, then saved as a blind record the server only accepts from a connection
-   that just confirmed that email. It lets "Forgot password?" ask this account's devices to let a new one in. */
-function openRecoveryEmail(){
-  const me=S.me,{body,close}=sheet('Recovery email');let email=null;
-  const done=()=>{close();watchLinkRequests();if(S.tab==='profile')setTab('profile')};
-  const about=()=>el('p','hint','If you forget your password, Hush emails a code to this address. Once it’s confirmed, a device where you’re still logged in can let your new device in. Hush can’t read your messages, so an email alone never opens your account.');
-  const draw=()=>{body.replaceChildren();const cur=recEmailOf(me.handle);
-    if(cur){const r=el('div','menu-item flush static');r.innerHTML=I.lockMd;r.append(el('span',null,'Email'),el('span','role',cur));body.append(r,about());
-      const row=el('div','reqbtns'),rm=el('button','secondary','Remove'),ch=el('button','primary','Change email');row.append(rm,ch);const err=el('div','err');body.append(row,err);
-      ch.onclick=()=>drawEnter();
-      rm.onclick=async()=>{if(!(await confirmSheet('Remove recovery email?','Without it, “Forgot password?” won’t work for this account. Your recovery words still will.',{yes:'Remove',danger:true})))return;
-        try{await removeRecoveryEmail(me.handle);toast('Recovery email removed');done()}catch{err.textContent='Couldn’t remove it. Check your connection and try again.'}};
-      return}
-    drawEnter()};
-  const drawEnter=()=>{body.replaceChildren(el('p',null,'Optional. Add an email so you can reset your password if you forget it.'),about());
-    const f=el('label','field');const i=el('input');i.type='email';i.autocomplete='email';i.autocapitalize='none';i.spellcheck=false;i.placeholder='you@example.com';f.append(el('span',null,'Email'),i);
-    const go=el('button','primary','Send code');go.style.width='100%';const err=el('div','err');
-    body.append(f,go,err);setTimeout(()=>i.focus(),50);i.onkeydown=e=>{if(e.key==='Enter')go.click()};
-    go.onclick=async()=>{const em=normEmail(i.value);if(!em){err.textContent='Enter a valid email address.';return}
-      if(!S.db){err.textContent='Can’t connect yet. Check your connection and reload.';return}
-      email=em;err.textContent='';go.disabled=true;
-      try{drawCode(await sendLoginCode(em))}catch(e){go.disabled=false;err.textContent=codeSendError(e)}}};
-  const drawCode=(d)=>{body.replaceChildren(el('p',null,d?'Enter the 6-digit code for '+email+'.':'Enter the 6-digit code we sent to '+email+'. It can take a minute to arrive; check your spam folder too.'));if(d)body.append(demoBox(d,email));
-    const i=el('input','code-in');i.inputMode='numeric';i.maxLength=6;i.autocomplete='one-time-code';const err=el('div','err'),again=el('button','link',RESEND_LABEL);body.append(i,err,again);setTimeout(()=>i.focus(),50);resendCooldown(again,RESEND_WAIT);
-    again.onclick=async()=>{again.disabled=true;err.textContent='';try{drawCode(await sendLoginCode(email))}catch(e){const w=cooldownSecs(e);err.textContent=codeSendError(e);if(w)resendCooldown(again,w);else again.disabled=false}};
-    i.oninput=async()=>{i.value=i.value.replace(/\D/g,'').slice(0,6);err.textContent='';if(i.value.length<6)return;
-      i.disabled=true;
-      try{await S.db.checkCode(email,i.value)}catch(e){i.disabled=false;err.textContent=codeCheckError(e);return}
-      try{await saveRecoveryEmail(me.handle,email);toast('Recovery email saved');done()}
-      catch(e){i.disabled=false;err.textContent=e&&e.code==='denied'?'That didn’t save. Tap “Resend code” and try again.':'Couldn’t save. Check your connection and try again.'}}};
-  draw();
-}
-
 /* ---------- app lock: an optional PIN that's asked for when Hush opens (Face ID comes with the App Store version) ---------- */
 // How long you can be away before Hush locks again. Each person picks; one minute unless they change it.
 const LOCK_TIMES=[[0,'Now'],[60e3,'1 min'],[300e3,'5 min'],[600e3,'10 min'],[3600e3,'1 hr']];
@@ -3854,7 +3649,7 @@ function start(id){
   };
   // Your inbox is only readable once this device has proven it's yours, so start it after binding.
   // healLogin after the settings are read: a password changed on another device moved the boxes, it didn't lose them
-  bindDevice(id).catch(()=>{}).then(()=>{if(S.me!==id)return;if(S.unsubConvs)S.unsubConvs();S.unsubConvs=watchInbox(id,onConvs);loadContacts().catch(()=>{}).then(()=>healLogin(id))});heartbeat(true);renderBanner();refreshDir().then(refreshPresence);watchLinkRequests();
+  bindDevice(id).catch(()=>{}).then(()=>{if(S.me!==id)return;if(S.unsubConvs)S.unsubConvs();S.unsubConvs=watchInbox(id,onConvs);loadContacts().catch(()=>{}).then(()=>healLogin(id))});heartbeat(true);renderBanner();refreshDir().then(refreshPresence);
 }
 async function republishSelf(){
   // Puts your public keys in the directory if they're missing, and puts them back if someone replaced them.

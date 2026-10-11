@@ -61,6 +61,7 @@ function directory(ctx, d) {
       for (const f of ['x', 'y', 'sx', 'sy', 's']) if (!str(e[f], 1, 256)) bad(w, 'devs');
       if (e.by !== undefined && !str(e.by, 0, 20)) bad(w, 'devs');
       if (e.ts !== undefined && !num(e.ts)) bad(w, 'devs');
+      if (e.nm !== undefined && !str(e.nm, 1, 400)) bad(w, 'devs');   // the device's name, sealed for the account's own devices
     }
   }
 }
@@ -112,8 +113,11 @@ function box(what) {
 
 function linkreqs(ctx, d) {
   const w = 'linkreqs';
-  only(d, new Set(['state', 'pub', 'ts', 'dev', 'devk', 'epub', 'iv', 'ct', 'cf']), w); need(d, ['state'], w);
-  if (!['wait', 'ok', 'no'].includes(d.state)) bad(w, 'state');
+  only(d, new Set(['state', 'pub', 'ts', 'dev', 'devk', 'epub', 'iv', 'ct', 'cf', 'h', 'n']), w); need(d, ['state'], w);
+  if (!['offer', 'wait', 'ok', 'no'].includes(d.state)) bad(w, 'state');
+  if (d.h !== undefined && !ID.HANDLE.test(d.h)) bad(w, 'h');                    // a link offer's account and name (SPEC.md 14.14)
+  if (d.n !== undefined && !(str(d.n, 43, 43) && ID.ADDR43.test(d.n))) bad(w, 'n');
+  if (d.state === 'offer') need(d, ['ts', 'h', 'n'], w);
   if (d.ts !== undefined && !num(d.ts)) bad(w, 'ts');
   if (d.dev !== undefined && !str(d.dev, 0, 80)) bad(w, 'dev');
   if (d.pub !== undefined && !XY(d.pub)) bad(w, 'pub');

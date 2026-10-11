@@ -16,7 +16,7 @@
 
 import { HushError, fail } from './errors.js';
 import { changedKeys } from './merge.js';
-import { loginTag } from './codes.js';
+import { offerTag } from './codes.js';
 
 const RANK = Object.freeze({ member: 1, admin: 2, owner: 3 });
 const sameXY = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
@@ -169,27 +169,34 @@ function standardCheck(a, op, p, ctx) {
       if (op === 'update' || del) fail('denied', 'the mark is set once and kept');
       return;
     case 'recovery':
-      // Never read back, not even by its owner: code.check answers for it, and only to someone who just proved they
-      // can read the email. Only its own account writes or removes it, and writing it takes an email this connection
-      // has just confirmed with a code.
+      // Email recovery (SPEC.md 14.10), retired in release 16: no record is written any more. Never read back; its own
+      // account may still remove one left from before.
       if (list) noList();
       if (read) fail('denied', 'recovery records cannot be read');
       needProven(a);
-      if (op === 'update') fail('denied', 'recovery records are replaced, never edited');
       if (ctx.prev && ctx.prev.h !== a.handle) fail('denied', 'that record belongs to another account');
       if (del) return;
-      if (ctx.d && ctx.d.h !== a.handle) fail('denied', 'a recovery record must name its owner');
-      if (!(a.conn && a.conn.recoveryOk && a.conn.recoveryOk.has(p.id))) fail('denied', 'confirm the email with a code first');
-      return;
+      fail('denied', 'recovery emails are retired');
     case 'linkreqs':
-      // A new device asks to be let in only after the email was confirmed with a code on this connection: the
-      // account's own recovery email, or (accounts from before usernames logged in) the email it logs in with.
-      if (list) noList();
-      // Any change, a refusal or a deletion included, needs proof: the new device's email confirmed by code, or one of
-      // the account's devices, proven as the username this tag is for or holding this login's password box (login.gate).
-      if ((write || del) && !(a.conn && a.conn.linkOk && a.conn.linkOk.has(p.id)) && !(a.handle && loginTag(a.handle) === p.id)) {
-        fail('denied', ctx.d && ctx.d.state === 'wait' ? 'confirm your recovery email with a code first' : 'only this account\u2019s devices can answer this request');
+      // A link offer (SPEC.md 14.14): a signed-in account opens it at the address its code names, the new device that
+      // scanned the code claims it with its keys, and only the account that opened it answers it or takes it down; the
+      // new device may clear it once answered. No login's tag, email or password is involved.
+      if ((write || del) && op === 'set' && !ctx.prev && ctx.d && ctx.d.state === 'offer') {
+        if (!a.handle || ctx.d.h !== a.handle) fail('denied', 'only a signed-in account can offer to link a device');
+        if (offerTag(ctx.d.n) !== p.id) fail('denied', 'a link offer lives only at the address its code names');
+        return;
       }
+      if ((write || del) && ctx.prev && ctx.prev.n) {
+        const prev = ctx.prev, d = ctx.d || {};
+        if (a.handle && prev.h === a.handle && (del || (d.h === prev.h && d.n === prev.n))) return;
+        if (op === 'update' && prev.state === 'offer' && d.state === 'wait' && d.h === prev.h && d.n === prev.n) return;   // the claim
+        if (del && (prev.state === 'ok' || prev.state === 'no')) return;
+        fail('denied', 'only the account that offered can answer');
+      }
+      // Anything else is a request at a login's tag, the road of the emailed codes (SPEC.md 14.10), closed in release
+      // 16: still readable, so pages from before it find nothing new, but nobody writes, answers or removes one.
+      if (list) noList();
+      if (write || del) fail('denied', 'link a new device with the code one of your devices shows');
       return;
     case 'vault':
       if (list) noList();

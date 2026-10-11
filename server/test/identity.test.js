@@ -160,18 +160,11 @@ test('blind-address boxes follow their fixed rules and need no sign-in', async (
   assert.equal((await anon.call('delete', { p: 'vault/' + vault })).e, 'denied');
   await anon.ok('set', { p: 'backup/' + backup, d: { iv: 'aXY=', ct: 'Y3Q=', ts: 1 } });
   await anon.ok('delete', { p: 'backup/' + backup });
-  // A new device's request to be let in needs an email confirmed by code on this connection (SPEC.md 14.10): here the
-  // email an account from before usernames logs in with.
+  // A request at a login's tag: a reserved login is not enough, and since release 16 nothing opens one (SPEC.md 14.14).
   const waiting = { state: 'wait', ts: Date.now(), pub: { x: 'x'.repeat(43), y: 'y'.repeat(43) } };
   const email = 'jordan.hale@example.com', ltag = loginTag(email);
-  assert.equal((await anon.call('set', { p: 'linkreqs/' + ltag, d: waiting })).e, 'denied');
   await anon.ok('set', { p: 'logins/' + ltag, d: { ts: 1 } });
-  const { demoCode } = await anon.ok('code.send', { to: email });
-  assert.equal((await anon.ok('code.check', { to: email, code: demoCode })).link, true);
-  await anon.ok('set', { p: 'linkreqs/' + ltag, d: waiting });
-  await anon.ok('update', { p: 'linkreqs/' + ltag, d: { state: 'no' } });
-  await anon.ok('delete', { p: 'linkreqs/' + ltag });
-  assert.equal((await anon.call('set', { p: 'linkreqs/' + tag, d: waiting })).e, 'denied', 'only at the confirmed email');
+  assert.equal((await anon.call('set', { p: 'linkreqs/' + ltag, d: waiting })).e, 'denied');
   await anon.close();
 });
 

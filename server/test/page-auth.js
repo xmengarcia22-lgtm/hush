@@ -1,5 +1,5 @@
 // The page's own login, recovery and adapter code, lifted out of app/ and bound to a stand-in page, for the tests
-// that drive it against a real server (login.test.js, recovery-email.test.js).
+// that drive it against a real server (login.test.js and others).
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { appSource } from './helpers.js';
@@ -27,7 +27,7 @@ const SRC = [
   lift('/* ===== HUSH RECOVERY BEGIN ===== */', '/* ===== HUSH RECOVERY END ===== */'),
   lift('/* ===== HUSH AUTH BEGIN ===== */', '/* ===== HUSH AUTH END ===== */'),
 ].join('\n');
-const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,normEmail,isHandleLogin,recoveryTag,recEmailOf,saveRecoveryEmail,removeRecoveryEmail,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,reserveLogin,reserveLoginConfirmed,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
+const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,normEmail,isHandleLogin,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,reserveLogin,reserveLoginConfirmed,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
 const build = new Function('S', 'ls', 'enc', 'dec', 'saveContacts', 'renderBanner', 'P', 'openSetupLogin', `${SRC}\nreturn {${EXPORTS}};`);
 
 const BEGIN = '/* ===== HUSH ADAPTER BEGIN ===== */';
