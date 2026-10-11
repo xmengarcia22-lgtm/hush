@@ -2960,11 +2960,15 @@ function openLinkScanner(){
   const status=el('p','hint center','Looking for a camera\u2026'),err=el('div','err');cam.hidden=true;
   const camBtn=el('button','secondary','Scan with this device\u2019s camera');camBtn.style.width='100%';camBtn.hidden=true;
   const showBtn=el('button','link','No camera? Show a code for the new device to scan instead'),showBox=el('div');
+  const cantScan=el('button','link','Can\u2019t scan? Type the new device\u2019s code instead');cantScan.hidden=true;
+  cantScan.onclick=()=>{cantScan.hidden=true;tf.hidden=tgo.hidden=false;ti.focus()};
+  const showCode=()=>{tf.hidden=tgo.hidden=true;cantScan.hidden=false;showLinkCode(showBox,sh,close)}; // showing a code: typing the other device's code is the fallback, not the next step
   const pick=el('button','link','Can\u2019t use the camera? Pick a photo you took of the code');
   const file=document.createElement('input');file.type='file';file.accept='image/*';file.hidden=true;
   const tf=el('label','field'),ti=el('input','code-in');ti.autocapitalize='characters';ti.autocomplete='off';ti.spellcheck=false;ti.placeholder='XXXXXX-XXXXXX-\u2026';ti.setAttribute('aria-label','Code from the new device');ti.style.letterSpacing='1px';ti.style.fontSize='15px';
   tf.append(el('span',null,'No camera? Type or paste the code shown under the QR code'),ti);const tgo=el('button','secondary','Approve with code');tgo.style.width='100%';
-  body.append(status,camBtn,cam,showBtn,showBox,err,tf,tgo,pick,file,el('p','hint','Only use a code from a device you\u2019re holding yourself. Anyone who gets you to scan or enter their code gets your account.'));
+  tf.hidden=tgo.hidden=true; // until camera detection says how this sheet works, so it never vanishes under someone typing
+  body.append(status,camBtn,cam,showBtn,showBox,cantScan,err,tf,tgo,pick,file,el('p','hint','Only use a code from a device you\u2019re holding yourself. Anyone who gets you to scan or enter their code gets your account.'));
   let stopCam=null,done=false,working=false;
   const stop=()=>{done=true;if(stopCam)stopCam();stopCam=null};
   const watch=setInterval(()=>{if(!sh.isConnected){stop();clearInterval(watch)}},400);
@@ -2982,11 +2986,11 @@ function openLinkScanner(){
   camBtn.onclick=async()=>{err.textContent='';status.textContent='Starting the camera\u2026';cam.hidden=false;
     try{stopCam=await startQrCamera(vid,t=>{if(done||working)return;if(t.startsWith('hush-link:'))return use(t);status.textContent='That isn\u2019t a Hush login code.'});
       camBtn.hidden=true;status.textContent='Point the camera at the QR code on your new device.'}
-    catch{cam.hidden=true;camBtn.hidden=true;showBtn.hidden=true;status.textContent='The camera couldn\u2019t start, so this device shows a code for your new device to scan instead.';showLinkCode(showBox,sh,close)}};
-  showBtn.onclick=()=>{showBtn.hidden=true;showLinkCode(showBox,sh,close)};
+    catch{cam.hidden=true;camBtn.hidden=true;showBtn.hidden=true;status.textContent='The camera couldn\u2019t start, so this device shows a code for your new device to scan instead.';showCode()}};
+  showBtn.onclick=()=>{showBtn.hidden=true;showCode()};
   hasCamera().then(yes=>{if(!sh.isConnected)return;
-    if(yes){camBtn.hidden=false;status.textContent='Tap to scan the QR code on your new device. Your browser will ask before using the camera.'}
-    else{showBtn.hidden=true;status.textContent='This device has no camera, so it shows a code for your new device to scan.';showLinkCode(showBox,sh,close)}});
+    if(yes){camBtn.hidden=false;tf.hidden=tgo.hidden=false;status.textContent='Tap to scan the QR code on your new device. Your browser will ask before using the camera.'}
+    else{showBtn.hidden=true;status.textContent='This device has no camera, so it shows a code for your new device to scan.';showCode()}});
 }
 // Whether this device has a camera, without asking for it (no permission prompt; the list only says what kinds exist).
 const hasCamera=async()=>{try{return !!(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices)&&(await navigator.mediaDevices.enumerateDevices()).some(d=>d.kind==='videoinput')}catch{return false}};
@@ -3437,13 +3441,13 @@ function showOnboard(adding,notice){
   };
   const stepExisting=()=>{
     S.resetFor={login};
-    head('Get back in','Open Hush on a device where you’re still logged in and scan this code. Then you’ll pick a new password.');
+    head('Get back in','On a device where you’re still logged in, open Link a new device. Scan the code it shows, or let it scan this one. Then you’ll pick a new password.');
     const num=el('div','qr'),manual=el('div','link-code'),box=el('div','link-wait');box.append(el('span','spin'),el('span',null,'Waiting for you to scan…'));const err=el('div','err');
     const showCode=(code,dk)=>{const cp=el('button','link sm','Copy code');cp.onclick=async()=>{try{await navigator.clipboard.writeText(code);toast('Code copied')}catch{toast('Select the code and copy it.')}};
       manual.replaceChildren(el('p','hint center','No camera on your other device? Type or paste this code there instead:'),el('div','link-code-text',code),cp,el('p','hint center','This device\u2019s key: '+dk+'. Your other device shows the same key when it asks you to approve.'))};
-    const scanBack=el('button','link','Or scan the code your other device shows');
+    const scanBack=el('button','primary','Scan the code on your other device');scanBack.style.width='100%'; // Hush's own scanner: a phone's camera app can't hand the code to this tab
     scanBack.onclick=()=>{if(link)scanOtherCode(t=>link.useShown(t),()=>{box.lastChild.textContent='Code accepted. Waiting for your other device to finish\u2026'})};
-    w.append(num,manual,scanBack,box,el('p','hint center','Your other device will pop up an alert — tap Scan or type code. Or go to Settings → Login and devices → Link a new device.'),err);
+    w.append(scanBack,num,manual,box,el('p','hint center','Your other device will pop up an alert — tap Scan or type code. Or go to Settings → Login and devices → Link a new device.'),err);
     const bk=el('button','link','Use my recovery words'),fresh=el('button','link','I don’t have my other device');
     bk.onclick=()=>openRestore();fresh.onclick=()=>stepFresh();w.append(bk,fresh);foot(()=>stepLogin());
     (async()=>{try{link=await requestLink(login,({qr,code,dk})=>{const q=qrSvg(qr,'QR code to log in on this device');if(q)num.innerHTML=q;else num.textContent='The QR code couldn’t be drawn. Use another option below.';showCode(code,dk)});const id=await link.done;if(!id)return;
