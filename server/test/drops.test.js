@@ -161,3 +161,53 @@ test('the puzzle helper counts leading zero bits', () => {
   assert.equal(leadingZeroBits(Buffer.from([0x01])), 7);
   assert.equal(leadingZeroBits(Buffer.from([0, 0])), 16);
 });
+
+// ---- release 17: the notes people write to themselves are their chat list ----
+
+test('a note its owner wrote to themselves is never swept; other notes still go after 30 days', async () => {
+  const S = await startServer({ authz: 'standard' });
+  try {
+    const B = await signup(S.url, await makeIdentity('bob'));
+    const hour = hourOf(Date.now()), has = (n) => S.srv.store.get('inbox/bob/c/' + n, SYSTEM).d !== null;
+    await B.ok('set', { p: 'inbox/bob/c/mine00000001', d: { ...note(), ts: hour, own: 1 } });
+    await B.ok('set', { p: 'inbox/bob/c/old000000001', d: { ...note(), ts: hour } });   // written by a page from before release 17
+    const { id } = await json(await post(S.httpUrl, { to: 'bob', blob: note() }));
+    assert.equal(S.srv.sweepInbox(Date.now() + 29 * 86400e3), 0, 'nothing before 30 days');
+    assert.equal(S.srv.sweepInbox(Date.now() + 31 * 86400e3), 2, 'the drop and the unmarked note go');
+    assert.deepEqual([has('mine00000001'), has('old000000001'), has(id)], [true, false, false]);
+    assert.equal(S.srv.sweepInbox(Date.now() + 400 * 86400e3), 0, 'a year on');
+    assert.equal(has('mine00000001'), true, 'the own note is still there');
+    await B.close();
+  } finally { await S.stop(); }
+});
+
+test('only the owner can mark a note as their own, only with 1, and a drop cannot carry the mark', async () => {
+  const S = await startServer({ authz: 'standard' });
+  try {
+    const B = await signup(S.url, await makeIdentity('bob')), A = await signup(S.url, await makeIdentity('alice'));
+    const hour = hourOf(Date.now());
+    for (const own of [2, true, '1', 0]) assert.equal((await B.call('set', { p: 'inbox/bob/c/bad000000001', d: { ...note(), ts: hour, own } })).e, 'invalid', JSON.stringify(own));
+    assert.equal((await A.call('set', { p: 'inbox/bob/c/fake00000001', d: { ...note(), ts: hour, own: 1 } })).e, 'denied', 'nobody else writes in bob’s mailbox');
+    assert.equal((await post(S.httpUrl, { to: 'bob', blob: { ...note(), own: 1 } })).status, 400, 'a drop is the bare sealed blob');
+    assert.equal(S.srv.store.noteCount('inbox/bob/c'), 0);
+    await A.close(); await B.close();
+  } finally { await S.stop(); }
+});
+
+test('a full mailbox gives way with other people’s notes first, and the owner’s own writes keep it to size', async () => {
+  const S = await startServer({ authz: 'standard', limits: { inboxMax: 3, dropsPerHourPerRecipient: 1000, dropsPerHourPerAddr: 1000 } });
+  try {
+    const B = await signup(S.url, await makeIdentity('bob'));
+    const hour = hourOf(Date.now()), has = (n) => S.srv.store.get('inbox/bob/c/' + n, SYSTEM).d !== null;
+    const own = (n, ts = hour) => B.ok('set', { p: 'inbox/bob/c/' + n, d: { ...note(), ts, own: 1 } });
+    await own('mine00000001', hour - 2 * 36e5); await own('mine00000002', hour - 36e5);
+    const d1 = (await json(await post(S.httpUrl, { to: 'bob', blob: note() }))).id;   // now full
+    const d2 = (await json(await post(S.httpUrl, { to: 'bob', blob: note() }))).id;   // the other drop gives way, not the older own notes
+    assert.deepEqual([has('mine00000001'), has('mine00000002'), has(d1), has(d2)], [true, true, false, true]);
+    await own('mine00000003');                                                           // the owner's own write makes room too
+    assert.deepEqual([has(d2), S.srv.store.noteCount('inbox/bob/c')], [false, 3]);
+    await own('mine00000004');                                                           // only own notes left: the oldest gives way
+    assert.deepEqual([has('mine00000001'), has('mine00000004'), S.srv.store.noteCount('inbox/bob/c')], [false, true, 3]);
+    await B.close();
+  } finally { await S.stop(); }
+});

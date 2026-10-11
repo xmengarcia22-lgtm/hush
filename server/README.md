@@ -157,8 +157,10 @@ who sent it. The note arrives through `POST /drop`, a request with no session,
 so the sender's connection is not involved either; over the socket a person
 may only write notes into their own mailbox. When the recipient has "only my
 contacts" on, or their mailbox is busy, the sender's page first solves a small
-proof-of-work puzzle (about a second). Notes are kept for 30 days or until the
-owner deletes them; a mailbox over 500 notes loses its oldest.
+proof-of-work puzzle (about a second). Notes from other people are kept for 30
+days or until the owner deletes them; notes the owner wrote to themselves (their
+chat list) are kept until they delete them. A mailbox over 500 notes loses its
+oldest, other people's first.
 
 What a live observer at the server can still see: which connection, proven as
 which username, opened which chat ids, and when. Nothing durable records it.

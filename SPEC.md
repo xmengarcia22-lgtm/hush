@@ -289,7 +289,7 @@ The first message of a request is not in the note: it is an ordinary sealed post
 
 **Proof of work.** Asked for only when the recipient has "only my contacts" on (`requests: true` in their profile) or when their mailbox has taken more than half its hourly allowance. The puzzle is stateless: `sha256("hush-pow-v1|to|hour|nonce")` must start with `bits` zero bits (16 by default, about a second in a browser). The server verifies with one hash and remembers used `to|nonce` pairs in memory for the hour, so a solution is good once. The sender's page solves it on a 429 `pow` reply and posts again.
 
-**Retention.** A mailbox holds at most 500 notes; past that the oldest give way, and the owner's watch is told, so nobody who was away for a week is locked out of new invitations. Notes older than 30 days are swept hourly.
+**Retention.** A mailbox holds at most 500 notes; past that the oldest give way, other people's notes before the owner's own, and the owner's watch is told, so nobody who was away for a week is locked out of new invitations. Notes from other people older than 30 days are swept hourly. A note the owner wrote to themselves (`own: 1`; only they can write in their mailbox, everyone else goes through `POST /drop`) is never swept: those notes are their chat list (release 17). The page replaces a note someone else left with its own once the chat shows, and of two notes for one chat keeps the newest.
 
 What the server can see: that mailbox `bob` received a 1 KB note at hour H. It cannot see from whom, about which chat, or of what type. A live observer at the server can still see which network address made the POST.
 
@@ -445,7 +445,7 @@ WAL journal, `synchronous = NORMAL`, `secure_delete = ON` so deleted rows are ze
 | Job | Interval | Action |
 |---|---|---|
 | expiry sweep | 1 min | delete posts with `0 < exp < now`, and media whose `media_ids.exp` has passed (7.7); forget expired media tickets |
-| mailbox sweep | 1 h | delete notes older than 30 days; a mailbox over 500 notes loses its oldest at drop time instead |
+| mailbox sweep | 1 h | delete notes from other people older than 30 days, never the owner's own; a mailbox over 500 notes loses its oldest when a note is added, other people's first |
 | link-request sweep | 1 min | delete `linkreqs/*` older than 10 minutes |
 | presence and typing | continuous | in-memory TTL |
 | backup | nightly | `.backup` to a temp file, encrypt with `age` to an offline public key, copy off the box (a Hetzner Storage Box or any other location the owner picks), delete temp, keep 7 |
@@ -559,7 +559,7 @@ Message and media content; group membership and the social graph; the mapping of
 | chat records | random ids, type, public or private, epoch, how many wraps exist (roughly members times devices), hashes of room keys, sealed metadata, activity time of the last message |
 | posts, acts, reads | per chat: times, sizes, pseudonymous tags, ciphertext |
 | media pieces | per chat: how many media ids, their sizes and piece counts, when they were uploaded, and for media of a disappearing message, when it expires; never what kind of file, its name or its key |
-| mailbox notes | recipient handle, hour of receipt, an opaque 1 KB blob, until the owner deletes it or 30 days pass |
+| mailbox notes | recipient handle, hour of receipt, an opaque 1 KB blob, and whether the owner wrote it to themselves; someone else's note until the owner deletes it or 30 days pass, the owner's own until they delete it |
 | account, vault, backup boxes | ciphertext at keyed-hashed addresses |
 | link requests | for up to 10 minutes, a sealed device-handoff blob at a keyed-hashed address |
 
@@ -597,7 +597,7 @@ The service that stores ciphertext also serves the page that decrypts it. A comp
 
 ### 11.1 Logging policy
 
-- Caddy: no `log` directive, so no access log, for every route including `/drop` and `/media/*`. Error log to journald, messages only. Media responses are never cached (`Cache-Control: no-store` from the service) and not compressed (ciphertext does not compress).
+- Caddy: no `log` directive, so no access log, for every route including `/drop` and `/media/*`. Its own log goes to journald without the two loggers that print a request's details (`http.handlers.reverse_proxy`, `http.log.error`; from release 17), so no visitor address, path or browser is recorded there. Media responses are never cached (`Cache-Control: no-store` from the service) and not compressed (ciphertext does not compress).
 - Node: no request logging. Error log lines contain an error code and a stack trace, never a path segment, handle, chat id or address. Uncaught exceptions do not dump memory.
 - journald: `SystemMaxUse=200M`, `MaxRetentionSec=14day`.
 - Metrics: counters only (connections, frames per second, database size, free disk), exposed on localhost for the owner.

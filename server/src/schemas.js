@@ -267,8 +267,9 @@ export const NOTE_PLAIN = 1024;
 export const NOTE_BYTES = NOTE_PLAIN + 16;   // plus the AES-GCM tag
 function inbox(ctx, d) {
   const w = 'note';
-  only(d, new Set(['epk', 'iv', 'ct', 'ts']), w); need(d, ['epk', 'iv', 'ct', 'ts'], w);
+  only(d, new Set(['epk', 'iv', 'ct', 'ts', 'own']), w); need(d, ['epk', 'iv', 'ct', 'ts'], w);
   if (!XY(d.epk) || !str(d.iv, 1, 64) || !str(d.ct, 1, 2 * NOTE_BYTES) || !num(d.ts)) bad(w, 'fields');
+  if (d.own !== undefined && d.own !== 1) bad(w, 'own');   // written by the owner to themselves (only they can write here): never swept
   if (Buffer.from(d.ct, 'base64').length !== NOTE_BYTES) bad(w, 'size');
 }
 

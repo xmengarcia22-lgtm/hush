@@ -1,5 +1,12 @@
 # Caddy in front of the Hush server (SPEC.md 11.3). Replace <domain>.
-# No `log` directive: Caddy keeps no access log unless asked to.
+# No `log` directive in the site: Caddy keeps no access log unless asked to. The global block below also keeps the
+# two loggers that print a request's details (the visitor's address, the path, the browser) out of the journal: a
+# media download cut short, or a failed request, would otherwise record them.
+{
+	log default {
+		exclude http.handlers.reverse_proxy http.log.error
+	}
+}
 
 <domain> {
 	@notmedia not path /media/*

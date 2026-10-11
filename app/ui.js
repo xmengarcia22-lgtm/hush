@@ -3581,7 +3581,7 @@ function pointerVerdict({exists,mine,held,fresh}){return !exists?(fresh?'wait':'
 /* ===== HUSH INBOX RULE END ===== */
 const heldKey=cid=>{const m=ksMap()[cid];return !!(m&&Object.keys(m).some(e=>e!=='a'))};
 function watchInbox(id,cb){
-  const h=id.handle,docs=new Map(),subs=new Map(),ptrs=new Map(),waiting=new Set(),firstSeen=new Map();let ready=false,pend=0,dead=false;
+  const h=id.handle,docs=new Map(),subs=new Map(),ptrs=new Map(),waiting=new Set(),firstSeen=new Map(),kept=new Map(),renoted=new Set();let ready=false,pend=0,dead=false;
   const FRESH_MS=2*60e3;const fresh=cid=>{if(!firstSeen.has(cid))firstSeen.set(cid,Date.now());return Date.now()-firstSeen.get(cid)<FRESH_MS};
   const emit=()=>{if(dead)return;
     const list=[...docs.values()].sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,300);cb(list,!ready||pend>0)};
@@ -3589,12 +3589,15 @@ function watchInbox(id,cb){
   const forget=cid=>{for(const [pid,p] of ptrs)if(p&&p.cid===cid){ptrs.delete(pid);S.db.doc('inbox/'+h+'/c/'+pid).delete().catch(()=>{})}};
   S.forgetPointers=forget;
   const un=S.db.collection('inbox/'+h+'/c').limit(500).onSnapshot(async s=>{
-    const seen=new Map();
+    const seen=new Map();kept.clear();
     for(const d of s.docs){let p=ptrs.get(d.id);
       if(p===undefined){try{p=await openPointer(d.data());if(!(await noteOk(p)))p=null}catch{p=null}ptrs.set(d.id,p);
         if(p===null)S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{})} // unreadable, forged or from someone blocked: gone
-      if(p&&!seen.has(p.cid))seen.set(p.cid,p);
-      else if(p&&seen.has(p.cid)){ptrs.delete(d.id);S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{})}} // a second note for a chat already listed: keep one
+      if(!p)continue;
+      // a second note for a chat already listed: the newest stays (on a tie, one I wrote myself) and the other goes
+      const x=d.data(),k=kept.get(p.cid),rank=n=>(n.ts||0)*2+(n.own===1?1:0),lose=k&&rank(k.x)>=rank(x)?d.id:k&&k.id;
+      if(lose){ptrs.delete(lose);S.db.doc('inbox/'+h+'/c/'+lose).delete().catch(()=>{});if(lose===d.id)continue}
+      kept.set(p.cid,{id:d.id,x,p});seen.set(p.cid,p)}
     if(dead)return;
     for(const pid of [...ptrs.keys()])if(!s.docs.some(d=>d.id===pid))ptrs.delete(pid);
     for(const cid of [...subs.keys()])if(!seen.has(cid))drop(cid);
@@ -3611,16 +3614,24 @@ function watchInbox(id,cb){
       if(shown&&shown.last)shown.last=await unsealPost(c,shown.last);done();
       if(dead||my!==seq||!subs.has(cid)){if(!dead)emit();return} // a newer copy arrived while unlocking this one
       settle(cid,pointerVerdict({exists:!!c,mine,held:heldKey(cid),fresh:fresh(cid)}),shown)},
-    ()=>{done();subs.delete(cid);settle(cid,pointerVerdict({exists:true,mine:false,held:heldKey(cid),fresh:fresh(cid)}),null)}))}
+    // Only a refusal says we were removed (or not let in yet). A rate limit, a timeout or a server error says nothing
+    // about the chat: it stays in the list and is looked at again.
+    e=>{done();subs.delete(cid);if(e&&e.code==='denied')settle(cid,pointerVerdict({exists:true,mine:false,held:heldKey(cid),fresh:fresh(cid)}),null);else{waiting.add(cid);emit()}}))}
+  // A chat in the list rests on a note I wrote myself: the server sweeps other people's notes after 30 days. A note
+  // someone else left (an invite, a DM), or one from before release 17, is replaced by my own once the chat shows, and
+  // tidying then keeps the newest. A message request I haven't answered stays as it came.
+  function adopt(cid,shown){const k=kept.get(cid),i=dmInfo(cid);if(!k||k.x.own===1||renoted.has(cid)||(i&&i.req==='in'))return;renoted.add(cid);
+    const dm=typeOf(shown)==='dm';dropPointer(h,{t:dm?'dm':'invite',cid,from:h,type:typeOf(shown),peer:dm?(k.p.peer||k.p.from):undefined}).catch(()=>renoted.delete(cid))}
   function settle(cid,verdict,shown){
-    if(verdict==='show'){waiting.delete(cid);docs.set(cid,shown);if(typeOf(shown)==='dm')recordBase(shown)}
+    if(verdict==='show'){waiting.delete(cid);docs.set(cid,shown);if(typeOf(shown)==='dm')recordBase(shown);adopt(cid,shown)}
     else if(verdict==='wait'){docs.delete(cid);waiting.add(cid)} // keep the pointer: a wrap for this device, or the record, may still arrive
     else{waiting.delete(cid);docs.delete(cid);forget(cid)} // deleted, or we were removed: tidy the pointer away
     emit()}
   // Chats we hold a pointer for but could not show yet: look again now and then with a fresh copy of the record. A
   // watch that ended is started afresh; one still deferred is re-opened, which re-sends it once the chat opens.
   const retryT=setInterval(()=>{if(dead||!S.db||!S.db.refreshChat)return;
-    for(const cid of [...waiting]){if(![...ptrs.values()].some(p=>p&&p.cid===cid)){waiting.delete(cid);continue}
+    for(const cid of [...waiting].slice(0,20)){if(![...ptrs.values()].some(p=>p&&p.cid===cid)){waiting.delete(cid);continue}
+      waiting.delete(cid);waiting.add(cid); // twenty at a time, taking turns
       S.chatDocs.delete(cid);if(subs.has(cid))S.db.refreshChat(cid).catch(()=>{});else start(cid)}},15000);
   return()=>{dead=true;clearInterval(retryT);un();for(const cid of [...subs.keys()])drop(cid)};
 }

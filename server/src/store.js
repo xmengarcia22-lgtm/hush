@@ -200,8 +200,10 @@ export class Store extends EventEmitter {
       expired: this.db.prepare('SELECT path, parent, id FROM docs WHERE exp > 0 AND exp < ? LIMIT 500'),
       count: this.db.prepare('SELECT COUNT(*) AS n FROM docs'),
       countUnder: this.db.prepare('SELECT COUNT(*) AS n FROM docs WHERE parent = ?'),
-      oldestUnder: this.db.prepare('SELECT id FROM docs WHERE parent = ? ORDER BY ts ASC, id ASC LIMIT ?'),
-      staleNotes: this.db.prepare("SELECT path, parent, id FROM docs WHERE parent LIKE 'inbox/%/c' AND ts IS NOT NULL AND ts < ? LIMIT 500"),
+      // A full mailbox gives way with other people's notes first; the owner's own notes (their chat list) go last and
+      // are never swept.
+      oldestUnder: this.db.prepare("SELECT id FROM docs WHERE parent = ? ORDER BY json_extract(d, '$.own') IS NOT NULL, ts ASC, id ASC LIMIT ?"),
+      staleNotes: this.db.prepare("SELECT path, parent, id FROM docs WHERE parent LIKE 'inbox/%/c' AND ts IS NOT NULL AND ts < ? AND json_extract(d, '$.own') IS NULL LIMIT 500"),
       chatGet: this.db.prepare('SELECT type, epoch, cap_m, cap_a, cap_o, cap_b FROM chats WHERE cid = ?'),
       chatPut: this.db.prepare('INSERT INTO chats(cid, type, epoch, cap_m, cap_a, cap_o, cap_b) VALUES (?, ?, ?, ?, ?, ?, ?)'),
       chatBase: this.db.prepare('UPDATE chats SET cap_b = ? WHERE cid = ? AND cap_b IS NULL'),
@@ -351,6 +353,7 @@ export class Store extends EventEmitter {
     if (prev && SEALED_KINDS.has(p.kind)) fail('exists', 'a message with this id already exists');
     if (p.kind === 'channels' && metaChanged(d, prev) && !metaEpochOk(d)) fail('invalid', 'chat: sealed meta must be sealed under the current epoch');
     validateForKind(p.kind, { ...p, now, op: 'set', prev }, d);
+    if (p.kind === 'inbox' && !prev) this.makeRoom(p.parent, this.limits.inboxMax - 1);   // the owner's own notes count too, so they can't pile up
     this._write(p, d, now);
     this._emit(p, d, 'set');
     return { id: p.id };

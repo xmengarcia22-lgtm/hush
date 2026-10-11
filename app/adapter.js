@@ -43,7 +43,7 @@ function createHushAdapter(url,opts){
   function connect(){if(closed)return;clearTimeout(reconnectT);reconnectT=null;let sock;try{sock=new WS(url)}catch(e){scheduleReconnect();return}ws=sock;
     sock.onopen=()=>{if(sock!==ws)return;rawCall('hello',{v:1}).then(async r=>{if(sock!==ws)return;nonce=r.nonce;nonceAt=Date.now();clockOffset=(typeof r.now==='number'?r.now:Date.now())-Date.now();backoff=500;takeBadges(r);
         if(identity)await runProof();if(sock!==ws)return;   // sign in before anything else goes out
-        setOnline(true);opened.clear();for(const sub of subs.values())sendSub(sub);waiting.splice(0).forEach(f=>f());startPing();readyRes()},
+        setOnline(true);opened.clear();resendSubs();waiting.splice(0).forEach(f=>f());startPing();readyRes()},
       e=>{if(e&&e.code==='version'){fatal='This copy of Hush is out of date for the server. Reload the page.';api.error=fatal;closed=true}try{sock.close()}catch{}})};
     sock.onmessage=ev=>{if(sock!==ws)return;onMessage(ev)};
     sock.onerror=()=>{};
@@ -57,7 +57,8 @@ function createHushAdapter(url,opts){
   function onClose(){setOnline(false);stopPing();proven=null;api.proven=null;opened.clear();tickets.clear();work=null;rejectCalls();
     for(const sub of subs.values())if(sub.pending.size){sub.pending.clear();emit(sub)}
     scheduleReconnect()}
-  function scheduleReconnect(){if(closed||reconnectT)return;const d=backoff+Math.random()*backoff*0.3;backoff=Math.min(backoff*2,30000);reconnectT=setTimeout(connect,d)}
+  // Spread out over a few seconds: after a server restart every page would otherwise be back at the same moment.
+  function scheduleReconnect(){if(closed||reconnectT)return;const d=backoff+Math.random()*Math.max(backoff*0.3,4000);backoff=Math.min(backoff*2,30000);reconnectT=setTimeout(connect,d)}
   function reconnectNow(){const s=ws;ws=null;if(s){try{s.close()}catch{}}setOnline(false);stopPing();proven=null;api.proven=null;opened.clear();tickets.clear();work=null;rejectCalls();clearTimeout(reconnectT);reconnectT=null;connect()}
   // ---- room keys (SPEC.md 5.2): before touching anything inside a chat, open it with the best key the app holds ----
   const chatOf=p=>{const m=/^channels\/([^/]+)/.exec(p||'');return m?m[1]:null};
@@ -67,7 +68,7 @@ function createHushAdapter(url,opts){
     if(!job){job=(async()=>{let cap=null;try{cap=await opts.caps(cid)}catch{}
       if(!cap)return false;const cur=opened.get(cid);if(cur&&cur.cap===cap&&!force)return true;
       try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
-      catch(e){if(e&&e.code!=='offline')opened.delete(cid);return false}})().finally(()=>{opening.delete(cid)});
+      catch(e){if(e&&e.code!=='offline')opened.delete(cid);if(e&&(e.code==='ratelimit'||e.code==='timeout'))busy.add(cid);return false}})().finally(()=>{opening.delete(cid)});
       opening.set(cid,job)}
     const ok=await job;if(ok)retryDeferred(cid);return ok;
   }
@@ -184,12 +185,19 @@ function createHushAdapter(url,opts){
     const docs=orderAndLimit(rows,sub.o,sub.l).map(r=>docSnap(r.id,r.d,r.p));
     return {docs,size:docs.length,empty:!docs.length,metadata:{hasPendingWrites:docs.some(x=>x.metadata.hasPendingWrites),fromCache:false}}}
   // ---- live subscriptions ----
+  // After a (re)connect every watch goes out again, paced: a connection may send about 300 frames at once and 5 a
+  // second after that, and a chat's watch costs two (open, then watch). The chat records behind the list go last.
+  // A watch the server was too busy for is sent again a little later, never given up.
+  let resendGen=0;const busy=new Set();
+  function resendSubs(){const gen=++resendGen,q=[...subs.values()].sort((a,b)=>(a.p==='channels')-(b.p==='channels'));let n=120;
+    const step=()=>{if(gen!==resendGen||!live())return;for(;n>0&&q.length;n--){const sub=q.shift();if(!sub.dead)sendSub(sub)}if(q.length){n=2;setTimeout(step,1000)}};step()}
+  function later(sub){sub.wait=Math.min((sub.wait||1000)*2,60000);setTimeout(()=>{if(!sub.dead&&live())sendSub(sub)},sub.wait/2+Math.random()*sub.wait/2)}
   function addSub(spec,cb,err){const s=++nextS;const sub=Object.assign({s,cb,err,docs:new Map(),pending:new Map(),inited:false,dead:false},spec);subs.set(s,sub);if(online)sendSub(sub);
     return ()=>{sub.dead=true;subs.delete(s);if(online)rawCall('unsub',{s}).catch(()=>{})}}
   async function sendSub(sub){const f=Object.assign({s:sub.s,p:sub.p},sub.ids?{ids:sub.ids}:{w:sub.w,o:sub.o,l:sub.l});
     const cid=chatOf(sub.p)||(sub.p==='channels'&&sub.ids&&sub.ids.length===1?sub.ids[0]:null);
     if(cid&&opts.caps){const ok=await ensureOpen(cid);if(sub.dead)return;
-      if(!ok&&!opened.has(cid)){sub.deferred=true;
+      if(!ok&&!opened.has(cid)){if(busy.delete(cid)){later(sub);return}sub.deferred=true;
         if(!sub.inited){ // no key yet. A watch on the chat record itself still gets the trimmed copy anyone signed in may read,
           // so the app can tell "no key for this device yet" from "this chat is gone". Content under the chat stays empty.
           let d=null;
@@ -197,7 +205,8 @@ function createHushAdapter(url,opts){
           if(!sub.inited)onPush(sub,{t:'init',docs:d?[{id:cid,d}]:[]})}
         return}}
     sub.deferred=false;
-    rawCall('sub',f).catch(e=>{if(sub.dead||(e&&e.code==='offline'))return;
+    rawCall('sub',f).then(()=>{sub.wait=0},e=>{if(sub.dead||(e&&e.code==='offline'))return;
+      if(e&&(e.code==='ratelimit'||e.code==='timeout')){later(sub);return} // too busy just now, not a refusal
       // "Open this chat first" for a chat we believe is open means our level was just revoked (a rotation we have not
       // heard about yet): treat it exactly like the eviction it is, once. Re-opening either re-sends this watch or ends it.
       if(cid&&e&&e.code==='denied'&&!sub.reopened){sub.reopened=true;onEvict(cid);return}

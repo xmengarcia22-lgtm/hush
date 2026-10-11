@@ -657,7 +657,7 @@ async function dropPointer(h,payload){
   const me=S.me.handle,ts=Math.floor(Date.now()/36e5)*36e5,body=Object.assign({},payload,{to:h,ts});
   if(body.t==='invite')body.sg=await sideSig('hush-drop-v1',['invite',me,h,String(body.cid),String(ts)]); // so nobody can claim someone else invited you
   const w=await wrapTo(enc.encode(padNote(body)),pk.ecdh,PTR_SALT(h));
-  if(h===me){await S.db.doc('inbox/'+h+'/c/'+rid()).set(Object.assign(w,{ts}));return} // a note to yourself may go over your own connection
+  if(h===me){await S.db.doc('inbox/'+h+'/c/'+rid()).set(Object.assign(w,{ts,own:1}));return} // a note to yourself goes over your own connection, marked as yours: never swept
   await postDrop(h,w);
 }
 async function openPointer(d){
