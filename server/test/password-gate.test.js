@@ -8,7 +8,6 @@ import { startServer, connect } from './helpers.js';
 import { SYSTEM } from '../src/store.js';
 import { page, signUpWith, logOut } from './page-auth.js';
 
-const EMAIL = 'jordan.hale@example.com';
 const PW = 'blue truck on main street';
 const A43 = (ch) => ch.repeat(43);
 
@@ -85,27 +84,28 @@ test('another server, with another secret, makes other addresses: nobody can wor
   } finally { await c1.close(); await c2.close(); await T1.stop(); await T2.stop(); }
 });
 
-test('the page: wrong passwords for one login run out, the right one then waits too, other logins still work', async () => {
+test('the page: wrong passwords for one username run out, the right one then waits too, another account still logs in', async () => {
   const T = await startServer({ authz: 'standard', limits: { pwMissesPerLogin: 4, blindReadsPerMinPerAddr: 400 } });   // the per-login count is under test, not the per-address one
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const { id } = await signUpWith(pg, EMAIL, PW, 'jordanhale', 'Jordan Hale');   // making the email's box is one miss
+    await signUpWith(pg, PW, 'jordanhale', 'Jordan Hale');   // making the username's box is one miss
+    await signUpWith(pg, PW, 'olivialane', 'Olivia Lane');   // another account, whose login has a count of its own
     pg.close();
     const dev = page(T.url);                       // guesses come from another device, which knows no box address
     await dev.db.ready;
     let refused = null, wrong = 0;
     for (let n = 0; n < 6 && !refused; n++) {
-      try { assert.equal((await dev.auth.tryLogin(EMAIL, 'not the password ' + n)).kind, 'wrongpw'); wrong++; }
+      try { assert.equal((await dev.auth.tryLogin('jordanhale', 'not the password ' + n)).kind, 'wrongpw'); wrong++; }
       catch (e) { refused = e; }
     }
     assert.ok(refused && refused.code === 'ratelimit', 'the login runs out of tries');
     assert.equal(wrong, 3, 'after the miss from sign-up and three wrong passwords');
     assert.match(refused.message, /wait \d+ minute/);
-    await assert.rejects(dev.auth.tryLogin(EMAIL, PW), (e) => e.code === 'ratelimit', 'the right password waits as well');
-    const r = await dev.auth.tryLogin('jordanhale', PW);
-    assert.equal(r.kind, 'in', 'the username is its own login, with its own count');
-    assert.equal(r.id.handle, id.handle);
+    await assert.rejects(dev.auth.tryLogin('jordanhale', PW), (e) => e.code === 'ratelimit', 'the right password waits as well');
+    const r = await dev.auth.tryLogin('olivialane', PW);
+    assert.equal(r.kind, 'in', 'another account’s username is its own login, with its own count');
+    assert.equal(r.id.handle, 'olivialane');
     dev.close();
   } finally { pg.close(); await T.stop(); }
 });
@@ -115,23 +115,23 @@ test('a box from before the gate opens once at its old address and is moved behi
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const { id, all } = await signUpWith(pg, EMAIL, PW, 'jordanhale', 'Jordan Hale');
-    // Put both boxes back where release 8 kept them: at the stretched password itself.
+    const { id, all } = await signUpWith(pg, PW, 'jordanhale', 'Jordan Hale');
+    // Put the box back where release 8 kept them: at the stretched password itself.
     for (const [l, x] of Object.entries(all)) {
       const g = await pg.auth.boxLoc(l, x), d = T.srv.store.get('accounts/' + g, SYSTEM).d;
       assert.ok(d, 'made behind the gate: ' + l);
       T.srv.store.set('accounts/' + x, d, SYSTEM); T.srv.store.delete('accounts/' + g, {}, SYSTEM);
     }
     await logOut(pg);
-    const r = await pg.auth.tryLogin(EMAIL, PW);
+    const r = await pg.auth.tryLogin('jordanhale', PW);
     assert.equal(r.kind, 'in', 'an old box still opens');
     assert.equal(r.id.handle, id.handle);
-    assert.equal(T.srv.store.get('accounts/' + all[EMAIL], SYSTEM).d, null, 'and is gone from its old address');
-    assert.ok(T.srv.store.get('accounts/' + await pg.auth.boxLoc(EMAIL, all[EMAIL]), SYSTEM).d, 'and is behind the gate');
-    // A signed-in device moves the boxes of its other logins on its next load, without the password.
+    assert.equal(T.srv.store.get('accounts/' + all.jordanhale, SYSTEM).d, null, 'and is gone from its old address');
+    assert.ok(T.srv.store.get('accounts/' + await pg.auth.boxLoc('jordanhale', all.jordanhale), SYSTEM).d, 'and is behind the gate');
+    // A signed-in device looks its boxes over on its next load, without the password: nothing left to move, nothing asked.
     await pg.db.prove(await pg.auth.proofFor(r.id));
     pg.S.me = r.id;
-    pg.ls.set('hush:login:jordanhale', { login: EMAIL, loc: all[EMAIL], all });
+    pg.ls.set('hush:login:jordanhale', { login: 'jordanhale', loc: all.jordanhale, all });
     await pg.auth.healLogin(r.id);
     assert.equal(T.srv.store.get('accounts/' + all.jordanhale, SYSTEM).d, null);
     assert.ok(T.srv.store.get('accounts/' + await pg.auth.boxLoc('jordanhale', all.jordanhale), SYSTEM).d);

@@ -27,6 +27,7 @@ This list is only ever added to, never edited. A page whose hash is not here is 
 | 2026-10-11 | Chats stay in your list: the notes you write to yourself are never swept after 30 days, the newest of two notes for a chat is kept, and a chat leaves the list only when it was deleted or you were removed, never on a busy server or a restart; reconnects after a restart are spread out | `6da0107d33443cdec155d5e66f781146fb56c52c7b9d2b131804b8169ec77684` |
 | 2026-10-11 | Read marks, typing dots, reactions and poll votes keep their signature inside the encryption, like messages, so nothing the server stores ties them to anyone's account; the server refuses the old shape | `58055e5456194f77325fd08a0d4193694eadf85cdab92daa1b9fd67c68e8c0bb` |
 | 2026-10-11 | Message backup can no longer lose chat keys: a save merges with what is on the server and names the version it read, the server refuses a stale write, every app open brings missing keys over, and turning it off asks first | `ea0a319098673251abc1a8d7612118eac12ab7c733cb88e11aa09ca57ab72401` |
+| 2026-10-12 | The username is the only login: sign-up asks for a username, a display name and a password on one screen, and the login screen takes a username; no email address or phone number is collected or accepted any more | `81e59d9cb7402d5ff51fccc5cb565c81be2276a11c8c73ea47d5c846398cf557` |
 
 To check what you are served: `curl -s https://hushappofficial.com/ | sha256sum`, or save the page from the
 browser and run `certutil -hashfile index.html SHA256` on Windows, then compare with the last line above.

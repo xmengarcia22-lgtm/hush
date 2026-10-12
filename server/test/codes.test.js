@@ -70,17 +70,18 @@ test('the page asks for no code anywhere and keeps no recovery email', () => {
   assert.ok(!/i\.value!==code/.test(ui), 'no code is compared in the page');
 });
 
-test('sign-up: email or phone, password, username, display name, in that order and with no code; login takes any of them', () => {
+test('sign-up: username, display name, password, in that order and with no code; login takes the username only (release 20)', () => {
   const ui = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
   const between = (a, b) => { const i = ui.indexOf(a), j = ui.indexOf(b, i + a.length); assert.ok(i > 0 && j > i, a); return ui.slice(i, j); };
   const signup = between('const stepSignup=', 'const stepForgot=');
-  for (const no of ['sendLoginCode', 'checkCode', 'stepCode', 'demoBox']) assert.ok(!signup.includes(no), 'sign-up sends no code: ' + no);
-  const order = ["'Email or phone number'", "pwField('Password", "'Username'", "'Display name'"].map((t) => signup.indexOf(t));
+  for (const no of ['sendLoginCode', 'checkCode', 'stepCode', 'demoBox', 'Email or phone', 'normEmail', 'normPhone', 'reserveLogin', 'stepProfile']) assert.ok(!signup.includes(no), 'sign-up sends no code and asks for no email or number: ' + no);
+  const order = ["'Username'", "'Display name'", "pwField('Password"].map((t) => signup.indexOf(t));
   assert.ok(order.every((n) => n > 0), 'every field is there');
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'in the order asked for');
-  assert.match(signup, /saveLoginBoxes\(id,reserved\?\[handle,contact\]:\[handle\],pw\)/, 'a password box for the username and for the email or number');
+  assert.match(signup, /saveLoginBoxes\(id,\[handle\],pw\)/, 'one password box, for the username');
   const login = between('const stepLogin=', 'const stepSignup=');
-  assert.match(ui, /f\.append\(el\('span',null,'Email, phone or username'\),i\)/, 'one login field for all three');
+  assert.match(ui, /f\.append\(el\('span',null,'Username'\),i\)/, 'the login field asks for the username');
+  assert.ok(!/Email, phone or username|email, phone number or username|Email or phone number/.test(ui), 'no screen offers an email or phone login any more');
   assert.ok(!login.includes('sendLoginCode'), 'logging in sends no code');
   assert.match(login, /forgot\.onclick=\(\)=>\{[^\n]*stepForgot\(\)\}/);
   const forgot = between('const stepForgot=', 'const stepLinkScan=');

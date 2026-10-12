@@ -425,14 +425,8 @@ const hasRecovery=h=>{const r=recLocal(h),v=S.me&&S.me.handle===h&&S.contactsRea
    Accounts made before sign-up took a username and password log in with their email or phone number instead, so a
    "login" is one of three things: a username (lowercase, as in the directory), an email, or +digits. */
 const isHandleLogin=l=>typeof l==='string'&&/^[a-z0-9_]{3,20}$/.test(l);
-function normEmail(s){s=String(s||'').trim().toLowerCase();return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s)?s:null}
-function normLogin(s){
-  s=String(s||'').trim();if(!s)return null;
-  const u=s.replace(/^@/,'');
-  if(/^[A-Za-z0-9_]{3,20}$/.test(u)&&(/[A-Za-z_]/.test(u)||s.startsWith('@')))return u.toLowerCase(); // a username (digits only: write it as @123)
-  if(s.includes('@'))return normEmail(s);
-  return normPhone(s);
-}
+function normLogin(s){ // the username, with or without its @: 3 to 20 letters, numbers or _, at least one letter. Since release 20 the only login.
+  s=String(s||'').trim().replace(/^@/,'');return /^[A-Za-z0-9_]{3,20}$/.test(s)&&/[A-Za-z_]/.test(s)?s.toLowerCase():null}
 /* Passwords: at least 8 characters, not all lowercase letters, not on the built-in list of common passwords, and not
    containing the person's own username, phone number or email. An owner or admin of a group or channel needs 12 or
    more (pwStrongEnough, SPEC.md 4.6): their password guards other people's chats too. The list holds the usual suspects of 8+ characters from the
@@ -507,34 +501,25 @@ async function openLoginBox(login,pw){
 }
 /* One login attempt, three possible answers:
      in       the box at the address made from this login and password opened: here is the account
-     wrongpw  no box there, but this login is taken (the username exists, or the email or number is reserved),
-              so the password must be wrong
+     wrongpw  no box there, but the username exists, so the password must be wrong
      new      neither: nobody has signed up with this login
    The box itself is the real test. It is looked up first and on its own, so a login still works when the
    reservation is missing (a server whose data was reset while this account's profile was republished). */
 async function tryLogin(login,pw){
   const {loc,key}=await loginSecrets(login,pw);
-  const [rec,d]=await Promise.all([S.db.doc(isHandleLogin(login)?'directory/'+login:'logins/'+await loginTag(login)).get(),findBox(login,loc)]);
+  const [rec,d]=await Promise.all([S.db.doc('directory/'+login).get(),findBox(login,loc)]);
   if(d)return {kind:'in',id:await unsealBundle(d,key),loc};
   return {kind:rec.exists?'wrongpw':'new'};
-}
-async function reserveLogin(login,handle){ // one account per email or number
-  const ref=S.db.doc('logins/'+await loginTag(login));if((await ref.get()).exists)throw new Error('taken'); // no username stored: knowing someone's number shouldn't reveal their account
-  try{await ref.set({ts:Date.now()})}catch(e){if(e&&e.code==='exists')throw new Error('taken');throw e} // lost a race for the same login
-}
-async function reserveLoginConfirmed(login){ // reserve, then read it back, so a write the server dropped never shows as saved
-  await reserveLogin(login);
-  if(!(await S.db.doc('logins/'+await loginTag(login)).get()).exists)throw new Error('net');
 }
 const loginInfo=h=>ls.get('hush:login:'+h,null);
 /* Which login this device uses is kept in two places: a plain localStorage note for speed, and the encrypted
    vault (prefs.login) so it survives a cleared or partitioned browser, exactly as recovery words do (prefs.rec).
    Without the vault copy, a login that is saved for good on the server (its reservation can never be deleted)
    looks like "Not set up" again the moment the local note is lost. rememberLogin writes both. */
-/* An account can be logged in to with any of its logins: its username, and the email or phone number given at sign-up
-   (older accounts: just that email or number). Each has its own password box, at an address made from that login and
-   the password, so the server can't tell that two boxes belong to one account. The note keeps, besides the login this
-   device used, `all`: every login of the account with its box address, so a password change replaces every box. */
+/* An account is logged in to with its username (release 20). Accounts from before may also hold a box for the email
+   address or phone number given at sign-up then; each login has its own password box, at an address made from that
+   login and the password, so the server can't tell that two boxes belong to one account. The note keeps, besides the
+   login this device used, `all`: every login of the account with its box address, so a password change replaces every box. */
 const hintOf=(login,loc,all)=>Object.assign({login},loc?{loc}:{},all&&Object.keys(all).length?{all}:{});
 const sameHint=(a,b)=>!!a&&!!b&&JSON.stringify(hintOf(a.login,a.loc,a.all))===JSON.stringify(hintOf(b.login,b.loc,b.all));
 // replace: the boxes in rec.all are now all there is (after a password change); otherwise they are added to what is known.

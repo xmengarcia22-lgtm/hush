@@ -27,7 +27,7 @@ const SRC = [
   lift('/* ===== HUSH RECOVERY BEGIN ===== */', '/* ===== HUSH RECOVERY END ===== */'),
   lift('/* ===== HUSH AUTH BEGIN ===== */', '/* ===== HUSH AUTH END ===== */'),
 ].join('\n');
-const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,normEmail,isHandleLogin,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,reserveLogin,reserveLoginConfirmed,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
+const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,isHandleLogin,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
 const build = new Function('S', 'ls', 'enc', 'dec', 'saveContacts', 'renderBanner', 'P', 'openSetupLogin', `${SRC}\nreturn {${EXPORTS}};`);
 
 const BEGIN = '/* ===== HUSH ADAPTER BEGIN ===== */';
@@ -59,15 +59,14 @@ export async function logOut(pg) {
 
 export const sameKeys = (a, b) => a.sig.x === b.sig.x && a.sig.y === b.sig.y && a.ecdh.x === b.ecdh.x && a.ecdh.y === b.ecdh.y && a.sigPriv.d === b.sigPriv.d && a.ecdhPriv.d === b.ecdhPriv.d;
 
-// The page's sign-up, minus the screens: claim the username, write the profile with the display name, reserve the
-// email or number, and lock the keys in a box for the username and one for the email or number.
-export async function signUpWith(pg, contact, pw, handle, name) {
+// The page's sign-up, minus the screens: claim the username, write the profile with the display name, and lock the
+// keys in the username's password box (release 20: the username is the only login).
+export async function signUpWith(pg, pw, handle, name) {
   const keys = await pg.auth.newIdentity();
   const id = { handle, disp: handle, name, kv: 1, ...keys };
   await pg.db.prove(await pg.auth.proofFor(id));
   await pg.db.doc('directory/' + handle).set({ handle, disp: handle, name, ecdh: keys.ecdh, sig: keys.sig, kv: 1, ts: Date.now() });
-  await pg.auth.reserveLogin(contact, handle);
-  const all = await pg.auth.saveLoginBoxes(id, [handle, contact], pw);
+  const all = await pg.auth.saveLoginBoxes(id, [handle], pw);
   pg.auth.rememberLogin(handle, { login: handle, loc: all[handle], all }, true);
   pg.S.ids = [id];
   pg.S.me = id;

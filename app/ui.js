@@ -2892,13 +2892,12 @@ function openSetupLogin(reset,power){ // reset: true after a recovery with the w
       if(pwStrongEnough(p1.value)&&await markSecure())secured=true;
       close();toast(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
     }catch(e){go.disabled=false;go.textContent=cur?'Change password':'Save password';
-      err.textContent=e&&e.message==='taken'?'That email or number already has a Hush account.':e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'Couldn\u2019t save. Check your connection and try again.'}};
+      err.textContent=e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'Couldn\u2019t save. Check your connection and try again.'}};
 }
 /* ---------- moving to a new device; keys move between your devices, never through readable server data ----------
    No screen sends or checks an emailed code any more: a new device is let in by one where the account is logged in
    (SPEC.md 14.14), or comes back with the recovery words. */
 const isEmailLogin=l=>!!l&&l.includes('@');
-const loginKind=l=>isEmailLogin(l)?'email':isHandleLogin(l)?'username':'phone number';
 function deviceName(){const u=navigator.userAgent;const os=/iPhone/.test(u)?'iPhone':/iPad/.test(u)?'iPad':/Android/.test(u)?'Android':/Mac/.test(u)?'Mac':/Windows/.test(u)?'Windows PC':'a device';
   const br=/CriOS|Chrome/.test(u)&&!/Edg/.test(u)?'Chrome':/Edg/.test(u)?'Edge':/Firefox|FxiOS/.test(u)?'Firefox':/Safari/.test(u)?'Safari':'a browser';return br+' on '+os}
 
@@ -3135,7 +3134,7 @@ function confirmSheet(title,text,opt={}){ // a question with two answers; resolv
     row.append(no,yes);body.append(row);no.onclick=()=>end(false);yes.onclick=()=>end(true);document.addEventListener('keydown',esc);setTimeout(()=>no.focus(),50)})}
 async function logOutAccount(h,opt={}){
   const id=S.ids.find(x=>x.handle===h);if(!id)return;
-  const li=loginInfo(h),ways=[li&&li.loc?'your '+loginKind(li.login)+' and password':null,hasRecovery(h)?'your six recovery words':null].filter(Boolean);
+  const li=loginInfo(h),ways=[li&&li.loc?'your username and password':null,hasRecovery(h)?'your six recovery words':null].filter(Boolean);
   const words=ways.length?`To get back in you’ll need ${ways.join(', or ')}. A device where you’re still logged in can also let you back in.`
     :'You haven’t saved a password or recovery words for this account. Without one of those, there is no way back in: this username would be lost for good.';
   if(!opt.confirmed&&!(await confirmSheet('Log out?','Are you sure you want to log out?',{note:`${words} This device’s copy of your keys and chats will be erased.`,danger:true})))return;
@@ -3301,11 +3300,10 @@ function showOnboard(adding,notice){
   const busy=(b,t)=>{b.disabled=!!t;if(t){b.dataset.t=b.dataset.t||b.textContent;b.textContent=t}else b.textContent=b.dataset.t||b.textContent};
   const offline=err=>{if(S.db)return false;err.textContent='Can\u2019t connect yet. Check your connection and reload.';return true};
 
-  // The login screen's one field takes any of the account's logins: its email, its phone number or its username.
-  // normLogin tells them apart (an @ inside makes an email, digits a phone number, letters a username).
-  const loginField=(err)=>{const f=el('label','field');const i=el('input');i.type='text';i.placeholder='Email, phone or username';
-    i.autocomplete='username';i.name='username';i.autocapitalize='none';i.spellcheck=false;i.value=login||'';f.append(el('span',null,'Email, phone or username'),i);
-    const read=()=>{const l=normLogin(i.value);if(!l){err.textContent=i.value.trim()?'That isn’t an email, a phone number or a username. Check it and try again.':'Enter your email, phone number or username.';return null}return l};
+  // The login screen's one field takes the account's username, with or without its @ (release 20: the only login).
+  const loginField=(err)=>{const f=el('label','field');const i=el('input');i.type='text';i.placeholder='Username';
+    i.autocomplete='username';i.name='username';i.autocapitalize='none';i.spellcheck=false;i.value=login||'';f.append(el('span',null,'Username'),i);
+    const read=()=>{const l=normLogin(i.value);if(!l){err.textContent=i.value.trim()?'That isn’t a username: 3 to 20 letters, numbers or _. Check it and try again.':'Enter your username.';return null}return l};
     return {f,i,read}};
   const stepChoose=()=>{ // the first screen: two clear doors, plus any accounts still on this device
     head(adding?'Add an account':'Hush',notice||'Private messaging, end-to-end encrypted.');
@@ -3315,7 +3313,7 @@ function showOnboard(adding,notice){
     foot();
   };
   const stepLogin=(msg)=>{
-    head('Log in','Your email, phone number or username, and your password.');
+    head('Log in','Your username and your password.');
     const err=el('div','err',msg||'');const {f,i,read}=loginField(err);
     const {f:pf,i:p}=pwField('Password','current-password');
     const go=el('button','primary','Log in');
@@ -3337,67 +3335,43 @@ function showOnboard(adding,notice){
           :e&&e.code==='ratelimit'?'Too many tries from this network. Wait a minute, then try again.'
           :e&&e.message==='nomatch'?'That password isn’t right. Try again, or tap “Forgot password?”':'Couldn’t check that. Check your connection and try again.';return}
       if(r.kind==='wrongpw'){busy(go);err.textContent='That password isn’t right. Try again, or tap “Forgot password?”';return}
-      if(r.kind==='new'){busy(go);err.textContent='There’s no account with that '+loginKind(l)+'. Check it, or tap “Sign up” to create one.';return}
+      if(r.kind==='new'){busy(go);err.textContent='There’s no account with that username. Check it, or tap “Sign up” to create one.';return}
       busy(go,'Unlocking your account…');
       try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});pwVerified.set(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value))markSecure()}else busy(go)}
       catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account was set up fresh. Tap “Forgot password?”':'Couldn’t log in. Check your connection and try again.'}};
   };
-  // Sign-up, in two quick screens and no code: an email or a phone number (one is required) and a password, then a
-  // username and the name people see. The account can then be logged in to with any of the three: the email or number,
-  // the username, each with the password. Nothing is sent to the email or number.
-  let su=null; // what the first screen collected: {contact, pw}
+  // Sign-up, one screen and no code: a username, the name people see, and a password. The account is logged in to with
+  // the username and the password; no email address or phone number is asked for, stored or reserved (release 20).
   const stepSignup=(msg)=>{
-    head('Create an account','Your email or phone number, and a password.');
+    head('Create an account','Pick a username, the name people see, and a password.');
     if(S.db&&S.db.warmSignup)S.db.warmSignup(); // the sign-up puzzle (SPEC.md 9.4) is solved now, out of sight, while the form is being filled in
     const err=el('div','err',msg||'');
-    const f=el('label','field');const i=el('input');i.type='text';i.name='username';i.autocomplete='username';i.autocapitalize='none';i.spellcheck=false;i.placeholder='you@example.com or (212) 555-0134';
-    i.value=su?su.contact:'';f.append(el('span',null,'Email or phone number'),i);
-    const {f:pf,i:p}=pwField('Password (at least 8 characters)','new-password');
-    const go=el('button','primary','Continue');
-    const li=el('button','link','Already have an account? Log in');li.onclick=()=>stepLogin();
-    const contactOf=()=>{const v=i.value.trim();return v.includes('@')?normEmail(v):normPhone(v)};
-    p.name='new-password';const form=el('form');form.method='post';form.action='#';form.append(f,pf,pwMeter(p,()=>({login:contactOf()})),go);form.onsubmit=e=>e.preventDefault();go.type='submit';
-    i.addEventListener('input',()=>p.dispatchEvent(new Event('input'))); // the meter also watches the email or number, which the password may not contain
-    w.append(form,err,el('p','hint','Hush never sees your password and can’t reset it, so pick one you’ll remember.'),li);foot(()=>stepChoose());
-    i.onkeydown=e=>{if(e.key==='Enter'&&!p.value){e.preventDefault();p.focus()}};setTimeout(()=>(i.value?p:i).focus(),50);
-    go.onclick=async()=>{err.textContent='';const contact=contactOf();
-      if(!contact){err.textContent=i.value.includes('@')?'Enter a valid email address.':i.value.trim()?'Enter a valid phone number, with the country code if you’re outside the US.':'Enter your email or phone number.';i.focus();return}
-      const bad=pwProblem(p.value,contact);if(bad){err.textContent=bad;p.focus();return}
-      if(offline(err))return;busy(go,'Checking…');
-      let taken;try{taken=(await S.db.doc('logins/'+await loginTag(contact)).get()).exists}
-      catch{busy(go);err.textContent='Couldn’t check that. Check your connection and try again.';return}
-      busy(go);if(taken){err.textContent='That '+loginKind(contact)+' already has an account. Log in instead.';return}
-      su={contact,pw:p.value};stepProfile()};
-  };
-  const stepProfile=()=>{
-    head('Create your account','Last step. Pick your username and the name people see.');
-    if(S.db&&S.db.warmSignup)S.db.warmSignup();
-    const f1=el('label','field');const h=el('input');h.autocapitalize='none';h.autocomplete='off';h.spellcheck=false;h.maxLength=20;h.placeholder='letters, numbers, _';f1.append(el('span',null,'Username'),h);
-    h.oninput=()=>{h.value=h.value.replace(/[^A-Za-z0-9_]/g,'')};
+    const f1=el('label','field');const h=el('input');h.type='text';h.name='username';h.autocomplete='username';h.autocapitalize='none';h.spellcheck=false;h.maxLength=20;h.placeholder='letters, numbers, _';f1.append(el('span',null,'Username'),h);
     const f2=el('label','field');const n=el('input');n.autocomplete='name';n.maxLength=40;f2.append(el('span',null,'Display name'),n);
-    const go=el('button','primary','Create account'),err=el('div','err');w.append(f1,f2,go,err);foot(()=>stepSignup());setTimeout(()=>h.focus(),50);
-    go.onclick=async()=>{const disp=h.value.trim(),handle=disp.toLowerCase(),name=n.value.trim();err.textContent='';
+    const {f:pf,i:p}=pwField('Password (at least 8 characters)','new-password');
+    const go=el('button','primary','Create account');
+    const li=el('button','link','Already have an account? Log in');li.onclick=()=>stepLogin();
+    h.oninput=()=>{h.value=h.value.replace(/[^A-Za-z0-9_]/g,'');p.dispatchEvent(new Event('input'))}; // the meter also watches the username, which the password may not contain
+    p.name='new-password';const form=el('form');form.method='post';form.action='#';form.append(f1,f2,pf,pwMeter(p,()=>({handle:h.value.trim().toLowerCase()})),go);form.onsubmit=e=>e.preventDefault();go.type='submit';
+    w.append(form,err,el('p','hint','Hush never sees your password and can’t reset it, so pick one you’ll remember.'),li);foot(()=>stepChoose());setTimeout(()=>h.focus(),50);
+    go.onclick=async()=>{const disp=h.value.trim(),handle=disp.toLowerCase(),name=n.value.trim(),pw=p.value;err.textContent='';
       if(handle.length<3){err.textContent='Usernames need at least 3 characters.';h.focus();return}
       if(!/[a-z_]/.test(handle)){err.textContent='Usernames need at least one letter.';h.focus();return}
       if(!name){err.textContent='Enter the name people will see.';n.focus();return}
-      const {contact,pw}=su;
-      const bad=pwProblem(pw,contact,handle);if(bad){err.textContent=bad+' Go back to change it, or pick another username.';return} // the username is only known now
+      const bad=pwProblem(pw,null,handle);if(bad){err.textContent=bad;p.focus();return}
       if(offline(err))return;busy(go,'Creating your account…');
       try{const ref=S.db.doc('directory/'+handle);if((await ref.get()).exists){busy(go);err.textContent='That username is taken. Try another, or log in if it’s yours.';return}
         const keys=await newIdentity(),id=Object.assign({handle,disp,name,kv:1},keys);
-        // Claim the username first: the server lets this connection create exactly this profile and refuses if the
-        // name was taken meanwhile. Only then is the email or number reserved, so a lost race never burns it.
+        // Claim the username first: the server lets this connection create exactly this profile and refuses if the name was taken meanwhile.
         try{await bindDevice(id)}catch(e){throw new Error(e&&e.code==='denied'?'claimed':'net')}
         await ref.set({handle,disp,name,ecdh:keys.ecdh,sig:keys.sig,kv:1,ts:Date.now()});
         // From here on the account exists on the server: whatever else fails, this device keeps its keys.
         S.dir[handle]={handle,disp,name,ecdh:keys.ecdh,sig:keys.sig,kv:1};S.ids=S.ids.filter(x=>x.handle!==handle);S.ids.push(id);ls.set('hush:ids',S.ids);
-        let reserved=false;try{await reserveLogin(contact,handle);reserved=true}catch{}
-        // A password box for each way in: the username always, the email or number once it is reserved for this account.
-        let all={};try{all=await saveLoginBoxes(id,reserved?[handle,contact]:[handle],pw);rememberPw(handle,pw)}catch{}
-        su=null;if(all[handle])rememberLogin(handle,{login:handle,loc:all[handle],all},true);else rememberLogin(handle,{login:handle});
+        let all={};try{all=await saveLoginBoxes(id,[handle],pw);rememberPw(handle,pw)}catch{} // the one password box, for the username
+        if(all[handle])rememberLogin(handle,{login:handle,loc:all[handle],all},true);else rememberLogin(handle,{login:handle});
         S.freshSignup=handle; // a brand-new account starts with Message backup on (loadContacts); accounts from before keep their choice
         await enterAccount(id);if(pwStrongEnough(pw))markSecure();
-        if(!reserved)toast('That '+loginKind(contact)+' couldn’t be saved, so log in with your username for now.');else if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
+        if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };
   // Forgot password: two ways back in, and neither asks for the password. A device where you're still logged in lets this
@@ -3454,7 +3428,7 @@ function showPwLock(){ // asked when Hush opens; nothing about your accounts is 
     if(ok){ls.set('hush:lockFails',null);i.value='';o.remove();lockShown=false;awayAt=0;done();return}
     f.n++;if(f.n>=5)f.until=Date.now()+Math.min(30e3*2**(f.n-5),3600e3);ls.set('hush:lockFails',f);
     i.value='';err.textContent=f.n>=5?'Wrong password. Wait a bit before trying again.':'Wrong password. Try again.'};
-  forgot.onclick=()=>{if(!confirm('Forgot your lock password?\n\nYou can clear this device and log back in with your email or phone and your Hush password (or your recovery words). Your chats come back when you log in.\n\nClear this device?'))return;wipeDevice()};
+  forgot.onclick=()=>{if(!confirm('Forgot your lock password?\n\nYou can clear this device and log back in with your username and your Hush password (or your recovery words). Your chats come back when you log in.\n\nClear this device?'))return;wipeDevice()};
   });
 }
 // The lock gate at start: resolves once the PIN or the lock password is right. Until then nothing is unsealed.
@@ -3475,7 +3449,7 @@ function showLock(){
     if(ok){ls.set('hush:lockFails',null);o.remove();lockShown=false;awayAt=0;done();return}
     f.n++;if(f.n>=5)f.until=Date.now()+Math.min(30e3*2**(f.n-5),3600e3);ls.set('hush:lockFails',f);
     i.value='';err.textContent=f.n>=5?'Wrong PIN. Wait a bit before trying again.':'Wrong PIN. Try again.'};
-  forgot.onclick=()=>{if(!confirm('Forgot your PIN?\n\nYou can log out every account on this device and log back in with your email or phone and password. Your chats come back when you log in.\n\nLog out of this device?'))return;
+  forgot.onclick=()=>{if(!confirm('Forgot your PIN?\n\nYou can log out every account on this device and log back in with your username and password. Your chats come back when you log in.\n\nLog out of this device?'))return;
     wipeDevice()};
   });
 }

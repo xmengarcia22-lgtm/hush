@@ -2,9 +2,9 @@
 // login blocks of app/crypto.js (between the HUSH RECOVERY / HUSH AUTH markers) have no
 // DOM dependencies, so, like the adapter, they are lifted out of the page and driven
 // against a real server under the standard policy. What is covered:
-//   - sign up, log out, log in with the same phone and password: the same account comes back
-//   - a wrong password and an unknown phone are told apart
-//   - the login still opens when the server lost its reservation, and healLogin puts it back
+//   - sign up, log out, log in with the same username and password: the same account comes back
+//   - a wrong password and an unknown username are told apart
+//   - a lost password box is dropped quietly: nothing asks for the password, no wrong-password try is spent
 //   - recovery words bring the account back (first four letters are enough); wrong words do not
 //   - signing up with a username that exists is refused by the server
 import { test } from 'node:test';
@@ -16,18 +16,16 @@ import { SYSTEM } from '../src/store.js';
 import { page, logOut, sameKeys } from './page-auth.js';
 
 
-const PHONE = '(212) 555-0134';
 const PW = 'blue truck on main street';
 
-// The page's sign-up, minus the screens: claim the username, write the profile, reserve the phone, lock the keys.
-async function signUp(pg, handle, login, pw) {
+// The page's sign-up, minus the screens: claim the username, write the profile, lock the keys in the username's box.
+async function signUp(pg, handle, pw) {
   const keys = await pg.auth.newIdentity();
   const id = { handle, disp: handle, name: 'Jordan', kv: 1, ...keys };
   await pg.db.prove(await pg.auth.proofFor(id));
   await pg.db.doc('directory/' + handle).set({ handle, disp: handle, name: 'Jordan', ecdh: keys.ecdh, sig: keys.sig, kv: 1, ts: Date.now() });
-  await pg.auth.reserveLogin(login, handle);
-  const loc = await pg.auth.saveLoginBox(id, login, pw);
-  pg.ls.set('hush:login:' + handle, { login, loc });
+  const loc = await pg.auth.saveLoginBox(id, handle, pw);
+  pg.ls.set('hush:login:' + handle, { login: handle, loc });
   pg.S.ids = [id];
   pg.S.me = id;
   return { id, loc };
@@ -40,7 +38,7 @@ test('password rules: length, the common list, and nothing of your own in it; th
   const pg = page(T.url);
   try {
     const { pwProblem, pwStrength } = pg.auth;
-    const phone = '+12125550134', email = 'jordan.hale@example.com';
+    const phone = '+12125550134', email = 'jordan.hale@example.com';   // boxes for these still exist on accounts from before release 20
     assert.equal(pwProblem('short7!', phone), 'Use at least 8 characters.');
     assert.equal(pwProblem('mydogmax', phone), 'Add a capital letter, a number, a space or a symbol.', 'eight lowercase letters are refused');
     assert.equal(pwProblem('mydogmaxrunsfar', phone), 'Add a capital letter, a number, a space or a symbol.', 'so are fifteen');
@@ -61,9 +59,9 @@ test('password rules: length, the common list, and nothing of your own in it; th
     assert.match(pwProblem('jordan.hale!', email), /email/);
     assert.match(pwProblem('JORDAN.HALE@EXAMPLE.COM', email), /email/);
     assert.equal(pwProblem('blue truck on main street', email), null);
-    assert.match(pwProblem('jordanhale1', phone, 'jordanhale'), /username/);
-    assert.match(pwProblem('xJordanHalex', phone, 'jordanhale'), /username/);
-    assert.equal(pwProblem('blue truck on main street', phone, 'jordanhale'), null);
+    assert.match(pwProblem('jordanhale1', null, 'jordanhale'), /username/);
+    assert.match(pwProblem('xJordanHalex', null, 'jordanhale'), /username/);
+    assert.equal(pwProblem('blue truck on main street', null, 'jordanhale'), null);
 
     assert.deepEqual(pwStrength('', phone), { level: 0, label: '' });
     assert.equal(pwStrength('short7!', phone).label, 'Weak');
@@ -83,29 +81,14 @@ test('reconcileLoginHint keeps the local note and the vault copy in step', () =>
   const pg = page('ws://127.0.0.1:1');
   try {
     const { reconcileLoginHint } = pg.auth;
-    assert.deepEqual(reconcileLoginHint({ login: '+1' }, undefined), { toVault: { login: '+1' } }, 'local only -> copy up to the vault');
-    assert.deepEqual(reconcileLoginHint({ login: '+1', loc: 'L' }, { login: '+1' }), { toVault: { login: '+1', loc: 'L' } }, 'vault missing the loc -> refresh it');
-    assert.deepEqual(reconcileLoginHint(null, { login: '+1', loc: 'L' }), { toLocal: { login: '+1', loc: 'L' } }, 'local lost -> restore from the vault (the bug)');
-    assert.deepEqual(reconcileLoginHint({ login: '+1', loc: 'L' }, { login: '+1', loc: 'L' }), {}, 'already in step -> nothing to do');
+    assert.deepEqual(reconcileLoginHint({ login: 'jordan' }, undefined), { toVault: { login: 'jordan' } }, 'local only -> copy up to the vault');
+    assert.deepEqual(reconcileLoginHint({ login: 'jordan', loc: 'L' }, { login: 'jordan' }), { toVault: { login: 'jordan', loc: 'L' } }, 'vault missing the loc -> refresh it');
+    assert.deepEqual(reconcileLoginHint(null, { login: 'jordan', loc: 'L' }), { toLocal: { login: 'jordan', loc: 'L' } }, 'local lost -> restore from the vault (the bug)');
+    assert.deepEqual(reconcileLoginHint({ login: 'jordan', loc: 'L' }, { login: 'jordan', loc: 'L' }), {}, 'already in step -> nothing to do');
     assert.deepEqual(reconcileLoginHint(null, null), {}, 'nothing either place');
-    const moved = { login: '+1', loc: 'NEW', all: { '+1': 'NEW' } };
-    assert.deepEqual(reconcileLoginHint({ login: '+1', loc: 'OLD', all: { '+1': 'OLD' } }, { login: '+1', loc: 'NEW', all: { '+1': 'NEW' } }), { toLocal: moved },
+    const moved = { login: 'jordan', loc: 'NEW', all: { jordan: 'NEW' } };
+    assert.deepEqual(reconcileLoginHint({ login: 'jordan', loc: 'OLD', all: { jordan: 'OLD' } }, { login: 'jordan', loc: 'NEW', all: { jordan: 'NEW' } }), { toLocal: moved },
       'password changed on another device -> the settings’ address wins for this device’s own login too');
-  } finally { pg.close(); }
-});
-
-test('reserveLoginConfirmed never reports a dropped write as saved', async () => {
-  const pg = page('ws://127.0.0.1:1');
-  try {
-    const { reserveLoginConfirmed } = pg.auth;
-    // A server that accepts the write but does not actually store it: this is the user's symptom at the wire.
-    pg.S.db = { doc: () => ({ get: async () => ({ exists: false }), set: async () => {} }) };
-    await assert.rejects(reserveLoginConfirmed('+12125550100'), (e) => e.message === 'net', 'read-back fails, so it is not called a success');
-    // A server that stores it: the read-back sees it and the call resolves.
-    let stored = false;
-    pg.S.db = { doc: () => ({ get: async () => ({ exists: stored }), set: async () => { stored = true; } }) };
-    await reserveLoginConfirmed('+12125550100');
-    assert.equal(stored, true);
   } finally { pg.close(); }
 });
 
@@ -113,48 +96,31 @@ test('a saved login survives a cleared local note, because the vault keeps a cop
   const pg = page('ws://127.0.0.1:1');
   try {
     pg.S.me = { handle: 'jordan' }; pg.S.contactsReady = true; pg.S.prefs = {};
-    pg.auth.rememberLogin('jordan', { login: '+12125550134' });
-    assert.deepEqual(pg.auth.loginInfo('jordan'), { login: '+12125550134' }, 'the fast local note');
-    assert.deepEqual(pg.S.prefs.login, { login: '+12125550134' }, 'and the vault-backed copy, like recovery words');
+    pg.auth.rememberLogin('jordan', { login: 'jordan' });
+    assert.deepEqual(pg.auth.loginInfo('jordan'), { login: 'jordan' }, 'the fast local note');
+    assert.deepEqual(pg.S.prefs.login, { login: 'jordan' }, 'and the vault-backed copy, like recovery words');
     // The browser loses the local note (quota, a private window, site data cleared on close).
     pg.ls.set('hush:login:jordan', null);
     assert.equal(pg.auth.loginInfo('jordan'), null, 'without a vault copy this is where it used to vanish for good');
     // On the next load the reconcile restores it from the vault.
     const r = pg.auth.reconcileLoginHint(pg.auth.loginInfo('jordan'), pg.S.prefs.login);
-    assert.deepEqual(r, { toLocal: { login: '+12125550134' } });
+    assert.deepEqual(r, { toLocal: { login: 'jordan' } });
     pg.ls.set('hush:login:jordan', r.toLocal);
-    assert.deepEqual(pg.auth.loginInfo('jordan'), { login: '+12125550134' }, 'back again');
+    assert.deepEqual(pg.auth.loginInfo('jordan'), { login: 'jordan' }, 'back again');
   } finally { pg.close(); }
 });
 
-test('add a login in Settings: the reservation lands on the server and reads back', async () => {
+test('log out, then log in with the same username and password: the same account comes back', async () => {
   const T = await startServer({ authz: 'standard' });
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const login = pg.auth.normLogin('(212) 555-0177');
-    // Sign in first (the add-login sheet runs for a signed-in account), via a fresh signup.
-    await signUp(pg, 'jordan', pg.auth.normLogin(PHONE), PW);
-    await pg.auth.reserveLoginConfirmed(login);
-    assert.equal((await pg.db.doc('logins/' + await pg.auth.loginTag(login)).get()).exists, true, 'confirmed present on the server');
-    // A second attempt on the same login is refused as "taken", not silently re-saved.
-    await assert.rejects(pg.auth.reserveLoginConfirmed(login), (e) => e.message === 'taken');
-  } finally { pg.close(); await T.stop(); }
-});
-
-test('log out, then log in with the same phone and password: the same account comes back', async () => {
-  const T = await startServer({ authz: 'standard' });
-  const pg = page(T.url);
-  try {
-    await pg.db.ready;
-    const login = pg.auth.normLogin(PHONE);
-    assert.equal(login, '+12125550134');
-    const { id, loc } = await signUp(pg, 'jordan', login, PW);
+    const { id, loc } = await signUp(pg, 'jordan', PW);
     assert.equal(pg.db.proven, 'jordan');
     await logOut(pg);
     assert.equal(pg.auth.loginInfo('jordan'), null, 'the device keeps nothing about the account');
 
-    const r = await pg.auth.tryLogin(pg.auth.normLogin('212-555-0134'), PW);
+    const r = await pg.auth.tryLogin(pg.auth.normLogin('@Jordan'), PW);
     assert.equal(r.kind, 'in');
     assert.equal(r.id.handle, 'jordan');
     assert.equal(r.id.name, 'Jordan');
@@ -167,55 +133,43 @@ test('log out, then log in with the same phone and password: the same account co
   } finally { pg.close(); await T.stop(); }
 });
 
-test('a wrong password and an unknown phone are told apart', async () => {
+test('a wrong password and an unknown username are told apart', async () => {
   const T = await startServer({ authz: 'standard' });
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const login = pg.auth.normLogin(PHONE);
-    await signUp(pg, 'jordan', login, PW);
+    await signUp(pg, 'jordan', PW);
     await logOut(pg);
-    assert.equal((await pg.auth.tryLogin(login, 'not the password at all')).kind, 'wrongpw');
-    assert.equal((await pg.auth.tryLogin('+12125550199', PW)).kind, 'new');
+    assert.equal((await pg.auth.tryLogin('jordan', 'not the password at all')).kind, 'wrongpw');
+    assert.equal((await pg.auth.tryLogin('nobodyhere', PW)).kind, 'new');
   } finally { pg.close(); await T.stop(); }
 });
 
-test('the login still opens when the server lost its reservation, and healLogin puts it back', async () => {
+test('a lost password box is dropped quietly: nothing asks for the password, no wrong-password try is spent', async () => {
   const T = await startServer({ authz: 'standard' });
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const login = pg.auth.normLogin(PHONE);
-    const { id, loc } = await signUp(pg, 'jordan', login, PW);
-    const tag = await pg.auth.loginTag(login);
-    assert.equal(T.srv.store.delete('logins/' + tag, {}, SYSTEM), true, 'the reservation is gone, as after a data reset');
+    const { id, loc } = await signUp(pg, 'jordan', PW);
     await logOut(pg);
-
-    const r = await pg.auth.tryLogin(login, PW);
-    assert.equal(r.kind, 'in', 'the box is the real test, not the reservation');
+    const r = await pg.auth.tryLogin('jordan', PW);
+    assert.equal(r.kind, 'in', 'the box is the test; a username needs no reservation');
     assert.ok(sameKeys(r.id, id));
-    await pg.db.prove(await pg.auth.proofFor(r.id));
-    pg.S.me = r.id;
-    pg.ls.set('hush:login:jordan', { login, loc });
-    await pg.auth.healLogin(r.id);
-    assert.equal((await pg.db.doc('logins/' + tag).get()).exists, true, 'the reservation is back');
-    await sleep(900);
-    assert.deepEqual(pg.calls.setup, [], 'the password box is there, so nothing is asked');
-    assert.equal(pg.auth.loginInfo('jordan').loc, loc);
+    const tag = await pg.auth.loginTag('jordan');
+    assert.equal(T.srv.store.get('logins/' + tag, SYSTEM).d, null, 'nothing was reserved: the profile itself holds the name');
 
-    // The box is gone as well: the reservation comes back. The saved address is left alone and nothing asks for the password.
+    // The box is gone (a data reset): the saved address is left alone and nothing asks for the password.
     const pg2 = page(T.url);
     try {
       await pg2.db.ready;
-      T.srv.store.delete('logins/' + tag, {}, SYSTEM);
-      assert.equal(T.srv.store.delete('accounts/' + await pg.auth.boxLoc(login, loc), {}, SYSTEM), true, 'the box, at its address behind the gate');
+      assert.equal(T.srv.store.delete('accounts/' + await pg.auth.boxLoc('jordan', loc), {}, SYSTEM), true, 'the box, at its address behind the gate');
       await pg2.db.prove(await pg2.auth.proofFor(r.id));
       pg2.S.me = r.id;
-      pg2.ls.set('hush:login:jordan', { login, loc });
+      pg2.ls.set('hush:login:jordan', { login: 'jordan', loc });
       const left = () => [...T.srv.conns][0].ctx.pwMisses.tokensLeft(tag), before = left();
       await pg2.auth.healLogin(r.id);
       assert.ok(left() >= before - 0.01, 'no wrong-password try is spent on a saved address that has no box');
-      assert.equal((await pg2.db.doc('logins/' + tag).get()).exists, true);
+      assert.equal(T.srv.store.get('logins/' + tag, SYSTEM).d, null, 'and still nothing is reserved for a username');
       await sleep(900);
       assert.deepEqual(pg2.calls.setup, [], 'nothing asks for the password');
       assert.equal(pg2.auth.loginInfo('jordan').loc, loc, 'not looked up at the gate, so no wrong-password try is spent on it');
@@ -231,8 +185,7 @@ test('recovery words bring the account back; the first four letters are enough; 
   const pg = page(T.url);
   try {
     await pg.db.ready;
-    const login = pg.auth.normLogin(PHONE);
-    const { id } = await signUp(pg, 'jordan', login, PW);
+    const { id } = await signUp(pg, 'jordan', PW);
     const words = pg.auth.newRecoveryWords();
     assert.equal(words.length, 6);
     await pg.auth.saveRecovery(id, words);
@@ -267,8 +220,7 @@ test('signing up with a username that exists is refused by the server', async ()
   try {
     await pg.db.ready;
     await stranger.db.ready;
-    const login = pg.auth.normLogin(PHONE);
-    const { id } = await signUp(pg, 'jordan', login, PW);
+    const { id } = await signUp(pg, 'jordan', PW);
     await logOut(pg);
 
     const keys = await stranger.auth.newIdentity();
@@ -278,6 +230,5 @@ test('signing up with a username that exists is refused by the server', async ()
     const dir = (await stranger.db.doc('directory/jordan').get()).data();
     assert.equal(dir.sig.x, id.sig.x, 'the real profile is untouched');
     assert.equal(dir.name, 'Jordan');
-    await assert.rejects(stranger.auth.reserveLogin(login, 'jordan'), (e) => e.message === 'taken', 'nor can the phone be reserved twice');
   } finally { pg.close(); stranger.close(); await T.stop(); }
 });
