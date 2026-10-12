@@ -118,16 +118,24 @@ function standardCheck(a, op, p, ctx) {
       if (del) fail('denied', 'profiles are never deleted');
       own(a, p.id);
       const d = ctx.d || {}, prev = ctx.prev;
+      if (!prev && d.prev !== undefined) fail('denied', 'the key history is kept by the server');
       if (!prev) {
         if (a.mayCreate !== p.id || !a.pub) fail('denied', 'sign up first');
         if (!sameXY(d.sig, a.pub)) fail('denied', 'the account key must be the one you signed in with');
         if (!a.signupProof) throw Object.assign(new HushError('pow', 'a new account brings a little proof of work'), a.signupPow || {});   // SPEC.md 9.4
         return;
       }
+      // The key history `prev` (release 21) is the server's: a patch may not name it; a whole-document write may only
+      // echo the stored one or leave it out (the store carries it forward).
+      const hist = Array.isArray(prev.prev) ? prev.prev : null;
+      if (ctx.patch ? ctx.patch.prev !== undefined : (d.prev !== undefined && JSON.stringify(d.prev) !== JSON.stringify(hist))) fail('denied', 'the key history is kept by the server');
       const kvNew = d.kv === undefined ? 1 : d.kv, kvOld = prev.kv === undefined ? 1 : prev.kv;
       if (!sameXY(d.ecdh, prev.ecdh) || !sameXY(d.sig, prev.sig) || kvNew !== kvOld) {
         if (!a.viaAccountKey) fail('denied', 'changing account keys needs the account key, not a device key');
-        if (!(kvNew > kvOld)) fail('denied', 'a key change must raise kv');
+        // The key this connection signed in with must be the one on record: a sign-up proof for a name someone else then
+        // took, or a connection from before an earlier change, may not replace the keys (release 21).
+        if (!sameXY(prev.sig, a.pub)) fail('denied', 'the account keys changed since this connection signed in; reconnect');
+        if (kvNew !== kvOld + 1 || sameXY(d.sig, prev.sig)) fail('denied', 'a key change raises kv by one and brings a new signing key');
       }
       return;
     }

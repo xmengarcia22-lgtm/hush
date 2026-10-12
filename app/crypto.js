@@ -65,7 +65,7 @@ function verifiedDevs(h){ // someone's devices whose entries check out; others g
   return devCache.get(key);
 }
 async function publishDev(){ // put this device's entry on my profile (and forget devices nobody has used in four months)
-  if(!S.db||!S.me||!S.me.dev||!S.me.dev.s||!S.dirReady)return;const m=S.me,d=S.dir[m.handle];if(!d||(d.kv||1)>(m.kv||1))return;
+  if(!S.db||!S.me||!S.me.dev||!S.me.dev.s||!S.dirReady||S.rekeying)return;const m=S.me,d=S.dir[m.handle];if(!d||(d.kv||1)>(m.kv||1))return;
   if(!m.dev.nm)try{m.dev.nm=await sealDevName(m.dev.id,deviceName())}catch{} // its name, for the other devices' notice
   const e=devEntry(m.dev),cur=d.devs&&d.devs[m.dev.id];
   if(cur&&cur.x===e.x&&cur.s===e.s&&cur.nm===e.nm&&Date.now()-(cur.ts||0)<864e5)return;
@@ -90,7 +90,7 @@ function backupKey(id){const k='backup:'+id.handle;
   if(!S.chanKeys.has(k))S.chanKeys.set(k,(async()=>aesKey(await crypto.subtle.importKey('jwk',id.ecdhPriv,EC,false,['deriveBits']),await pubKey(id.ecdh,'e'),'hush-backup:'+id.handle))());
   return S.chanKeys.get(k)}
 let backupT=null;
-function scheduleBackup(){if(!backupOn()||!S.db)return;clearTimeout(backupT);backupT=setTimeout(()=>syncBackup().catch(()=>{}),2500)}
+function scheduleBackup(){if(!backupOn()||!S.db||S.rekeying)return;clearTimeout(backupT);backupT=setTimeout(()=>syncBackup().catch(()=>{}),2500)}
 async function backupKeys(id,v){ // the key store inside a backup; null when this account can't open it
   try{const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('backup|'+id.handle)},await backupKey(id),unb64(v.ct));
     const o=JSON.parse(dec.decode(pt));return o&&o.v===1&&o.ks&&typeof o.ks==='object'?o.ks:null}catch{return null}}
@@ -99,7 +99,7 @@ function mergeKeys(into,from){let n=0; // adds the keys `into` lacks; a key alre
     for(const [e,raw] of Object.entries(es)){if(typeof raw!=='string'||!/^[A-Za-z0-9+/=]{40,48}$/.test(raw)||(into[cid]&&into[cid][e]))continue;(into[cid]=into[cid]||{})[e]=raw;n++}}
   return n}
 async function syncBackup(){ // both ways; gives back how many keys this device gained
-  if(!S.db||!S.me||!backupOn())return 0;const me=S.me,ref=S.db.doc(await backupPath(me));let got=0;
+  if(!S.db||!S.me||!backupOn()||S.rekeying)return 0;const me=S.me,ref=S.db.doc(await backupPath(me));let got=0; // not while the keys are being replaced: the backup moves once they are
   for(let i=0;i<6;i++){
     const s=await ref.get(),v=s.exists?s.data():null,theirs=v?await backupKeys(me,v):{};if(S.me!==me||!backupOn())return got; // nothing is written once it's turned off
     if(!theirs){badBackupNotice();return got} // one this account can't open is left alone, and said so once
@@ -124,9 +124,7 @@ async function safetyNumber(a,b,override){
 }
 async function vaultPath(handle){ // the contact vault lives at an address only its owner can work out
   S._vp=S._vp||{};if(S._vp[handle])return S._vp[handle];
-  const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH',public:await pubKey(S.me.ecdh,'e')},await myKey('e'),256));
-  const h=await crypto.subtle.digest('SHA-256',new Uint8Array([...bits,...enc.encode('hush-vault-id:'+handle)]));
-  return S._vp[handle]='vault/v'+b64u(h).slice(0,32);
+  return S._vp[handle]=await vaultPathOf(S.me);
 }
 const backupPaths={};
 async function backupPath(id){ // like the vault, the message backup lives at an address only its owner can work out
@@ -141,10 +139,16 @@ async function backupPath(id){ // like the vault, the message backup lives at an
 const dmIds=new Map();
 async function dmSecret(peer){const pk=peerKeys(peer);if(!pk)return null;
   return new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH',public:await pubKey(pk.ecdh,'e')},await myKey('e'),256))}
+async function dmIdFromSecret(peer,s){const h=await crypto.subtle.digest('SHA-256',new Uint8Array([...enc.encode(peer===S.me.handle?'hush-dmid-v1|self|':'hush-dmid-v1|'),...s]));return 'd'+b64u(h).slice(0,22)} // the id a DM gets from the secret it began with
 async function dmIdFor(peer){
-  const c=dmIds.get(peer);if(c)return c;const s=await dmSecret(peer);if(!s)return null;
-  const h=await crypto.subtle.digest('SHA-256',new Uint8Array([...enc.encode(peer===S.me.handle?'hush-dmid-v1|self|':'hush-dmid-v1|'),...s]));
-  const id='d'+b64u(h).slice(0,22);dmIds.set(peer,id);S.dmPeers[id]=peer;return id}
+  const c=dmIds.get(peer);if(c)return c;
+  // After either side's account keys changed the derivation would name a chat that doesn't exist: the alias the vault
+  // keeps for each DM (prefs.dms), or the DM already in the chat list, names the conversation that does (SPEC.md 5.3).
+  const known=S.contactsReady&&dmInfo?Object.entries((S.prefs&&S.prefs.dms)||{}).find(([cid,i])=>i&&i.peer===peer&&/^d[A-Za-z0-9_-]{22}$/.test(cid)):null;
+  let id=known?known[0]:null;
+  if(!id){const k=(S.convs||[]).find(x=>typeOf(x)==='dm'&&dmPeer(x)===peer);if(k)id=k.id}
+  if(!id){const s=await dmSecret(peer);if(!s)return null;id=await dmIdFromSecret(peer,s)}
+  if(S.contactsReady)dmIds.set(peer,id);S.dmPeers[id]=peer;return id} // not remembered before the vault is in: the alias isn't known yet
 /* Key wraps: one sealed copy of a chat key per device of each member, filed under a random label. A device finds
    its own copy by trying each one (SPEC.md 5.3), so the server never sees which label belongs to whom.
    The salt a wrap is made with names the chat, the person, their device and, since stage 7, the epoch: a wrap copied
@@ -152,6 +156,7 @@ async function dmIdFor(peer){
    second; the replay rule in convKey covers them. The admin secret's wraps have no epoch and keep the old salt. */
 const wrapSalt=(base,e,handle,dev)=>e===undefined?base+':'+handle+(dev?':'+dev:''):'hush-wrap-v2|'+base+'|'+Number(e)+'|'+handle+'|'+(dev||'');
 async function wrapKey(raw,handle,base,e){
+  if(handle!==S.me.handle&&typeof keyChanged==='function'&&keyChanged(handle))return {}; // a key this device hasn't accepted: its devices can't be checked, and the fallback would wrap to the old account key
   const pk=peerKeys(handle);if(!pk)throw new Error('nokey');
   const devs=await verifiedDevs(handle),out={};
   if(!devs.length)out[rid22()]=await wrapTo(raw,pk.ecdh,wrapSalt(base,e,handle)); // no device on their profile yet: to the account key
@@ -177,12 +182,11 @@ async function unwrapMine(map,base,e){ // try every wrap with this device's key,
 }
 function convKey(c,e=epochOf(c)){
   if(!c)return Promise.resolve(null);
-  if(typeOf(c)==='dm'&&Number(e)===0){ // one-on-one, key number 0: the fixed key only the two of you can work out from your account keys
-    const peer=dmPeer(c),pk=peerKeys(peer),xy=pk&&pk.ecdh;if(!xy)return Promise.resolve(null);
-    const ck=['dm',S.me.handle,c.id,xy.x].join(':');
-    if(!S.chanKeys.has(ck))S.chanKeys.set(ck,(async()=>{try{return {raw:null,key:await aesKey(await myKey('e'),await pubKey(xy,'e'),c.id)}}catch{return null}})());
-    return S.chanKeys.get(ck);
-  }
+  if(typeOf(c)==='dm'&&Number(e)===0)return (async()=>{ // one-on-one, key number 0: the fixed key the two account keys gave when the chat began, kept through a key change (dmBaseBits)
+    let bits=null;try{bits=await dmBaseBits(c)}catch{}if(!bits)return null;
+    const ck=['dm',S.me.handle,c.id,b64(bits).slice(0,12)].join(':');
+    if(!S.chanKeys.has(ck))S.chanKeys.set(ck,aesKeyFrom(bits,c.id).then(key=>({raw:null,key}),()=>null));
+    return S.chanKeys.get(ck)})();
   const open=c.openKeys&&c.openKeys[e],stored=!open&&ksGet(c.id,e),km=!open&&!stored?keyMap(c,e):null;
   if(!open&&!stored&&!(km&&Object.keys(km).length))return Promise.resolve(null);
   const ck=[S.me.handle,c.id,e,open?'o'+open:stored?'k'+stored.slice(0,16):'w'+Object.keys(km).sort().join(',')].join(':');
@@ -229,8 +233,7 @@ async function sealPost(c,text,ts,exp){
    (the server keeps just its fingerprint "oh"); each use sets up the next one, so a used key is worthless.
    Message requests to strangers keep the old named format: the server must know who is asking. */
 const envAD=(cid,pid)=>enc.encode('hush-env-v1|'+cid+'|'+pid);
-async function ownTok(cid,pid,k){const ikm=await crypto.subtle.importKey('raw',ownIkm(S.me),'HKDF',false,['deriveBits']);
-  return b64u(new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt:enc.encode('hush-own-v1'),info:enc.encode(cid+'|'+pid+'|'+k)},ikm,256)))}
+async function ownTok(cid,pid,k){return ownTokAs(S.me,cid,pid,k)}
 const ownHash=async t=>hexOf(await crypto.subtle.digest('SHA-256',enc.encode(t)));
 async function wrapPost(c,p,pid,k){
   const ck=await convKey(c,p.e??0);if(!ck)throw new Error('nokey');const iv=crypto.getRandomValues(new Uint8Array(12));
@@ -265,8 +268,7 @@ async function senderKeys(h){ // the public keys of whoever signed something; fe
   if(!s&&validHandle(h)&&(dirMiss.get(h)||0)<Date.now()-60000){await loadDir([h]);s=peerKeys(h);if(!s)dirMiss.set(h,Date.now())}
   return s;
 }
-async function sideOk(h,sg,label,parts){const s=await senderKeys(h);if(!s||typeof sg!=='string'||!sg)return false;
-  try{return await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(s.sig,'s'),unb64(sg),enc.encode(label+'|'+parts.join('|')))}catch{return false}}
+async function sideOk(h,sg,label,parts,ts,allowPrev){return verifyBy(h,sg,enc.encode(label+'|'+parts.join('|')),ts,!!allowPrev)} // allowPrev: a key h had when the thing was dated also counts
 const unsealCache=new Map();
 async function unsealPost(c,p){ // gives back the message with sender, inner ciphertext and signature filled in (on this device only)
   if(!p||p.sl!==1||p.svc)return p;
@@ -293,8 +295,8 @@ async function unsealSvc(c,p){
     const ck=await convKey(c,p.e??0);if(!ck)return null;
     const o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(p.n),additionalData:enc.encode('hush-svc-v1|'+c.id+'|'+p.ts)},ck.key,unb64(p.d))));
     if(!/^[a-z0-9_]{3,20}$/.test(o.f)||!['pin','ttl','join','leave','accept'].includes(o.k))return null;
-    if(!(await sideOk(o.f,o.sg,'hush-svc-v1',[c.id,o.k,String(o.v||0),String(p.ts)])))return null;
-    return {svc:o.k,from:o.f,v:Number(o.v)||0};
+    const ok=await sideOk(o.f,o.sg,'hush-svc-v1',[c.id,o.k,String(o.v||0),String(p.ts)],p.ts,true);if(!ok)return null;
+    return Object.assign({svc:o.k,from:o.f,v:Number(o.v)||0},ok==='prev'?{prev:1}:{}); // prev: signed by a key its author has since replaced: shown, never acted on
   }catch{return null}})());
   const x=await unsealCache.get(key);if(!x)unsealCache.delete(key);
   return x?Object.assign({},p,x):Object.assign({},p,{svc:'',from:'',_hide:true});
@@ -570,6 +572,50 @@ async function healLogin(id){
 async function rememberPw(login,pw){ // offers to save it in iCloud Keychain / Google Password Manager; Hush itself never stores it
   try{if(window.PasswordCredential&&navigator.credentials)await navigator.credentials.store(new PasswordCredential({id:login,password:pw,name:login}))}catch{}}
 /* ===== HUSH AUTH END ===== */
+/* ===== HUSH REKEY BEGIN ===== */
+/* ---------- new account keys (SPEC.md 14.15, release 21) ----------
+   Every device holds the account's private keys, so removing a lost device means new ones: the page publishes them
+   with kv+1 and keeps the old ones on this device as `prev` (the private parts for 30 days) so old notes, the old
+   vault and old messages still open and verify. The server keeps the old signing keys on the profile (`prev`) so
+   every device can check messages signed before the change. This block has no page dependencies beyond S, ls and
+   the helpers above, so test/rekey.test.js lifts it out. */
+const REKEY_SKEW=60000,REKEY_KEEP_MS=30*864e5;
+async function rekeyIdentity(id){ // in place: S.me stays the same object
+  if(!(typeof id.own==='string'&&OWN_RE.test(id.own)))id.own=id.sigPriv.d; // an account from before stage 7 derived its tokens from the signing key until now
+  id.prev={ecdhPriv:id.ecdhPriv,ecdh:id.ecdh,sigPriv:id.sigPriv,sig:id.sig,own:id.own,kv:id.kv||1,until:Date.now()};
+  const n=await newIdentity();id.ecdhPriv=n.ecdhPriv;id.ecdh=n.ecdh;id.sigPriv=n.sigPriv;id.sig=n.sig;id.own=n.own;id.kv=(id.kv||1)+1;return id;
+}
+function unrekeyIdentity(id){const p=id.prev;id.ecdhPriv=p.ecdhPriv;id.ecdh=p.ecdh;id.sigPriv=p.sigPriv;id.sig=p.sig;id.own=p.own;id.kv=p.kv;delete id.prev}
+function trimPrev(id){const p=id.prev;if(p&&Date.now()>(p.until||0)+REKEY_KEEP_MS){delete p.ecdhPriv;delete p.sigPriv}} // the public key and its date stay, for old signatures; `own` too: messages from before answer to it, and the lost device has it anyway
+function prevSigsOf(h){ // the signing keys h had before and when each stopped. For someone whose key this device pinned, only the keys it pinned before (kept at acceptKey): the server's history could name any key. Otherwise the server's, plus this device's own memory of its last change
+  const pin=S.me&&h!==S.me.handle&&S.pins&&S.pins[h],src=pin?pin.prev:S.dir[h]&&S.dir[h].prev;
+  const out=Array.isArray(src)?src.filter(p=>p&&p.sig&&typeof p.sig.x==='string'&&typeof p.sig.y==='string'&&Number.isFinite(p.until)):[];
+  if(S.me&&h===S.me.handle&&S.me.prev&&S.me.prev.sig)out.push({sig:S.me.prev.sig,until:S.me.prev.until});
+  return out}
+async function verifyBy(h,sgB64,data,ts,allowPrev){ // h's signature over data: true by their current key or, with allowPrev, 'prev' by one they still had when it was dated (true enough to show, not to act on)
+  const s=await senderKeys(h);if(!s||typeof sgB64!=='string'||!sgB64)return false;
+  try{const sg=unb64(sgB64),ok=async xy=>crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(xy,'s'),sg,data);
+    if(await ok(s.sig))return true;
+    if(allowPrev&&typeof ts==='number'&&ts>0)for(const p of prevSigsOf(h))if(ts<=p.until+REKEY_SKEW&&await ok(p.sig))return 'prev';
+    return false}catch{return false}}
+async function ownTokAs(id,cid,pid,k){const ikm=await crypto.subtle.importKey('raw',ownIkm(id),'HKDF',false,['deriveBits']);
+  return b64u(new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt:enc.encode('hush-own-v1'),info:enc.encode(cid+'|'+pid+'|'+k)},ikm,256)))}
+async function ownTokFor(cid,p){ // the token for one of my messages: one sealed before the key change answers to the old secret
+  const k=p.on||0,pid=p._id||p.id;
+  for(const id of [S.me,S.me.prev&&S.me.prev.own?{own:S.me.prev.own,sigPriv:S.me.prev.sigPriv}:null].filter(Boolean)){const t=await ownTokAs(id,cid,pid,k);if(!p.oh||await ownHash(t)===p.oh)return t}
+  return ownTokAs(S.me,cid,pid,k)}
+async function vaultPathOf(id){ // the vault address any identity {handle,ecdhPriv,ecdh} gives; vaultPath caches S.me's
+  const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH',public:await pubKey(id.ecdh,'e')},await crypto.subtle.importKey('jwk',id.ecdhPriv,EC,false,['deriveBits']),256));
+  const h=await crypto.subtle.digest('SHA-256',new Uint8Array([...bits,...enc.encode('hush-vault-id:'+id.handle)]));
+  return 'vault/v'+b64u(h).slice(0,32)}
+async function vaultKeyOf(id){return aesKey(await crypto.subtle.importKey('jwk',id.ecdhPriv,EC,false,['deriveBits']),await pubKey(id.ecdh,'e'),'hush-vault:'+id.handle)}
+async function dmBaseBits(c){ // a DM's key-0 secret, kept in the key store ('b') so its history stays readable after either side's key change
+  const b=ksGet(c.id,'b');if(b)return unb64(b);const s=await dmSecret(dmPeer(c));if(!s)return null;
+  if(c.id===await dmIdFromSecret(dmPeer(c),s))ksPut(c.id,'b',b64(s)); // kept only when the chat's id derives from this secret: then it is the one the chat began with, whatever keys either side has now
+  return s}
+async function dmBaseCapOld(c){ // the base key from before a key change, for the connector to try after the current one; null while nothing changed
+  const b=ksGet(c.id,'b');if(!b)return null;const s=await dmSecret(dmPeer(c));if(s&&b64(s)===b)return null;return memberCapFrom(c.id,0,unb64(b))}
+/* ===== HUSH REKEY END ===== */
 /* ---------- telling the server who you are (SPEC.md 4.1) ----------
    The server sends a one-time challenge; this device signs it. The signature comes from this device's own key
    when the device is listed on your profile, otherwise from your account key (that is also how a brand-new
@@ -670,7 +716,9 @@ async function dropPointer(h,payload){
   await postDrop(h,w);
 }
 async function openPointer(d){
-  const k=await aesKey(await myKey('e'),await pubKey(d.epk,'e'),PTR_SALT(S.me.handle));
-  const o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(d.iv)},k,unb64(d.ct))));
+  const open=async priv=>{const k=await aesKey(priv,await pubKey(d.epk,'e'),PTR_SALT(S.me.handle));return JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(d.iv)},k,unb64(d.ct))))};
+  let o;try{o=await open(await myKey('e'))}
+  catch(e){const p=S.me.prev;if(!(p&&p.ecdhPriv))throw e; // a note left before this account's keys were replaced still opens with the old key (kept 30 days)
+    o=await open(await crypto.subtle.importKey('jwk',p.ecdhPriv,EC,false,['deriveBits']))}
   if(!o||typeof o.cid!=='string'||!/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(o.cid))throw new Error('format');return o;
 }

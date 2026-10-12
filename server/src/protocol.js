@@ -99,12 +99,19 @@ const HANDLERS = {
         if (e instanceof HushError && e.code === 'denied') c.ctx.proveFails.take(c.addrTag);
         throw e;
       }
+      // The keys may have changed while the signature was checked (a device removal, release 21): a proof read against
+      // the old ones is refused, and the connection remembers which key version it was proven for (server.js closes
+      // it when that version is left behind).
+      const dir2 = c.ctx.store.get('directory/' + f.h, SYSTEM).d;
+      if (!dir && dir2) fail('denied', 'that username was just taken; reconnect');
+      if (dir && (!dir2 || dir2.kv !== dir.kv || !dir2.sig || dir2.sig.x !== dir.sig.x || dir2.sig.y !== dir.sig.y)) fail('denied', 'the account keys changed while signing in; reconnect');
+      c.kv = dir2 ? (dir2.kv === undefined ? 1 : dir2.kv) : 1;
       c.proven = f.h;
       c.provedWith = r.via;
       c.pub = r.pub;
       c.mayCreate = r.via === 'signup' ? f.h : null;
       c.nonce = null;                                   // single use
-      return { h: f.h, via: r.via };
+      return { h: f.h, via: r.via, kv: c.kv };
     } finally {
       c.proving = false;
     }
@@ -122,7 +129,8 @@ const HANDLERS = {
   },
 
   set(c, f) {
-    if (typeof f.p === 'string' && f.p.startsWith('inbox/') && !c.drops.take()) fail('ratelimit', 'too many pointers dropped; slow down');
+    // A note to yourself (own: 1) is bounded by inboxMax, not the bucket: the page rewrites its whole chat list after a key change (release 21).
+    if (typeof f.p === 'string' && f.p.startsWith('inbox/') && !(f.d && f.d.own === 1) && !c.drops.take()) fail('ratelimit', 'too many pointers dropped; slow down');
     takeWrite(c, f.p);
     const actor = c.actor(), creating = isSignup(c, f.p);
     if (f.was !== undefined) actor.was = f.was;   // the version a write was merged from (backups); checked, never stored
@@ -188,7 +196,7 @@ const HANDLERS = {
     if (f.d && f.d.type !== 'dm' && !secured(c)) fail('secure', 'owning a group or channel needs a stronger password; secure your account first');
     if (!c.creates.take()) fail('ratelimit', 'too many new chats today');
     const r = c.ctx.store.createChat({ cid: f.cid, d: f.d, caps: f.caps }, c.actor());
-    c.chats.set(f.cid, { level: r.level, epoch: r.epoch, type: r.type });
+    c.chats.set(f.cid, { level: r.level, epoch: r.epoch, type: r.type, h: r.h });
     return { level: r.level, epoch: r.epoch };
   },
   'chat.open'(c, f) {
@@ -219,14 +227,21 @@ const HANDLERS = {
   'chat.rotate'(c, f) {
     const r = c.ctx.store.rotateChat({ cid: f.cid, epoch: f.epoch, keys: f.keys, cap: f.cap, meta: f.meta, openKeys: f.openKeys }, c.actor());
     const e = c.chats.get(f.cid);
-    if (e) c.chats.set(f.cid, { ...e, epoch: r.epoch });
-    return r;
+    if (e) c.chats.set(f.cid, { ...e, epoch: r.epoch, h: r.h });
+    return { epoch: r.epoch };
   },
   'chat.base'(c, f) {
     return c.ctx.store.setBase({ cid: f.cid, cap: f.cap }, c.actor());
   },
   'chat.admins'(c, f) {
     return c.ctx.store.setAdmins({ cid: f.cid, akeys: f.akeys, cap: f.cap }, c.actor());
+  },
+  // After an account key change (release 21): a DM's base key and a group's owner key are replaced.
+  'chat.rebase'(c, f) {
+    return c.ctx.store.rebaseChat({ cid: f.cid, cap: f.cap }, c.actor());
+  },
+  'chat.owner'(c, f) {
+    return c.ctx.store.setOwner({ cid: f.cid, cap: f.cap }, c.actor());
   },
 
   // ---- media over HTTP (SPEC.md 7.7): a short-lived ticket that lets HTTP requests act with this connection's
@@ -256,10 +271,11 @@ export class Connection {
     this.proven = null;        // handle this connection acts for
     this.provedWith = null;    // 'account' | 'device' | 'signup'
     this.pub = null;           // the account public key behind the proof
+    this.kv = 1;               // the account's key version this connection was proven against
     this.mayCreate = null;     // handle this connection may create (sign-up)
     this.signupPow = null;     // { salt, bits }: the puzzle a sign-up on this connection solves, once
     this.proving = false;
-    this.chats = new Map();    // cid → { level, epoch, type }
+    this.chats = new Map();    // cid → { level, epoch, type, h: hash of the key it opened with }
     this.closed = false;
     this.cleaned = false;
     this.badCount = 0;
@@ -313,11 +329,11 @@ export class Connection {
     if (this.ws.readyState === OPEN) this.ws.send(JSON.stringify(obj));
   }
 
-  close(reason) {
+  close(reason, code = 1000) {
     if (this.closed) return;
     this.closed = true;
     this.send({ t: 'bye', reason });
-    try { this.ws.close(1000, reason); } catch { /* already closing */ }
+    try { this.ws.close(code, reason); } catch { /* already closing */ }
     const t = setTimeout(() => { try { this.ws.terminate(); } catch { /* gone */ } }, 500);
     if (t.unref) t.unref();
     this.cleanup();
@@ -327,6 +343,7 @@ export class Connection {
     if (this.cleaned) return;
     this.cleaned = true;
     this.closed = true;
+    this.chats.clear();   // a closed connection holds no level: a media write still arriving over its ticket is refused
     clearTimeout(this.helloTimer);
     clearTimeout(this.idleTimer);
     this.ctx.subs.removeConn(this);

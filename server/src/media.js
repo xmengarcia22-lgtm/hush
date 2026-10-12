@@ -139,6 +139,7 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
       if (!writes.take(cid)) fail('ratelimit', 'too many media writes in this chat; slow down');
       if (!diskOk()) fail('full', 'the server is out of space for media right now');
       const body = await readBody(req, M.pieceBytes + 28);
+      if (conn.closed) fail('unauth', 'the connection behind this ticket closed');   // its level was revoked while the body arrived
       const r = store.mediaPut({ cid, mid, i: last, body, exp }, actor);
       json(res, r.created ? 201 : 200, { ok: true, created: r.created }, extra);
       return;

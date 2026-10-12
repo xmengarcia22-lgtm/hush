@@ -9,7 +9,7 @@ const src = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
 const a = src.indexOf('/* ===== HUSH STORE BEGIN ===== */'), b = src.indexOf('/* ===== HUSH STORE END ===== */');
 assert.ok(a > 0 && b > a, 'store markers present in app/ui.js');
 const build = new Function('localStorage', 'indexedDB', 'addEventListener', 'enc', 'dec', 'b64u', 'unb64u',
-  src.slice(a, b) + '\nreturn { ls, lsSecret, PLAIN_KEYS, unlockStore, openSealed, sealOn, sealChange, sealOff, forgetEntries, forgetDevice, secSave: () => secSave, SECM: () => SECM, SECK: () => SECK };');
+  src.slice(a, b) + '\nreturn { ls, lsSecret, PLAIN_KEYS, unlockStore, openSealed, sealOn, sealChange, sealOff, forgetEntries, forgetDevice, mergeSealed, rekeyPending, secSave: () => secSave, SECM: () => SECM, SECK: () => SECK };');
 
 class FakeStorage {
   constructor() { this.m = new Map(); }
@@ -93,4 +93,36 @@ test('what stays plain is exactly the lock settings, the theme and the blob', ()
   const p = page(new FakeStorage());
   assert.deepEqual([...p.PLAIN_KEYS].sort(), ['hush:applock', 'hush:devkey', 'hush:lockAfter', 'hush:lockFails', 'hush:sealed', 'hush:sealed:old', 'hush:theme']);
   for (const k of ['hush:ids', 'hush:ks:alice', 'hush:inv:gX', 'hush:login:alice', 'hush:phone:alice', 'hush:draft:alice:gX', 'hush:read:alice:gX', 'hush:ptr:alice', 'hush:active', 'hush:serverView']) assert.equal(p.lsSecret(k), true, k);
+});
+
+test('an account\'s newer keys are never written over by a stale copy; a removal record is read as pending only while it has a stage', async () => {
+  const st = new FakeStorage(), p = page(st);
+  await p.unlockStore();
+  const v1 = { handle: 'alice', kv: 1, sigPriv: { d: 'one' } }, v2 = { handle: 'alice', kv: 2, sigPriv: { d: 'two' } };
+  p.ls.set('hush:ids', [v2]);
+  const stale = [v1, { handle: 'bob', kv: 1 }];
+  p.ls.set('hush:ids', stale);                                                 // a tab that still held the old keys writes its list
+  assert.equal(p.ls.get('hush:ids')[0].kv, 2, 'the newer keys stay');
+  assert.equal(stale[0].kv, 2, 'and the caller\'s own list now holds them too');
+  assert.equal(p.ls.get('hush:ids')[1].handle, 'bob', 'other accounts are written as given');
+  assert.equal(p.rekeyPending({ stage: 'rotate', rotated: [] }), true);
+  assert.equal(p.rekeyPending({ done: Date.now() }), false, 'a finished record is only a done mark');
+  assert.equal(p.rekeyPending(null), false);
+  assert.equal(p.rekeyPending({}), false);
+});
+
+test('mergeSealed: another tab\'s blob brings newer keys, missing chat keys for the accounts this tab lists, and the later removal record', () => {
+  const st = new FakeStorage(), p = page(st);
+  const mine = { 'hush:ids': [{ handle: 'alice', kv: 1 }], 'hush:ks:alice': { gX: { 0: 'a' } }, 'hush:ks:carol': { gZ: { 0: 'c' } }, 'hush:rekey:alice': { stage: 'notes', at: 100 } };
+  const theirs = { 'hush:ids': [{ handle: 'alice', kv: 2 }, { handle: 'bob', kv: 1 }], 'hush:ks:alice': { gX: { 0: 'other', 1: 'a1' }, gY: { 0: 'b' } }, 'hush:ks:bob': { gB: { 0: 'bob' } }, 'hush:ks:carol': { gZ: { 1: 'c1' } }, 'hush:rekey:alice': { done: 200 } };
+  p.mergeSealed(mine, theirs);
+  assert.equal(mine['hush:ids'][0].kv, 2, 'the newer keys win');
+  assert.equal(mine['hush:ids'].length, 1, 'an account this tab does not list is not added');
+  assert.deepEqual(mine['hush:ks:alice'], { gX: { 0: 'a', 1: 'a1' }, gY: { 0: 'b' } }, 'chat keys this tab lacks are added, its own kept');
+  assert.equal(mine['hush:ks:bob'], undefined, 'no keys for an account this tab does not have');
+  assert.deepEqual(mine['hush:ks:carol'], { gZ: { 0: 'c' } }, 'nor for one it logged out of');
+  assert.deepEqual(mine['hush:rekey:alice'], { done: 200 }, 'the later done mark replaces a stale record');
+  const again = { 'hush:ids': [{ handle: 'alice', kv: 2 }], 'hush:rekey:alice': { done: 200 } };
+  p.mergeSealed(again, { 'hush:ids': [{ handle: 'alice', kv: 2 }], 'hush:rekey:alice': { stage: 'notes', at: 100 } });
+  assert.deepEqual(again['hush:rekey:alice'], { done: 200 }, 'an older record never brings a finished removal back');
 });

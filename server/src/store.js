@@ -103,6 +103,16 @@ export const hashEq = (a, b) => typeof a === 'string' && typeof b === 'string' &
 const metaEpochOk = (d) => !isPlain(d.meta) || d.meta.e === (d.epoch === undefined ? 0 : d.epoch);
 const metaChanged = (d, prev) => isPlain(d.meta) && JSON.stringify(d.meta) !== JSON.stringify(prev && prev.meta);
 
+// SPEC.md 4.2 (release 21): when an account's keys change (kv rises) the server appends the old signing key and the
+// time to `prev`, so every device can still check messages signed before the change. Clients may not write it.
+function withKeyHistory(d, prevDoc, now) {
+  const base = prevDoc && Array.isArray(prevDoc.prev) ? prevDoc.prev : [];
+  const kvOld = prevDoc ? (prevDoc.kv === undefined ? 1 : prevDoc.kv) : 1, kvNew = d.kv === undefined ? 1 : d.kv;
+  const changed = prevDoc && prevDoc.sig && !(d.sig && d.sig.x === prevDoc.sig.x && d.sig.y === prevDoc.sig.y);
+  const hist = changed && kvNew > kvOld ? [...base.slice(-7), { sig: { x: prevDoc.sig.x, y: prevDoc.sig.y }, until: now }] : base;
+  const out = { ...d }; if (hist.length) out.prev = hist; else delete out.prev; return out;
+}
+
 function openDb(file, schema) {
   const db = new DatabaseSync(file);
   for (const p of PRAGMAS) db.exec(p);
@@ -209,6 +219,8 @@ export class Store extends EventEmitter {
       chatBase: this.db.prepare('UPDATE chats SET cap_b = ? WHERE cid = ? AND cap_b IS NULL'),
       chatRotate: this.db.prepare('UPDATE chats SET epoch = ?, cap_m = ? WHERE cid = ?'),
       chatAdmins: this.db.prepare('UPDATE chats SET cap_a = ? WHERE cid = ?'),
+      chatRebase: this.db.prepare('UPDATE chats SET cap_b = ? WHERE cid = ?'),
+      chatOwner: this.db.prepare('UPDATE chats SET cap_o = ? WHERE cid = ?'),
       chatDel: this.db.prepare('DELETE FROM chats WHERE cid = ?'),
       chunkGet: this.media.prepare('SELECT i, iv, d FROM chunks WHERE cid = ? AND mid = ? AND i = ?'),
       chunkPut: this.media.prepare('INSERT INTO chunks(cid, mid, i, iv, d) VALUES (?, ?, ?, ?, ?) ON CONFLICT(cid, mid, i) DO UPDATE SET iv = excluded.iv, d = excluded.d'),
@@ -307,8 +319,8 @@ export class Store extends EventEmitter {
     }
   }
 
-  _emit(p, d, type) {
-    this.emit('change', { kind: p.kind, parent: p.parent, id: p.id, d: type === 'set' ? d : null, type });
+  _emit(p, d, type, actor) {   // `by`: the writer's connection, for the server's own listeners; subs.js never sends it
+    this.emit('change', { kind: p.kind, parent: p.parent, id: p.id, d: type === 'set' ? d : null, type, by: actor && actor.conn ? actor.conn : null });
   }
 
   _checkSize(kind, d) {
@@ -350,12 +362,13 @@ export class Store extends EventEmitter {
     const now = this.now();
     const prev = this._read(p, now);
     this._check(actor, 'set', p, { d, prev });
+    if (p.kind === 'directory') { d = withKeyHistory(d, prev, now); this._checkSize(p.kind, d); }
     if (prev && SEALED_KINDS.has(p.kind)) fail('exists', 'a message with this id already exists');
     if (p.kind === 'channels' && metaChanged(d, prev) && !metaEpochOk(d)) fail('invalid', 'chat: sealed meta must be sealed under the current epoch');
     validateForKind(p.kind, { ...p, now, op: 'set', prev }, d);
     if (p.kind === 'inbox' && !prev) this.makeRoom(p.parent, this.limits.inboxMax - 1);   // the owner's own notes count too, so they can't pile up
     this._write(p, d, now);
-    this._emit(p, d, 'set');
+    this._emit(p, d, 'set', actor);
     return { id: p.id };
   }
 
@@ -365,14 +378,15 @@ export class Store extends EventEmitter {
     const now = this.now();
     const prev = this._read(p, now);
     if (!prev) fail('notfound', 'no document to update');
-    const merged = SEALED_KINDS.has(p.kind) ? applyPostUpdate(prev, patch) : mergePatch(prev, patch);
+    let merged = SEALED_KINDS.has(p.kind) ? applyPostUpdate(prev, patch) : mergePatch(prev, patch);
     validateDoc(merged);
     this._checkSize(p.kind, merged);
     this._check(actor, 'update', p, { d: merged, prev, patch });
+    if (p.kind === 'directory') { merged = withKeyHistory(merged, prev, now); this._checkSize(p.kind, merged); }
     if (p.kind === 'channels' && metaChanged(merged, prev) && !metaEpochOk(merged)) fail('invalid', 'chat: sealed meta must be sealed under the current epoch');
     validateForKind(p.kind, { ...p, now, op: 'update', prev }, merged);
     this._write(p, merged, now);
-    this._emit(p, merged, 'set');
+    this._emit(p, merged, 'set', actor);
     return { id: p.id, d: merged };
   }
 
@@ -393,13 +407,13 @@ export class Store extends EventEmitter {
         this.q.chunkDelChat.run(p.id);
         this.q.midDelChat.run(p.id);
       });
-      this._emit(p, null, 'del');
+      this._emit(p, null, 'del', actor);
       this.emit('evict', { cid: p.id, keep: null });
       return true;
     }
     if (p.kind === 'accounts') this.q.goneAdd.run(keyedId(this.addrKey, 'gone', p.id), now);   // see boxWasHere
     this._remove(p);
-    this._emit(p, null, 'del');
+    this._emit(p, null, 'del', actor);
     return true;
   }
 
@@ -471,7 +485,7 @@ export class Store extends EventEmitter {
 
   // ---- chats and room keys (SPEC.md 5) ----------------------------------------------
 
-  // Returns { level, epoch, type } for the creator's connection.
+  // Returns { level, epoch, type, h } for the creator's connection; `h` is the hash of the member key it opened with.
   createChat({ cid, d, caps }, actor) {
     if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
     const p = parseDocPath('channels/' + String(cid));
@@ -489,7 +503,7 @@ export class Store extends EventEmitter {
       const row = this.q.chatGet.get(p.id), h = sha256hex(caps.m);
       if (dm && existing.type === 'dm' && row && (hashEq(row.cap_m, h) || hashEq(row.cap_b, h))) {
         if (!row.cap_b && Number(row.epoch) === 0) this.q.chatBase.run(sha256hex(caps.m), p.id);   // a DM from before base keys were kept
-        return { level: 'member', epoch: Number(row.epoch), type: 'dm', existed: true };
+        return { level: 'member', epoch: Number(row.epoch), type: 'dm', existed: true, h };
       }
       fail('exists', 'a chat with this id already exists');
     }
@@ -500,8 +514,8 @@ export class Store extends EventEmitter {
       this._write(p, d, now);
       this.q.chatPut.run(p.id, d.type, epoch, sha256hex(caps.m), dm ? null : sha256hex(caps.a), dm ? null : sha256hex(caps.o), dm && epoch === 0 ? sha256hex(caps.m) : null);
     });
-    this._emit(p, d, 'set');
-    return { level: dm ? 'member' : 'owner', epoch, type: d.type };
+    this._emit(p, d, 'set', actor);
+    return { level: dm ? 'member' : 'owner', epoch, type: d.type, h: sha256hex(caps.m) };
   }
 
   // Records a DM's base key (SPEC.md 5.1) for a DM created before base keys were kept. Only a connection that
@@ -519,7 +533,23 @@ export class Store extends EventEmitter {
     return { recorded: true };
   }
 
-  // Which level does this key grant? Returns { level, epoch, type } or throws.
+  // After an account key change a DM's base key (SPEC.md 5.1) is replaced by the one the new keys give, so a device
+  // still holding the old account keys can't open the DM with it. Only a connection that opened the DM with its
+  // current member key may do it, and only once the DM has a key of its own (epoch 1 or later).
+  rebaseChat({ cid, cap }, actor) {
+    if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
+    if (!ID.CID.test(String(cid)) || !ID.CAP.test(cap || '')) fail('invalid', 'chat.rebase: bad id or key');
+    const row = this.q.chatGet.get(cid);
+    if (!row) fail('notfound', 'no such chat');
+    if (row.type !== 'dm') fail('denied', 'only a one-on-one chat has a base key');
+    const e = actor.chats.get(cid);
+    if (!e || rankOf(actor, cid) < 1 || Number(row.epoch) < 1 || !e.h || !hashEq(e.h, row.cap_m)) fail('denied', 'open this chat with its current key first');
+    this.q.chatRebase.run(sha256hex(cap), cid);
+    this.emit('evict', { cid, keep: actor.conn || null });
+    return {};
+  }
+
+  // Which level does this key grant? Returns { level, epoch, type, h } (`h`: the hash of the key) or throws.
   openChat({ cid, cap }, actor) {
     if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
     if (!ID.CID.test(String(cid))) fail('invalid', 'chat.open: bad chat id');
@@ -529,7 +559,7 @@ export class Store extends EventEmitter {
     const h = sha256hex(cap);
     const level = hashEq(h, row.cap_o) ? 'owner' : hashEq(h, row.cap_a) ? 'admin' : hashEq(h, row.cap_m) || hashEq(h, row.cap_b) ? 'member' : null;
     if (!level) fail('denied', 'that key does not open this chat');
-    return { level, epoch: Number(row.epoch), type: row.type };
+    return { level, epoch: Number(row.epoch), type: row.type, h };
   }
 
   // One invite's sealed key history, for a link holder about to join (SPEC.md 5.5).
@@ -563,7 +593,7 @@ export class Store extends EventEmitter {
     this._checkSize('channels', next);
     validateForKind('channels', { ...p, now: this.now(), op: 'update', prev: doc }, next);
     this._write(p, next, this.now());
-    this._emit(p, next, 'set');
+    this._emit(p, next, 'set', actor);
     return { epoch: doc.epoch === undefined ? 0 : doc.epoch };
   }
 
@@ -593,9 +623,9 @@ export class Store extends EventEmitter {
       this._write(p, next, this.now());
       this.q.chatRotate.run(epoch, sha256hex(cap), cid);
     });
-    this._emit(p, next, 'set');
+    this._emit(p, next, 'set', actor);
     this.emit('evict', { cid, keep: actor.conn || null });
-    return { epoch };
+    return { epoch, h: sha256hex(cap) };
   }
 
   // The owner replaces the admin secret: new wraps for the admins, new admin key.
@@ -614,7 +644,21 @@ export class Store extends EventEmitter {
       this._write(p, next, this.now());
       this.q.chatAdmins.run(sha256hex(cap), cid);
     });
-    this._emit(p, next, 'set');
+    this._emit(p, next, 'set', actor);
+    this.emit('evict', { cid, keep: actor.conn || null });
+    return {};
+  }
+
+  // The owner replaces the owner key. It comes from the owner's account secret, which a device removal replaces
+  // (release 21), so the old one must stop opening the chat.
+  setOwner({ cid, cap }, actor) {
+    if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
+    if (!ID.CID.test(String(cid)) || !ID.CAP.test(cap || '')) fail('invalid', 'chat.owner: bad id or key');
+    const row = this.q.chatGet.get(cid);
+    if (!row) fail('notfound', 'no such chat');
+    if (row.type === 'dm') fail('denied', 'a DM has no owner');
+    if (levelOf(actor, cid) !== 'owner') fail('denied', 'only the owner changes the owner key');
+    this.q.chatOwner.run(sha256hex(cap), cid);
     this.emit('evict', { cid, keep: actor.conn || null });
     return {};
   }

@@ -99,13 +99,15 @@ The client tries its device key first and falls back to the account key when the
 
 | Path | get | set / create | update | delete |
 |---|---|---|---|---|
-| `directory/<h>` | anyone, rate-limited (the sign-up screen checks availability before an account exists) | only `h`, doc.handle == h, doc.sig == proving key | only `h`; `ecdh`/`sig`/`kv` may change only if `kv` increases and the connection proved with the account key (not a device key) | never |
+| `directory/<h>` | anyone, rate-limited (the sign-up screen checks availability before an account exists) | only `h`, doc.handle == h, doc.sig == proving key | only `h`; `ecdh`/`sig`/`kv` may change only if `kv` increases and the connection proved with the account key (not a device key); `prev` never, the server writes it (below) | never |
 | `search/<h>` | query only, see 7.6 | only `h`, doc.h == h | only `h` | only `h` |
 | `presence/<h>` | anyone proven, batched | only `h` | only `h` | only `h` |
 | `phones/<hash>` | nobody: matching is off, 12.4 | nobody | nobody | only stored doc.handle |
 | mailbox of `h` | pull / ack only by `h` | drop by anyone, see 6 | – | ack by `h` |
 
 The server reads the `devs` entries for one purpose only: to check a device-key proof. It never stores anything about devices beyond those signed entries on the profile. Until stage 4 lands, everything under `channels/` requires a proven connection and nothing more.
+
+**Key history (release 21).** When an account's keys change (`kv` rises; 14, item 15) the server itself appends the old signing key and its own time to the entry's `prev`: a list of at most eight `{ sig: {x, y}, until }`, the oldest dropped first. Clients never write it: a `set` or `update` that would change it is refused with `denied`, a `set` that leaves it out keeps the stored one, and a new entry may not bring one. Every device uses it to check messages signed before the change (`verifyBy`: an old key is accepted for a post, a sealed service note or a signed invitation note dated up to a minute after its `until`, and the result says so; a service note so verified is shown but never acted on; reactions, reads and typing take the current key only). For a contact whose key the device pinned, only the keys it pinned before count as history (kept at acceptance in the vault's pins), never the profile's `prev` alone, so a server can't vouch for a key the contact never had. A key change raises `kv` by exactly one, brings a new signing key, and is taken only from a connection proven with the key on record. Because a proof is checked asynchronously, `prove` reads the entry again afterwards and refuses with `denied` when its `sig` or `kv` changed in between, or when a free name was created in between; a successful proof records the key version it was made against, and the reply carries `kv`. When `kv` rises, every other connection proven for that handle holds the old keys and is closed with code 4401 `keys changed` (7.2); the connection that wrote the change is marked up to date. A sign-up proof is a reservation, not an account: when the profile is created over another connection, the reserving connection is closed with 4401 `username taken`.
 
 ### 4.3 Collections that need no proof
 
@@ -161,7 +163,7 @@ Used for everything under `channels/<cid>`. The server never learns who is in a 
 |---|---|---|---|
 | member key `M_e` | one chat, one epoch | the epoch's chat key | every member device that can open epoch `e`; for public channels, anyone, because `openKeys` publishes the chat key |
 | admin key `A` | one chat | a random 32-byte admin secret, wrapped to admins' devices in `akeys` | owner and admins |
-| owner key `O` | one chat | the owner's private per-account secret `own`, made at sign-up and carried in the login box, the recovery box and the device handoff (accounts from before stage 7 have none and derive it from the signing private key, as before) | owner only, recomputable on any of the owner's devices |
+| owner key `O` | one chat | the owner's private per-account secret `own`, made at sign-up and carried in the login box, the recovery box and the device handoff (accounts from before stage 7 have none and derive it from the signing private key, as before; a key replacement, 14 item 15, gives every account a fresh `own`) | owner only, recomputable on any of the owner's devices |
 
 Derivations, all HKDF-SHA-256 with 32-byte output, encoded base64url (43 characters):
 
@@ -176,7 +178,9 @@ For a DM at epoch 0, where today's chat key is derived on the fly from the two a
 
 The server stores `sha256(M_e)` for the current epoch only, `sha256(A)` and `sha256(O)` as lowercase hex. It never stores a key itself. Rotating to a new epoch replaces the member hash and immediately invalidates the old one.
 
-As built: a DM also keeps the hash of its epoch-0 member key permanently as a base key. Either person can always derive it from the two account keys, so a device that lost its chat keys (a restore from recovery words) can still open the DM and rotate it to a fresh epoch. Without this, nobody could ever heal a DM.
+As built: a DM also keeps the hash of its epoch-0 member key as a base key (`cap_b`), beside the current member hash. Either person can always derive it from the two account keys, so a device that lost its chat keys (a restore from recovery words) can still open the DM and rotate it to a fresh epoch. Without this, nobody could ever heal a DM.
+
+**Replacing a base key or an owner key (release 21).** When an account's keys are replaced (14, item 15) the old shared secret still derives the old base key, so a removed device could open every DM with it. `chat.rebase { cid, cap }` replaces a DM's base key hash with the one the new keys give. Only a connection that opened the DM with its current member key (the one the last `chat.rotate` set, not the base key) may do it, and only once the DM has a key of its own (epoch 1 or later), so a device holding nothing but the old shared secret can't rebase a DM away from its owner; every other connection's level for the DM is evicted. Either person in the DM can do it (the server knows no members), so whoever holds the current member key first decides the base key: the page therefore re-keys its chats right after publishing the new account keys, and a chat whose keys were replaced from elsewhere first is named in the summary as lost ("start it afresh"). The pages keep the shared secret from before the change in their chat-key store (label `b`), so the DM's history stays readable, and try the old base key last when opening (12). `chat.owner { cid, cap }` replaces a group's or channel's owner key hash: owner level only, not for DMs, every other connection evicted. The owner key comes from the account secret `own`, which a key replacement rotates, so the owner moves it over; this is not a hand-over (5.6).
 
 ### 5.2 Opening a chat on a connection
 
@@ -201,7 +205,7 @@ Fields of the chat record:
 | `ts`, `last` | plain | activity marker, `last` as today but `from` must be null. |
 | `pins`, `ttl`, `closed`, `reactions`, `comments` | plain | operational settings; contain post ids, numbers and emoji, never names. |
 
-Group and channel ids are `g` or `c` followed by 12 alphanumerics, as today. DM ids change: `d` followed by 22 base64url characters of `SHA-256("hush-dmid-v1|" + ECDH(a, b))` truncated. Both parties compute the same id; the server cannot; the old `dm~alice~bob` form is gone. Saved messages (a DM with yourself) use ECDH of your own key with itself and the label `hush-dmid-v1|self|`.
+Group and channel ids are `g` or `c` followed by 12 alphanumerics, as today. DM ids change: `d` followed by 22 base64url characters of `SHA-256("hush-dmid-v1|" + ECDH(a, b))` truncated. Both parties compute the same id; the server cannot; the old `dm~alice~bob` form is gone. Saved messages (a DM with yourself) use ECDH of your own key with itself and the label `hush-dmid-v1|self|`. A conversation keeps its id across a key change (release 21): once either account's keys are replaced the two keys would derive a new id, so the page keeps, in its vault, which conversation belongs to which peer (`prefs.dms`) and looks there, then in its open chats, before deriving. The DM stays one conversation with its history, and a note or a chat that names the id is recognised instead of thrown away.
 
 ### 5.4 Operations and required level
 
@@ -222,6 +226,8 @@ Group and channel ids are `g` or `c` followed by 12 alphanumerics, as today. DM 
 | update `meta`, `reactions`, `comments`, `invites`, `visibility`, `openKeys` | – | admin | admin |
 | `chat.rotate` (new epoch, new member hash) | member | admin | admin |
 | `chat.admins` (replace `akeys` and admin hash) | – | owner | owner |
+| `chat.rebase` (replace the base key hash, release 21) | member, opened with the current member key, epoch 1 or later | – | – |
+| `chat.owner` (replace the owner hash, release 21) | – | owner | owner |
 | `set` whole record | – | admin | admin |
 | delete chat | nobody | owner | owner |
 | `chat.join` with invite proof | – | anyone proven | anyone proven |
@@ -248,7 +254,7 @@ A `get channels/<cid>` from a connection without a level for `cid` returns a tri
 
 **Appoint or demote an admin.** Owner writes `chat.admins { cid, akeys, cap }` with wraps of a fresh admin secret for the current admins' devices and the new admin hash, then re-seals `meta.admins` and drops `{ t: "admin", cid }` to a newly appointed admin so their client knows to scan `akeys`.
 
-**Ownership transfer** is not supported in this version.
+**Ownership transfer** is not supported in this version. `chat.owner` (5.1, release 21) only lets the owner replace their own key after their account keys changed; the owner stays the same person.
 
 ### 5.7 Posts, edits and deletes without identity
 
@@ -304,7 +310,7 @@ Text WebSocket frames, UTF-8 JSON, at most 1 MB each. Every client frame carries
 | op | fields | reply |
 |---|---|---|
 | `hello` | `v: 1` | `{ nonce, now, v, limits, badges }` (`badges` is the operator's list, 12.3) |
-| `prove` | `h, sig, pub?` | `{ ok }` |
+| `prove` | `h, sig, dev?, pub?` | `{ h, via, kv }`: `via` is `device`, `account` or `signup` (4.1); `kv` the key version the proof was checked against (4.2, release 21) |
 | `get` | `p` | `{ id, d }` or `{ id, d: null }` |
 | `mget` | `ps: [p, …]` (≤ 300) | `{ docs: [{ id, d }] }` |
 | `set` | `p, d` | `{ ok }` |
@@ -321,6 +327,8 @@ Text WebSocket frames, UTF-8 JSON, at most 1 MB each. Every client frame carries
 | `chat.rotate` | `cid, epoch, keys, cap, meta?, openKeys?` | `{ ok }` |
 | `chat.admins` | `cid, akeys, cap` | `{ ok }` |
 | `chat.base` | `cid, cap` | `{ recorded }`. Records a DM's base key (5.1) for a DM created before base keys were kept. Needs member level on the connection; only while none is recorded, never replacing one. |
+| `chat.rebase` | `cid, cap` | `{ ok }`. Replaces a DM's base key (5.1) after an account key change. The connection must have opened the DM with its current member key, and the DM must be at epoch 1 or later; the other connections are evicted. Release 21. |
+| `chat.owner` | `cid, cap` | `{ ok }`. Replaces a group's or channel's owner key (5.1). Owner level; not for DMs; the other connections are evicted. Release 21. |
 | `signup.pow` | – | `{ salt, bits }`: the puzzle a new account solves before its profile may be created (9.4). The same puzzle comes back in the `pow` refusal of a `set` on `directory/<h>` sent without a solution; the page asks early and solves out of sight. The `set` carries the answer as `pow`. |
 | `media.ticket` | `cid` | `{ t, exp, limits }`. A media ticket for HTTP requests about this chat (7.7). Needs a proven connection holding a level for `cid`. |
 | `mail.*` | never needed: notes are watched with `sub` on `inbox/<h>/c` and written with `POST /drop` (section 6); answered `invalid` | – |
@@ -344,6 +352,8 @@ Paths `p` use exactly today's shapes: `directory/<h>`, `channels/<cid>`, `channe
 
 Error codes: `unauth`, `denied`, `notfound`, `exists`, `invalid`, `toolarge`, `ratelimit`, `conflict`, `version`, `pow` (a drop, section 6, or a sign-up, 9.4, that must bring proof of work first; the reply carries the puzzle), `full` (media refused because the chat's allowance or the server's disk is used up, 7.7), and `internal` for an unexpected server failure. A frame that cannot be parsed at all gets an error reply without `i`; five such frames close the connection.
 
+Close codes. Before it closes a connection the server pushes `bye` with the reason, then closes the socket: with code 1000, or with 4401 (release 21) when the connection's proof no longer stands: `keys changed` when the account's keys were replaced over another connection and this one was proven against the old ones, `username taken` when a sign-up proof's name was created over another connection (4.2). A page closed with 4401 can't get back in with the keys it holds: its next proof is refused, and it signs the account out on that device (12, item 9).
+
 ### 7.3 Write semantics
 
 - `set` replaces the whole document.
@@ -362,7 +372,7 @@ A subscription sends `init`, then one `set` or `del` per changed document that m
 
 ### 7.5 Connection life cycle
 
-`hello` within 10 seconds of connecting or the socket is closed. `ping` every 25 seconds from the client; a connection silent for 90 seconds is closed. On reconnect the client repeats `hello`, `prove`, `chat.open` for each chat it holds keys for, and every `sub`. Protocol version mismatch returns `version` and the app shows "please reload".
+`hello` within 10 seconds of connecting or the socket is closed. `ping` every 25 seconds from the client; a connection silent for 90 seconds is closed. On reconnect the client repeats `hello`, `prove`, `chat.open` for each chat it holds keys for, and every `sub`. Protocol version mismatch returns `version` and the app shows "please reload". A connection proven for an account whose key version rose on another connection is closed with 4401 `keys changed` (4.2, 7.2): its keys are stale, and a reconnect with them is refused.
 
 ### 7.6 Search
 
@@ -450,7 +460,7 @@ WAL journal, `synchronous = NORMAL`, `secure_delete = ON` so deleted rows are ze
 | presence and typing | continuous | in-memory TTL |
 | backup | nightly | `.backup` to a temp file, encrypt with `age` to an offline public key, copy off the box (a Hetzner Storage Box or any other location the owner picks), delete temp, keep 7 |
 | vacuum | weekly | reclaim and zero freed pages |
-| disk watch | 1 min, on upload | refuse new media (507 `full`) when the data disk has under 10 % **and** under 5 GB free, so a large disk with room to spare keeps working; alerting the owner comes with stages 7 to 9 |
+| disk watch | 1 min, on upload | refuse new media (507 `full`) when the data disk has under 10 % **and** under 5 GB free, so a large disk with room to spare keeps working; alerting the owner is the health watch's job (11.5) |
 
 ---
 
@@ -504,14 +514,15 @@ The server enforces the piece size, the piece count, the per-chat allowance and 
 
 ### 9.3 Schema rules per collection
 
-- `directory`: must contain `handle == <h>`, `ecdh{x,y}`, `sig{x,y}`; optional `name, disp, bio, photo, devs, findable, requests, kv, ts`.
+- `directory`: must contain `handle == <h>`, `ecdh{x,y}`, `sig{x,y}`; optional `name, disp, bio, photo, devs, findable, requests, kv, ts`. `prev`, the key history (4.2), is the server's: at most eight `{ sig{x,y}, until }`, appended by the server when `kv` rises; a client write that would change it (a new entry that brings one, an `update` naming it, a `set` with a different one) is refused with `denied`, and a `set` without it keeps the stored one.
 - `channels/<cid>`: fields from 5.3 only; no-names denylist; `type` and `visibility` enumerated; `epoch` integer; `keys` and `akeys` values must be wrap objects or `{ v:2, d:{…} }`; whenever `meta` is written (create, update, `chat.rotate`) its `e` must equal the record's epoch after the write.
-- posts: exactly the shapes in 5.7; `e <= epoch`.
+- posts: exactly the shapes in 5.7; `e <= epoch`. A new post's `ts` lies within 30 days back and 400 days ahead of the server's clock; an update keeps `ts` unless the stored one is in the future or less than a minute old (a scheduled message sent early), and then only to a time within that same window (release 21: a back-dated edit would otherwise make an old-key signature check out past the key history's window, 4.2).
 - acts: id pattern and key set `{ post, kind, e, iv, ct, ts }`, all required except `e`. From release 18 the author’s signature travels sealed inside `ct` with what it signs, so nothing stored ties a reaction or a poll vote to an account key; a plain `sg` is refused.
 - reads and typing: id `^[0-9]+~[A-Za-z0-9_-]{22}$`, body exactly `{ ts, iv, ct }`: the signature over the chat, the tag and the time is sealed under the chat key (release 18), so only people in the chat can check it; a plain `sg` is refused.
 - media piece: over HTTP, a body of at least 28 bytes (iv and tag) and at most `pieceBytes + 28`; stored as `{ i, iv, d }`. Nothing else, ever: no content type, size hint, file name, duration or kind. Whether a media id is a photo, a document or a voice message is known only to the sealed post that references it. The only per-media facts the server keeps are in `media_ids` (8.2): total size and an optional expiry.
 - `accounts`, `vault`, `backup`: exactly `{ iv, ct }` or `{ iv, ct, ts }`.
 - `backup` writes (release 19): a `set` names the version it was merged from, `was` in the request: the stored `ts`, or 0 when there is none. Anything else is refused with `conflict` (the page reads, merges and tries again, up to six times) and a missing or non-number `was` with `invalid`; an `update` is never accepted. `was` is checked and never stored, and it is a time the server already holds. The page writes `ts` as the later of now and the stored `ts` plus one, so versions only go up.
+- `inbox/<h>/c` (section 6): a note is `{ epk, iv, ct, ts }` with `ct` of the one fixed size, plus `own: 1` on a note the owner writes to themselves, which only they can do over the socket. From release 21 such an own note is not charged to the connection's note bucket (9.4): the mailbox holds at most `inboxMax` notes anyway, and the page re-writes its whole chat list after a key change.
 - `logins`: exactly `{ ts }`.
 - `phones`: exactly `{ handle }`.
 - `linkreqs`: from release 16, link offers (14.14): `offer` (opened by a signed-in account, naming itself in `h`, at `offerTag(n)` only), then `wait` (claimed once by the device that scanned the code), then `ok` (answered only by the account that opened it); the account takes it down, or the new device clears it once answered. The records below, at a login’s tag, are what the pages wrote before release 16: still readable, but from release 16 nobody writes, answers or removes one (the emailed codes that opened them are gone, and a box found at the gate proves nothing, since anyone may store one). States `wait`, `ok`, `no` carry the fields the client writes today, in offers and old records alike.
@@ -530,6 +541,7 @@ Buckets live in memory. "address bucket" means a token bucket keyed by `HMAC(hou
 | `login.gate` asks that find no box | login tag, whoever asks (also counted as a blind lookup of the address) | 10 / h per login (`pwMissesPerLogin`); while a login is out of tries every answer waits, the right password included (4.5) |
 | `directory` create (a sign-up) | proof of work on the connection, with an address count as a backstop | the create must bring a nonce with `sha256("hush-signup-v1\|<salt>\|<nonce>")` starting with `signupPowBits` (16) zero bits, the salt being the connection's own and good for one account; the page fetches the puzzle when the sign-up screen opens and solves it while the person types, so no step is visible and nothing is added to the tap. Behind it, 100 a day per address under a second salt that turns daily (`signupsPerDayPerAddr`), since the hourly tag would reset the count |
 | `POST /drop` | address, recipient | 30 / h per address, charged on every attempt; 100 / h per recipient; proof of work once a recipient's hour is half used, or always for a recipient with `requests: true` (section 6) |
+| own mailbox notes over the socket (`set` on `inbox/<h>/c`) | connection | 100 / h (`dropsPerHour`); from release 21 a note marked `own: 1` is not counted, since the mailbox itself holds at most 500 (`inboxMax`) and the page re-writes its whole chat list after a key change (9.3) |
 | `chat.create` | connection | 200 / day (`chatCreatesPerDay`) |
 | `chat.invite` | address | 20 / min (`invitesPerMinPerAddr`), as 5.5 asks |
 | `chat.open` failures | address | 20 / min |
@@ -582,7 +594,7 @@ IP addresses; which handle is in which chat; who sent any post; who talks to who
 
 **A6. An outsider.** Can enumerate handles through the directory at 600 per minute per connection (9.4), test whether a login exists at 20 per minute, probe account boxes at the same rate, drop mail into any mailbox within limits, and create accounts at the cost of one puzzle each, 100 a day per address. Can also reserve a login or a phone entry that is not theirs, since neither is verified yet (open item 14.10, stage 8). Account boxes already require guessing login and password through 600 000 PBKDF2 iterations client-side per attempt. Recipient-side filtering (contacts only, block) handles unwanted drops.
 
-**A7. A compromised device.** Out of scope except that device keys never leave the device and the owner can rotate chats to exclude it.
+**A7. A lost or stolen device.** Every device of an account holds the account's private keys, so taking its entry off the profile alone would change nothing; removing it (release 21; 14, item 15) replaces the account's keys. What the device loses at once: the server, which refuses its proofs and closes its connections (4.2); every DM, which gets a new epoch and a new base key (5.1); every group and channel the remover owns, which gets a new owner key and a fresh admin secret and, when private, a new epoch; every private group it administers, which gets a new epoch; the vault, the message backup and the password boxes, which move to new addresses under new keys and a new password; and the recovery words, whose boxes are deleted. What it keeps: the old keys and everything they opened while it had them, so its copy of the old vault and backup and the messages it had read; the keys of groups where the remover is only a member, which it reads until an admin rotates them; and the admin secret of groups the remover administers but does not own, until the owner changes admins. For the 30 days in which the server still accepts a post dated before the change (5.7), a message so dated in a chat that was not re-keyed can't be told from one the removed device wrote afterwards, since it signs with the old key that `prev` still vouches for up to that time. Whoever replaces the keys first keeps the account: a thief who does it before the owner locks the owner out, because the old keys, and the recovery words that hold them, are refused from then on; the same holds chat by chat for a DM's base key and a group's owner key (5.1), which the page therefore replaces right after the account keys and reports as lost when someone got there first. Pre-change messages in chats that were not re-keyed stay editable and deletable by the old ownership secret, which the device holds (5.7); the owner keeps that secret too. So a lost device is removed as soon as it is missed, and the recovery words are kept safe.
 
 ### 10.5 Properties this design gives up relative to Firestore rules
 
@@ -629,6 +641,15 @@ Releases are a `git pull` plus `systemctl restart hush`. Database schema changes
 
 ---
 
+### 11.5 Monitoring (built 2026-10-12)
+
+Two dead-man's switches at Healthchecks.io, each a check with a random ping address kept root-only in `/etc/hush/monitor.env`; the pings carry that id and, on a failure, a short reason, never user data. The provider learns the check ids, the ping times, the server's address and those reasons.
+
+- `hush-backup`, expected once a day (grace 3 hours): the nightly backup (8.6) pings it after a successful upload, or its `/fail` address with the reason. A failed or skipped night becomes an email to the owner.
+- `hush-watch`, expected every 5 minutes (grace 5 minutes): a systemd timer runs `/usr/local/sbin/hush-watch.sh`, which checks that the service is active, `/healthz` answers `ok`, the journal has no error or warning lines in the last 5 minutes, and the data disk has over 10 % and over 2 GB free. All four pass: one ping. One fails: a `/fail` ping naming it, and a `hush-watch` journal line. The server dead or offline: the pings stop, and the owner is emailed about ten minutes later.
+
+Whoever holds a ping address can only hide a failure by pinging "ok"; it reads nothing. The addresses are rotated from the Healthchecks.io dashboard if they ever leak.
+
 ## 12. Client adapter contract
 
 The adapter replaces `connectFirebase` and returns an object with the same shape as today so that the rest of the page is untouched:
@@ -641,13 +662,14 @@ The adapter replaces `connectFirebase` and returns an object with the same shape
 Adapter responsibilities beyond translation:
 
 1. Open the socket at page load, `hello` immediately, `prove` once an account is active, reconnect with back-off, and open a fresh connection when the active account changes.
-2. For any path under `channels/<cid>`, ensure the chat is open on the connection first. It asks the app for keys through a small interface the app provides: `member(cid, epoch)`, `admin(cid)`, `owner(cid)`. If the app has no chat key yet, the adapter performs the preview read and hands `keys` to the app so it can trial-decrypt its wrap.
+2. For any path under `channels/<cid>`, ensure the chat is open on the connection first. It asks the app for keys through a small interface the app provides: `member(cid, epoch)`, `admin(cid)`, `owner(cid)`. If the app has no chat key yet, the adapter performs the preview read and hands `keys` to the app so it can trial-decrypt its wrap. From release 21 the app may hand back a list of keys, tried in order until one opens: for a DM its epoch key, then the base key the current account keys give, then the one from before a key change (5.1); for a chat the account owns the owner key, the one from before a key change, then its admin and member keys, so a chat whose owner key is no longer the account's still opens to read; when every key is refused the adapter forgets the chat's level, and an operation that needs a level fails with `denied` (or `ratelimit` while the server is busy) before anything is sent.
 3. Emulate `hasPendingWrites`: on a local `set` or `add` under a subscribed query, deliver a synthetic snapshot with the pending document, then deliver the server's push without the flag. `fromCache` is always `false` in this version.
 4. Batch concurrent `get` calls on `directory/*` and `presence/*` into `mget`.
 5. Keep ordering and `limit` for subscriptions client-side after `init`.
 6. Translate `sub` with `ids` for the chat list watcher.
 7. Send nested objects as-is for `update`; the Firestore dotted-path flattening is removed.
 8. Media over HTTP (7.7): `putPiece`, `getPiece`, `deleteMedia`, `copyMedia`, `mediaLimits`. The adapter fetches and caches one media ticket per chat, renews it a minute before it runs out or after a 401, re-opens the chat once after a 403 (a rotation it has not heard of yet), and forgets every ticket on reconnect.
+9. Key versions (release 21). The adapter keeps the `kv` of its `prove` reply (`kv`) and reports it to the page (`onKv`), which signs out when the server's version is above its own; a refused proof is reported too (`onDenied`), and the page re-reads its profile and signs out if its keys are stale. `rebaseChat(cid, cap)` and `setOwner(cid, cap)` open the chat and send `chat.rebase` and `chat.owner` (7.1).
 
 **Development conveniences.** An optional static file mode (`HUSH_STATIC`) serves only `index.html`, `app/*.js`, `app/*.css` and `vendor/*.js` from the same origin; `npm run dev` turns it on. The legacy data model that bridged stages 2 and 3 was retired in stage 4; the client writes only the shapes in this document now.
 
@@ -669,7 +691,7 @@ The four scripts are classic scripts loaded in that order and share one global s
 
 The page is built for a hostile browser environment: a copy of its storage, a shared or stolen device, a page left open.
 
-**One sealed store.** Everything the page keeps under `hush:` lives in one map in memory and reaches disk only as one AES-256-GCM blob, `localStorage['hush:sealed']`: account and device private keys, the ownership secret, chat keys, invite secrets, logins, phone numbers, drafts, read marks, which chats were pointed to whom, the active account. Only the lock settings, the theme and the blob itself are stored plain. `sessionStorage` is not used. The blob's key is:
+**One sealed store.** Everything the page keeps under `hush:` lives in one map in memory and reaches disk only as one AES-256-GCM blob, `localStorage['hush:sealed']`: account and device private keys, the ownership secret, chat keys, invite secrets, logins, phone numbers, drafts, read marks, which chats were pointed to whom, the active account. Only the lock settings, the theme and the blob itself are stored plain. `sessionStorage` is not used. Several tabs of one browser share the blob: a tab that sees another tab's write takes the new map, and leaves an account that is no longer in it (logged out, or removed, in the other tab) without writing it back; a tab that can't open the blob any more, or finds it gone (the other tab replaced the device key when the last account left, or set a lock) reloads instead of writing; and at start a blob the device key doesn't open is set aside under `hush:sealed:old`, so a stale write never leaves a page that can't start (release 21; before it, a logout didn't stick while another tab stayed open). The blob's key is:
 
 - the lock password's key (PBKDF2-SHA-256, 600 000 rounds, a random salt) while a password lock is on, so the keys are unreadable without the password even to someone holding the whole storage; or
 - otherwise a device key the browser made once, non-extractable, kept in IndexedDB. JavaScript can use it but never read it, and a copy of `localStorage` alone opens nothing. Where IndexedDB is unavailable the key sits next to the blob and the password lock is the real protection.
@@ -751,7 +773,8 @@ Line numbers refer to the single-file index.html of the time and are for orienta
     - *A device added, by any way in.* Every signed-in device shows a notice once: "<name> was added to your account. Its key is XXXX-XXXX." The name travels in the device's profile entry sealed under the account's own key (`nm`, AES-GCM with additional data `hush-devname-v1|<username>|<device id>`), so only the account's devices can read it. Only entries whose signatures check out are announced, and what a device finds on its first look counts as known; the device that approved one says so in its own message instead.
     - The emailed-code road of 14.10 is retired: "Forgot password?" sends no code, the recovery email setting is gone, and so is the request watcher with its "Log in on a new device?" alert. The server has no `code.send`, `code.check` or `link.resume` any more and needs no mail key, in production or anywhere. Requests at a login's tag are closed: with the codes gone their last key was a box found at the gate, which proves nothing, since anyone may store a box. Recovery-email records take no new writes; their own account may still remove one.
     - A password changed in Settings, which asks for the current one, removes that password's boxes for every login, worked out from the password itself, whatever the settings say. After a recovery with the words the old password isn't known, so its boxes go only where the settings knew their addresses: on an account whose settings were left out of date (release 13), the old password can keep working until it is changed from a device that knows it. Closing that without the server linking a login to a username needs the account's keys replaced at recovery: item 15, a must-do before public launch.
-15. **Replace the account's keys on a recovery with the words. Must be done before public launch.** Decided 2026-10-11, not built yet. A recovery with the words gives the account new keys: a new signing and encryption key pair published under the next key version (`kv`), every chat key re-wrapped to the new key, the account's devices vouched for again, and the owner keys of its groups and channels moved over. Every password box made before then opens only to keys the server no longer accepts, whether or not the settings knew its address (the gap item 14 leaves). It also cuts off someone who stole the old password and already opened a box, which deleting boxes cannot do. Already in place: the page refuses a login whose keys are older than the profile's key version, and signs out a device whose keys are older. The costs to accept: every contact sees "security code changed" for that account, and whatever was sealed to the old keys stays readable to anyone who holds them. The Message backup moves too: its key and its address both come from the account's encryption key (8.3), so once the keys change every device would find the old backup unopenable (and say so, release 19). The recovering device restores the chat keys with the old keys first, then writes a fresh backup under the new keys at the new address and deletes the old one.
+15. **Replace the account's keys to lock out a lost device. Built in release 21 (local build; deploy pending).** Decided 2026-10-11 as a must before public launch, for a recovery with the words; built for device removal first, because every device holds the account's private keys and taking a device's entry off the profile alone locks nothing. Removing a device (Settings → Login and devices → Your devices → Remove) therefore gives the account new keys: a new encryption pair, a new signing pair and a new ownership secret `own`, published under the next key version (`kv` + 1) in one write that also drops every other device entry. The server takes that write only over an account-key proof, appends the old signing key to the entry's `prev` (4.2), closes the account's other connections with 4401 and refuses the old keys from then on. The removing device then re-keys the chats first (every second until then is one in which the lost device's holder could replace a chat's keys himself, 5.1): every private group or channel it owns gets a new epoch, every owned one a new owner key (`chat.owner`) and a fresh admin secret, every private group it administers a new epoch, and every DM a new epoch and a new base key (`chat.rebase`), so the old shared secret opens nothing; a DM whose other person's new security code is not yet accepted here is left for the acceptance (a base key from their old one would lock them out). Then it moves what the old keys guarded: the vault to the address and key the new keys give (the old one stays: vaults are never deleted, and it holds only what the lost device had already), the chat-list notes re-sealed to the new key, the message backup to its new address (merged with the old one first, the old one then deleted), the password boxes replaced under a new password it asks for (the lost device may know the old one, so the old one is refused), and the old recovery boxes deleted, so new words must be made. The old keys stay on that device, their private parts for 30 days, so old notes, the old vault and old messages still open and verify; other devices verify old messages through `prev`. The other devices are logged out and link again by code (item 14, path one). The flow is a stage machine kept in the sealed store and resumed at the next load, so a reload or a lost connection mid-way never loses the account; only a definite refusal of the key write rolls back to the old keys, and a device that finds the keys replaced from elsewhere meanwhile signs out.
+    Limits, named in the summary the person sees: a group where the account is only a member keeps its key until an admin rotates it, and the removed device reads it until then; a group it administers but does not own keeps its admin secret in the removed device's hands until the owner changes admins; a chat at epoch 31 can't be rotated; a chat whose keys someone replaced first (the removed device, most likely) is lost and named, to be started afresh; for 30 days a message dated before the change in a chat that was not re-keyed can't be told from one the removed device wrote, and pre-change messages there stay editable by it (10.4, A7); every contact sees "security code changed", and their devices wrap nothing to the account until they accept the new code (their one-on-one chat with it is re-keyed on acceptance); invite links of the re-keyed chats stop working. Whoever replaces the keys first keeps the account, so a lost device is removed as soon as it is missed and the recovery words are kept safe. Already in place before: the page refuses a login whose keys are older than the profile's key version, and signs out a device whose keys are older. Still open: running the same replacement at the end of a recovery with the words, which this item first asked for.
 
 ---
 
@@ -772,7 +795,7 @@ The stage numbers used throughout this document and in `server/README.md`:
 | 6 | Media over HTTP: photos, videos, voice messages and any file, each under its own key, with tickets for the room-key gate (7.7, 8.2, 9.2) | Built |
 | 7 | The page split into `app/` files pinned by `index.html` (12.1, 10.6); the security review and its fixes (replay rules in 5.3, constant-time checks, the rate limits of 9.4, sign-up proof of work, strict origin and proxy defaults, the per-account ownership secret, wraps that name their epoch); the sealed on-device store, the lock gate and logout wipe (12.2); the native-build plan (16.5); the stage 8 checklist (16.4) | Built |
 | 8 | Locking down write access, the checklist in 16.4: the developer PC and the backup copy of the code, the Hetzner server, the Hetzner account; release transparency. With the domain in hand, verification codes by email or SMS at sign-up (open item 14.10) | Built and live since 2026-10-09, except 14.10 |
-| 9 | Operations: backups, monitoring, and whatever of section 11 is still open | Planned |
+| 9 | Operations: backups, monitoring, and whatever of section 11 is still open | Backups (8.6) and monitoring (11.5) built and live 2026-10-12; the rest of section 11 as marked. Release 21, device removal by key replacement (14, item 15): built locally 2026-10-12, deploy pending |
 | 10 | Voice and video calls | After launch |
 
 ### 16.1 Audio messages (stage 6)

@@ -106,6 +106,19 @@ export function createServer(cfg) {
   store.on('change', (evt) => subs.dispatch(evt));
   // A rotation, admin change or deletion: everyone else loses their level and their live views of that chat.
   store.on('evict', ({ cid, keep }) => { for (const c of conns) if (c !== keep) c.evict(cid); });
+  // New account keys (release 21): every other connection proven for that account holds the old ones. It is closed
+  // with 4401 so the page signs out at once; the writer's own connection is marked up to date.
+  store.on('change', (e) => {
+    if (e.kind !== 'directory' || !e.d) return;
+    const kv = e.d.kv === undefined ? 1 : e.d.kv;
+    for (const c of conns) {
+      if (c.proven !== e.id) continue;
+      if (c === e.by) { c.kv = kv; if (e.d.sig) c.pub = { x: e.d.sig.x, y: e.d.sig.y }; continue; }   // the writer goes on with the keys it just published
+      if ((c.kv === undefined ? 1 : c.kv) < kv) { c.close('keys changed', 4401); continue; }
+      // A sign-up proof for a name that someone else then created is void: that connection was never this account.
+      if (c.provedWith === 'signup' && !(c.pub && e.d.sig && c.pub.x === e.d.sig.x && c.pub.y === e.d.sig.y)) c.close('username taken', 4401);
+    }
+  });
   const tagger = new AddressTagger();
   const helloBuckets = new BucketMap(limits.helloPerMinPerAddr, limits.helloPerMinPerAddr / 60);
   const proveFails = new BucketMap(limits.proveFailsPer10Min, limits.proveFailsPer10Min / 600);

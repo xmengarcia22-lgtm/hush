@@ -47,7 +47,7 @@ function createHushAdapter(url,opts){
       e=>{if(e&&e.code==='version'){fatal='This copy of Hush is out of date for the server. Reload the page.';api.error=fatal;closed=true}try{sock.close()}catch{}})};
     sock.onmessage=ev=>{if(sock!==ws)return;onMessage(ev)};
     sock.onerror=()=>{};
-    sock.onclose=()=>{if(sock!==ws)return;ws=null;onClose()};
+    sock.onclose=ev=>{if(sock!==ws)return;ws=null;onClose();if(opts.onClosed)try{opts.onClosed(ev&&ev.code,ev&&ev.reason)}catch{}}; // the code says why (4401: our keys are no longer the account's, SPEC.md 7.2)
   }
   function onMessage(ev){let f;try{f=JSON.parse(typeof ev.data==='string'?ev.data:String(ev.data))}catch{return}
     if(Number.isInteger(f.i)&&calls.has(f.i)){const c=calls.get(f.i);calls.delete(f.i);clearTimeout(c.timer);if(f.ok)c.resolve(f);else c.reject(Object.assign(mkErr(f.e,f.m),f.e==='pow'?{bits:f.bits,salt:f.salt}:{}));return}
@@ -63,12 +63,17 @@ function createHushAdapter(url,opts){
   // ---- room keys (SPEC.md 5.2): before touching anything inside a chat, open it with the best key the app holds ----
   const chatOf=p=>{const m=/^channels\/([^/]+)/.exec(p||'');return m?m[1]:null};
   const inChat=(sub,cid)=>sub.p.startsWith('channels/'+cid+'/')||(sub.p==='channels'&&sub.ids&&sub.ids.includes(cid));
+  const openFail=new Map(); // cid → why the last open failed: 'denied' (every key refused, or none to try), 'offline', 'ratelimit', or the server's other answer
   async function ensureOpen(cid,force){ // true once the connection holds a level for the chat
     if(!opts.caps)return false;let job=opening.get(cid);
-    if(!job){job=(async()=>{let cap=null;try{cap=await opts.caps(cid)}catch{}
-      if(!cap)return false;const cur=opened.get(cid);if(cur&&cur.cap===cap&&!force)return true;
-      try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
-      catch(e){if(e&&e.code!=='offline')opened.delete(cid);if(e&&(e.code==='ratelimit'||e.code==='timeout'))busy.add(cid);return false}})().finally(()=>{opening.delete(cid)});
+    if(!job){job=(async()=>{let caps=null,why='denied';try{caps=await opts.caps(cid)}catch(e){if(!online||(e&&e.code==='offline'))why='offline'}
+      const list=[...new Set((Array.isArray(caps)?caps:[caps]).filter(Boolean))]; // one key, or several to try in order (a DM after an account key change, SPEC.md 12)
+      if(!list.length){openFail.set(cid,why);return false}const cur=opened.get(cid);if(cur&&list.includes(cur.cap)&&!force)return true;
+      for(const cap of list){
+        try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});openFail.delete(cid);busy.delete(cid);if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
+        catch(e){if(e&&e.code==='denied')continue; // this key doesn't open it: the next may
+          const code=(e&&e.code)||'denied';if(code!=='offline')opened.delete(cid);if(code==='ratelimit'||code==='timeout')busy.add(cid);openFail.set(cid,code==='timeout'?'ratelimit':code);return false}}
+      opened.delete(cid);openFail.set(cid,'denied');return false})().finally(()=>{opening.delete(cid)});
       opening.set(cid,job)}
     const ok=await job;if(ok)retryDeferred(cid);return ok;
   }
@@ -85,11 +90,14 @@ function createHushAdapter(url,opts){
   api.refreshChat=cid=>ensureOpen(cid,true);
   api.preview=cid=>call('get',{p:'channels/'+cid}).then(r=>docSnap(r.id,r.d,false));
   api.createChat=(cid,d,caps)=>call('chat.create',{cid,d:clone(d),caps}).then(r=>{opened.set(cid,{cap:caps.o||caps.m,level:r.level,epoch:r.epoch});retryDeferred(cid);return r});
-  api.rotateChat=async(cid,spec)=>{await ensureOpen(cid);const r=await call('chat.rotate',Object.assign({cid},clone(spec)));const o=opened.get(cid);if(o)opened.set(cid,Object.assign({},o,{epoch:r.epoch}));return r};
-  api.setAdmins=async(cid,akeys,cap)=>{await ensureOpen(cid);return call('chat.admins',{cid,akeys:clone(akeys),cap})};
+  const needOpen=async cid=>{if(opts.caps&&!(await ensureOpen(cid)))throw mkErr(openFail.get(cid)||'denied','the chat could not be opened')}; // a level is needed first: why there is none ('offline', 'ratelimit', 'denied') is what the caller acts on
+  api.rotateChat=async(cid,spec)=>{await needOpen(cid);const r=await call('chat.rotate',Object.assign({cid},clone(spec)));const o=opened.get(cid);if(o)opened.set(cid,Object.assign({},o,{epoch:r.epoch}));return r};
+  api.setAdmins=async(cid,akeys,cap)=>{await needOpen(cid);return call('chat.admins',{cid,akeys:clone(akeys),cap})};
   api.joinChat=(cid,iid,proof,wraps)=>call('chat.join',{cid,iid,proof,wraps:clone(wraps)});
   api.inviteBlob=(cid,iid)=>call('chat.invite',{cid,iid});
-  api.setBase=async(cid,cap)=>{await ensureOpen(cid);return call('chat.base',{cid,cap})}; // a DM from before base keys were kept
+  api.setBase=async(cid,cap)=>{await needOpen(cid);return call('chat.base',{cid,cap})}; // a DM from before base keys were kept
+  api.rebaseChat=async(cid,cap)=>{await needOpen(cid);return call('chat.rebase',{cid,cap})}; // a DM's base key after an account key change (release 21)
+  api.setOwner=async(cid,cap)=>{await needOpen(cid);return call('chat.owner',{cid,cap})}; // the owner key, from the owner's new account secret
   // ---- media over HTTP (SPEC.md 7.7): this connection vouches for a short-lived ticket, then raw encrypted pieces
   // travel over plain HTTP requests. A ticket dies with its connection, so every reconnect starts afresh. ----
   const FETCH=opts.fetch||(typeof fetch!=='undefined'?fetch.bind(globalThis):null);
@@ -156,15 +164,17 @@ function createHushAdapter(url,opts){
       const t=setTimeout(()=>{const k=waiting.indexOf(go);if(k>=0)waiting.splice(k,1);reject(mkErr('offline','Not connected to the Hush server'))},offlineWaitMs);waiting.push(go)})}
   // ---- the sign-in proof (SPEC.md 4.1): sign the server's challenge with the device key, or the account key ----
   const sessionMsg=(h,dev)=>'hush-session-v1|'+nonce+'|'+h+'|'+(dev||'');
-  async function doProve(){const idn=identity,h=idn.h;proven=null;api.proven=null;
-    if(idn.dev&&idn.signDev){try{await rawCall('prove',{h,dev:idn.dev,sig:await idn.signDev(sessionMsg(h,idn.dev))});proven=h;api.proven=h;return}
+  async function doProve(){const idn=identity,h=idn.h;proven=null;api.proven=null;let r=null;
+    if(idn.dev&&idn.signDev){try{r=await rawCall('prove',{h,dev:idn.dev,sig:await idn.signDev(sessionMsg(h,idn.dev))})}
       catch(e){if(!e||!['denied','invalid'].includes(e.code))throw e}}   // this device isn't listed on the profile yet: use the account key
-    await rawCall('prove',{h,pub:idn.pub,sig:await idn.signAcct(sessionMsg(h,''))});proven=h;api.proven=h}
+    if(!r)r=await rawCall('prove',{h,pub:idn.pub,sig:await idn.signAcct(sessionMsg(h,''))});
+    proven=h;api.proven=h;api.kv=r&&r.kv;if(opts.onKv)try{opts.onKv(api.kv)}catch{}}   // kv: the account's key version the server proved us against (release 21)
   function runProof(){if(proofP)return proofP;const h=identity.h;   // a proof for an account we have since switched away from settles nothing
     proofP=doProve().then(()=>{if(identity&&identity.h===h){staleRetry=false;api.identityError=null;settleProof(null)}},
     e=>{if(identity&&identity.h===h){
       if(e&&e.code==='unauth'&&/expired/.test(e.message||'')&&!staleRetry){staleRetry=true;setTimeout(()=>{if(identity&&identity.h===h)reconnectNow()},0);return} // the waiting callers stay waiting: the next hello signs in
-      api.identityError=e;settleProof(e)}}).finally(()=>{proofP=null});return proofP}
+      api.identityError=e;if(e&&e.code==='denied'&&opts.onDenied)try{opts.onDenied(e)}catch{} // the page looks whether the account's keys moved on without it (release 21)
+      settleProof(e)}}).finally(()=>{proofP=null});return proofP}
   const awaitProof=()=>new Promise((res,rej)=>proofWaiters.push({res,rej}));
   function settleProof(err){for(const w of proofWaiters.splice(0))err?w.rej(err):w.res()}
   function dropSubs(){for(const sub of subs.values())sub.dead=true;subs.clear()}
@@ -265,6 +275,9 @@ async function connectServer(){
   const unreachable=()=>'Can\u2019t reach the Hush server at '+url+'. Check that it\u2019s running, then this will reconnect on its own.';
   const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner();if(on)checkForUpdate()},
     caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onPower:(cid,held)=>askPower(cid,held),onEvict:cid=>onChatEvicted(cid),
+    onKv:kv=>{if(S.me&&!S.rekeying&&typeof kv==='number'&&kv>(S.me.kv||1))signedOutHere()}, // proven against newer keys than this device's: another device replaced them (release 21)
+    onDenied:()=>keysMovedOn(), // a refused sign-in: see whether the profile's keys moved on without this device
+    onClosed:code=>{if(code===4401)keysMovedOn()}, // closed by the server for that very reason: look now, not after the next sign-in attempt
     onBadges:b=>{S.badges=b||{};if(!S.me)return;renderList();if(S.chan){S.rendered=null;renderConv()}if(S.tab==='profile')setTab('profile')}}); // the operator's badge list came with the handshake
   await Promise.race([db.ready,new Promise(r=>setTimeout(r,5000))]);
   if(!db.online)SRV_ERR=db.error||unreachable();

@@ -95,9 +95,11 @@ const PLAIN_KEYS=new Set(['hush:applock','hush:lockFails','hush:lockAfter','hush
 const lsSecret=k=>typeof k==='string'&&k.startsWith('hush:')&&!PLAIN_KEYS.has(k);
 const lockCfg=()=>{try{return JSON.parse(localStorage.getItem('hush:applock')||'null')}catch{return null}};
 const lsPw=()=>{const c=lockCfg();return !!(c&&c.kind==='pw')};
-let SECM=null,SECK=null,SECP={},secSave=Promise.resolve(),secDirty=false; // the unsealed map, its key, writes made before it opened, the save chain
+let SECM=null,SECK=null,SECP={},secSave=Promise.resolve(),secDirty=false,lastSealed=null; // the unsealed map, its key, writes made before it opened, the save chain, the blob as this tab last read or wrote it
 const ls={get(k,d){if(lsSecret(k)){const m=SECM||SECP;return k in m?m[k]:d}try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch{return d}},
-  set(k,v){if(lsSecret(k)){const m=SECM||SECP;if(v==null)delete m[k];else m[k]=v;if(SECM)saveSecrets();return}try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+  set(k,v){if(lsSecret(k)){const m=SECM||SECP;
+    if(k==='hush:ids'&&Array.isArray(v)&&Array.isArray(m[k]))for(const t of m[k]){const i=v.findIndex(x=>x&&t&&x.handle===t.handle);if(i>=0&&(t.kv||1)>(v[i].kv||1))v[i]=t} // an account's newer keys (another tab replaced them) are never written over by a stale copy
+    if(v==null)delete m[k];else m[k]=v;if(SECM)saveSecrets();return}try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,JSON.stringify(v))}catch{}}};
 async function lockKey(pw,salt){const b=await crypto.subtle.importKey('raw',enc.encode(pw.normalize('NFKC')),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2',hash:'SHA-256',salt,iterations:600000},b,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
 async function sealBlob(k,json){const iv=crypto.getRandomValues(new Uint8Array(12));
@@ -105,8 +107,18 @@ async function sealBlob(k,json){const iv=crypto.getRandomValues(new Uint8Array(1
 async function unsealBlob(k,blob){const b=JSON.parse(blob);return JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(b.iv)},k,unb64u(b.ct))))}
 function saveSecrets(){ // one write per burst of changes, always of the latest map, under the key of that moment
   if(secDirty)return secSave;secDirty=true;
-  secSave=secSave.then(async()=>{secDirty=false;const k=SECK,m=SECM;if(!k||!m)return;localStorage.setItem('hush:sealed',await sealBlob(k,JSON.stringify(m)))}).catch(()=>{secDirty=false});
+  secSave=secSave.then(async()=>{secDirty=false;const k=SECK,m=SECM;if(!k||!m)return;
+    const disk=localStorage.getItem('hush:sealed');if(disk!==lastSealed){let theirs=null;if(disk)try{theirs=await unsealBlob(k,disk)}catch{} // another tab wrote in between: carry its changes along
+      if(!theirs){if(typeof location!=='undefined')location.reload();return} // gone, or under a key this tab no longer has (the last account was logged out there, or a lock was set): writing would leave a store nobody can open, or bring a logged-out account back
+      mergeSealed(m,theirs)}
+    const blob=await sealBlob(k,JSON.stringify(m));localStorage.setItem('hush:sealed',blob);lastSealed=blob}).catch(()=>{secDirty=false});
   return secSave}
+function mergeSealed(m,theirs){ // another tab wrote since this one last read the blob: keep an account's newer keys, the key-store entries this tab lacks, and a device-removal record in progress
+  const ids=Array.isArray(theirs['hush:ids'])?theirs['hush:ids']:[],mine=Array.isArray(m['hush:ids'])?m['hush:ids']:[];
+  for(const t of ids){const i=mine.findIndex(x=>x&&x.handle===t.handle);if(i>=0&&(t.kv||1)>(mine[i].kv||1))mine[i]=t}
+  const has=h=>mine.some(x=>x&&x.handle===h); // only for accounts this tab still has: one logged out here stays forgotten
+  for(const [k,v] of Object.entries(theirs)){if(k.startsWith('hush:ks:')&&v&&typeof v==='object'&&has(k.slice(8))){const o=m[k]&&typeof m[k]==='object'?m[k]:(m[k]={});for(const [cid,es] of Object.entries(v))for(const [e,raw] of Object.entries(es||{}))if(!(o[cid]&&o[cid][e]))(o[cid]=o[cid]||{})[e]=raw}
+    else if(k.startsWith('hush:rekey:')&&has(k.slice(11))&&v&&(!m[k]||(v.at||v.done||0)>(m[k].at||m[k].done||0)))m[k]=v}} // the record with the later heartbeat (or its 'done' mark) wins
 async function deviceKey(){ // made once by this browser, kept non-extractable in IndexedDB; { key, fresh }
   const made=await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']);
   if(typeof indexedDB==='undefined')throw new Error('noidb');
@@ -124,11 +136,12 @@ async function fallbackKey(){ // no IndexedDB here: the key sits next to the blo
   const fresh=!raw;if(fresh){raw=crypto.getRandomValues(new Uint8Array(32));localStorage.setItem('hush:devkey',b64u(raw))}
   return {key:await crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt','decrypt']),fresh}}
 // Opens the store with `key`, then moves any plain `hush:` entries (from before the sealed store, or an older page)
-// into it, writing the blob before the plain copies go. `fresh` says the key was only just made, so a blob that will
-// not open is from a key this browser lost: it is set aside under hush:sealed:old rather than left to block the page.
+// into it, writing the blob before the plain copies go. A blob the key will not open is from a key this browser no
+// longer has (lost, or replaced by a tab that logged the last account out): unless a password lock guards it, it is set
+// aside under hush:sealed:old and counted as read, so the fresh store writes over it rather than leaving a page that reloads.
 async function openStore(key,fresh){
   let m={},changed=false;const blob=localStorage.getItem('hush:sealed');
-  if(blob){try{m=await unsealBlob(key,blob)}catch(e){if(!fresh)throw e;localStorage.setItem('hush:sealed:old',blob);changed=true}}else changed=true;
+  if(blob){try{m=await unsealBlob(key,blob)}catch(e){if(lsPw())throw e;localStorage.setItem('hush:sealed:old',blob);changed=true}lastSealed=blob}else changed=true; // under a password lock only the password opens it; otherwise a blob this key doesn't open (a tab of a logged-out device wrote it last) is set aside and counts as read, so the fresh store writes over it instead of reloading
   const plain=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(lsSecret(k))plain.push(k)}
   for(const k of plain){if(!(k in m)){try{const v=JSON.parse(localStorage.getItem(k));if(v!=null){m[k]=v;changed=true}}catch{}}}
   for(const [k,v] of Object.entries(SECP)){if(v==null)delete m[k];else m[k]=v;changed=true}SECP={};
@@ -146,14 +159,14 @@ async function openSealed(pw){ // the password lock: the blob opens with the loc
 async function sealOn(pw){ // the lock password's key takes over from the device key, checked to open before the switch
   const salt=crypto.getRandomValues(new Uint8Array(16)),k=await lockKey(pw,salt);await secSave;
   const json=JSON.stringify(SECM),blob=await sealBlob(k,json);if(JSON.stringify(await unsealBlob(k,blob))!==json)throw new Error('seal');
-  SECK=k;localStorage.setItem('hush:sealed',blob);localStorage.setItem('hush:applock',JSON.stringify({kind:'pw',salt:b64u(salt)}));ls.set('hush:lockFails',null)}
+  SECK=k;localStorage.setItem('hush:sealed',blob);lastSealed=blob;localStorage.setItem('hush:applock',JSON.stringify({kind:'pw',salt:b64u(salt)}));ls.set('hush:lockFails',null)}
 async function sealChange(cur,pw){const c=lockCfg(),old=await lockKey(cur,unb64u(c.salt));await unsealBlob(old,localStorage.getItem('hush:sealed'));
   await secSave;const salt=crypto.getRandomValues(new Uint8Array(16)),k=await lockKey(pw,salt);
-  SECK=k;localStorage.setItem('hush:sealed',await sealBlob(k,JSON.stringify(SECM)));localStorage.setItem('hush:applock',JSON.stringify({kind:'pw',salt:b64u(salt)}))}
+  SECK=k;localStorage.setItem('hush:sealed',lastSealed=await sealBlob(k,JSON.stringify(SECM)));localStorage.setItem('hush:applock',JSON.stringify({kind:'pw',salt:b64u(salt)}))}
 async function sealOff(cur){ // back to the device key; nothing is ever written out plain
   const c=lockCfg(),k=await lockKey(cur,unb64u(c.salt));await unsealBlob(k,localStorage.getItem('hush:sealed'));
   let dk;try{dk=await deviceKey()}catch{dk=await fallbackKey()}await secSave;
-  SECK=dk.key;localStorage.setItem('hush:sealed',await sealBlob(dk.key,JSON.stringify(SECM)));localStorage.removeItem('hush:applock');ls.set('hush:lockFails',null)}
+  SECK=dk.key;localStorage.setItem('hush:sealed',lastSealed=await sealBlob(dk.key,JSON.stringify(SECM)));localStorage.removeItem('hush:applock');ls.set('hush:lockFails',null)}
 function forgetEntries(pred){ // drops every entry, sealed or plain, that `pred(key, value)` picks; returns how many
   let n=0;for(const m of [SECM,SECP])if(m)for(const k of Object.keys(m))if(pred(k,m[k])){delete m[k];n++}
   const gone=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(lsSecret(k)&&pred(k,null))gone.push(k)}
@@ -161,10 +174,14 @@ function forgetEntries(pred){ // drops every entry, sealed or plain, that `pred(
 async function forgetDevice(){ // every account and key this device holds: the blob, the device key, the lock settings
   await secSave.catch(()=>{});
   for(let i=localStorage.length-1;i>=0;i--){const k=localStorage.key(i);if(k&&k.startsWith('hush:')&&k!=='hush:theme')try{localStorage.removeItem(k)}catch{}}
-  SECM=null;SECK=null;SECP={};
+  SECM=null;SECK=null;SECP={};lastSealed=null;
   await new Promise(res=>{if(typeof indexedDB==='undefined'){res();return}try{const r=indexedDB.deleteDatabase('hush');r.onsuccess=r.onerror=r.onblocked=()=>res()}catch{res()}})}
 // Another tab of this page wrote the blob: take its map, so this tab's next write carries both tabs' changes.
-if(typeof addEventListener==='function')addEventListener('storage',e=>{if(e.key==='hush:sealed'&&e.newValue&&SECK&&!secDirty)unsealBlob(SECK,e.newValue).then(m=>{if(!secDirty)SECM=m}).catch(()=>{})});
+if(typeof addEventListener==='function')addEventListener('storage',e=>{if(e.key!=='hush:sealed'||!e.newValue||!SECK||secDirty)return;
+  unsealBlob(SECK,e.newValue).then(m=>{if(secDirty)return;SECM=m;lastSealed=e.newValue;const ids=Array.isArray(m['hush:ids'])?m['hush:ids']:[];
+    if(S.me&&!ids.some(x=>x&&x.handle===S.me.handle)){S.ids=ids;S.me=null;dropUnsealed();if(S.db&&S.db.prove)S.db.prove(null);if(S.ids.length)start(S.ids[0]);else showOnboard(false,'You logged out in another tab.')}}, // logged out in another tab: this one leaves the account too, and writes nothing of it back
+    ()=>location.reload())}); // a blob this tab can't open: the device key or the lock changed in another tab; a fresh start takes it up
+const rekeyPending=rec=>!!(rec&&typeof rec==='object'&&typeof rec.stage==='string'); // a removal record mid-way; a finished one is only a done mark
 /* ===== HUSH STORE END ===== */
 const hue=s=>{let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h};
 const safePhoto=p=>typeof p==='string'&&p.length<250000&&/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p)?p:null;
@@ -604,12 +621,14 @@ function noteTier(t){
   const p=P(),was=p.tier;if(was!==undefined&&TIERS.indexOf(t)<=TIERS.indexOf(was))return;
   p.tier=t;saveContacts();if(was!==undefined)window.dispatchEvent(new CustomEvent('hush:tier-up',{detail:{tier:t}}));
 }
-async function capsFor(cid){ // the best key this device holds for a chat, for the connector to open it with
+const ownerCapOld=async cid=>S.me.prev&&S.me.prev.own?b64u(await hkdf(ownIkm(S.me.prev),'hush-cap-v1','owner|'+cid)):null; // the owner key the account's previous secret gave (release 21)
+async function capsFor(cid){ // the keys this device holds for a chat, best first, for the connector to open it with
   let c=S.chatDocs.get(cid);
   if(!c){const s=await S.db.preview(cid);if(!s.exists)return null;c=Object.assign({id:cid},s.data());S.chatDocs.set(cid,c)}
-  if(typeOf(c)==='dm'){const e=epochOf(c);return (e>0&&await memberCap(c,e))||memberCap(c,0)} // the base key always lets you back in to heal
+  if(typeOf(c)==='dm'){const e=epochOf(c);return [e>0&&await memberCap(c,e),await memberCap(c,0),await dmBaseCapOld(c)].filter(Boolean)} // the base key always lets you back in to heal; after a key change the one from before is tried too
   const shown=await showMeta(c),me=S.me.handle;
-  if(shown.owner===me){noteTier('owner');return ownerCap(cid)}
+  if(shown.owner===me){noteTier('owner');const caps=[await ownerCap(cid),await ownerCapOld(cid)].filter(Boolean);if(S.rekeying)caps.reverse(); // the server knows the old owner key until this device replaces it (rekeyRun): while that runs it is tried first, so no open fails
+    const a=await adminSecret(c).catch(()=>null);return [...caps,a?await adminCapFrom(cid,a):null,await memberCap(c,epochOf(c))].filter(Boolean)} // then the admin and member keys: a chat whose owner key is no longer mine still opens to read
   if((shown.admins||[]).includes(me)){noteTier('admin');const a=await adminSecret(c);if(a)return adminCapFrom(cid,a)}
   return memberCap(c,epochOf(c));
 }
@@ -631,9 +650,9 @@ async function syncWraps(c){ // wrap the chat keys this device holds for my othe
     if(n){await S.db.doc('channels/'+c.id).update({keys});done[c.id]=mine;ls.set('hush:wrapped:'+me,done)}
   }catch{wrapSynced.delete(c.id)}
 }
-async function rotateTo(c,v,extra){ // a fresh chat key for everyone in `v.members`, plus a fresh sealed description; returns the new epoch
+async function rotateTo(c,v,extra,opts){ // a fresh chat key for everyone in `v.members`, plus a fresh sealed description; returns the new epoch. opts.noLoad: the profiles were fetched a moment ago
   if(typeOf(c)!=='dm'&&!(v.members||[]).includes(S.me.handle))throw new Error('notmember'); // a list that leaves me out is stale or forged: never hand the chat to it
-  const e=epochOf(c)+1,raw=crypto.getRandomValues(new Uint8Array(32));await loadDir(v.members,true); // fresh profiles before wrapping for everyone
+  const e=epochOf(c)+1,raw=crypto.getRandomValues(new Uint8Array(32));if(!(opts&&opts.noLoad))await loadDir(v.members,true); // fresh profiles before wrapping for everyone
   const keys=await wrapAll(raw,v.members,c.id,e),meta=typeOf(c)==='dm'?undefined:await sealMeta(c.id,e,raw,v);
   await S.db.rotateChat(c.id,Object.assign({epoch:e,keys,cap:await memberCapFrom(c.id,e,raw)},meta?{meta}:{},extra||{}));
   ksPut(c.id,e,b64(raw));ls.set('hush:inv:'+c.id,null);
@@ -668,7 +687,7 @@ async function allRaws(c){const out={};for(const e of epochsOf(c)){const k=await
 const hiddenPost=(p,o)=>!!(p&&p.sl===1&&o&&o.text!=null&&!o.verified); // a sealed message whose hidden signature doesn't check out is never shown under anyone's name
 async function removeOwn(cid,p){ // delete your own sealed message: prove it's yours, wipe it, then remove it
   const k=p.on||0,ref=S.db.doc(`channels/${cid}/posts/${p._id}`);
-  await ref.update({del:true,n:'',d:'',oh:'',on:k+1,ot:await ownTok(cid,p._id,k)});
+  await ref.update({del:true,n:'',d:'',oh:'',on:k+1,ot:await ownTokFor(cid,p)});
   await ref.delete();
 }
 function openPost(c,p,kind){
@@ -686,7 +705,7 @@ function openPost(c,p,kind){
       on=typeof o.on==='string'&&/^[A-Za-z0-9_-]+$/.test(o.on)?o.on:null;
     }catch{text=null}}
     const s=await senderKeys(p.from); // someone who joined by link may be nobody this page has looked up yet
-    if(s&&(kind==='comment'||typeOf(c)!=='channel'||isAdminH(c,p.from))){try{verified=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(s.sig,'s'),unb64(p.sig),postData(c.id,p))}catch{}}
+    if(s&&(kind==='comment'||typeOf(c)!=='channel'||isAdminH(c,p.from)))verified=await verifyBy(p.from,p.sig,postData(c.id,p),p.ts,true); // a key the sender still had when the message was dated counts too (release 21)
     if(text==null||!s)setTimeout(()=>S.cache.delete(key));
     if(text&&kind!=='comment')indexMsg(key,c,p,text);
     return {text,media,poll,reply,fwd,on,verified,known:!!s,nokey};
@@ -1209,6 +1228,7 @@ async function ensureDmDoc(c){ // the first message in a DM creates it: a record
   if(s.exists){const d=Object.assign({id:c.id},s.data());S.chatDocs.set(c.id,d);for(const x of [c,convById(c.id)])if(x){x.epoch=d.epoch||0;x.keys=d.keys||{}}
     S.dmPeers[c.id]=peer;if(!dmInfo(c.id))setDmInfo(c.id,{peer});
     await ensureInbox(Object.assign({},c,{members:[...new Set([S.me.handle,peer])]}),null,true);return}
+  dmIds.delete(peer);if(c.id!==await dmIdFor(peer))throw new Error('stale'); // the id this chat was opened under is from before a key change: never create a chat there
   const req=peer!==S.me.handle&&!!(S.dir[peer]&&S.dir[peer].requests===true)&&!(dmInfo(c.id)&&dmInfo(c.id).req==='ok');
   await S.db.createChat(c.id,{type:'dm',epoch:0,ts:Date.now(),last:null},{m:await memberCapFrom(c.id,0,secret)});
   S.dmPeers[c.id]=peer;if(req)setDmInfo(c.id,{peer,req:'out'});else if(!dmInfo(c.id))setDmInfo(c.id,{peer});
@@ -1236,7 +1256,7 @@ async function sendNowScheduled(cid,p){
   const c=convById(cid),o=await openPost(c,p);if(o.text==null)throw new Error('decrypt');
   const n=await sealPost(c,buildBody(o),Date.now());
   if(p.sl===1){const k=p.on||0,w=await wrapPost(c,n,p._id,k+1);
-    await S.db.doc(`channels/${cid}/posts/${p._id}`).update({ts:w.ts,e:w.e,n:w.n,d:w.d,oh:w.oh,on:w.on,ot:await ownTok(cid,p._id,k),exp:w.exp||0});
+    await S.db.doc(`channels/${cid}/posts/${p._id}`).update({ts:w.ts,e:w.e,n:w.n,d:w.d,oh:w.oh,on:w.on,ot:await ownTokFor(cid,p),exp:w.exp||0});
     await S.db.doc('channels/'+cid).update({ts:w.ts,last:lastOf(Object.assign(w,{_id:p._id}))});return}
   await S.db.doc(`channels/${cid}/posts/${p._id}`).update({ts:n.ts,e:n.e,iv:n.iv,ct:n.ct,sig:n.sig,exp:n.exp||0});
   await S.db.doc('channels/'+cid).update({ts:n.ts,last:lastOf(n)});
@@ -1269,7 +1289,7 @@ function openSchedulePicker(onPick){
 async function editPost(cid,p,o,text){
   const c=convById(cid),n=await sealPost(c,buildBody({text,media:o.media,poll:o.poll,reply:o.reply,fwd:o.fwd}),p.ts,p.exp||0),edited=Date.now();
   if(p.sl===1){const k=p.on||0,w=await wrapPost(c,n,p._id,k+1);
-    await S.db.doc(`channels/${cid}/posts/${p._id}`).update({e:w.e,n:w.n,d:w.d,oh:w.oh,on:w.on,ot:await ownTok(cid,p._id,k),edited});
+    await S.db.doc(`channels/${cid}/posts/${p._id}`).update({e:w.e,n:w.n,d:w.d,oh:w.oh,on:w.on,ot:await ownTokFor(cid,p),edited});
     if(c.last&&c.last.sig===p.sig)await S.db.doc('channels/'+cid).update({last:lastOf(Object.assign(w,{_id:p._id,edited}))});return}
   await S.db.doc(`channels/${cid}/posts/${p._id}`).update({e:n.e,iv:n.iv,ct:n.ct,sig:n.sig,edited});
   if(c.last&&c.last.sig===p.sig)await S.db.doc('channels/'+cid).update({last:lastOf(Object.assign(n,{edited}))});
@@ -1789,7 +1809,7 @@ async function kickMember(cid,h,opt={}){ // a new key for everyone else, and a s
 }
 async function rotateAdmins(cid,admins){ // a fresh admin secret, wrapped to the owner and the current admins only
   const [c,shown]=await chatAnd(cid);const secret=crypto.getRandomValues(new Uint8Array(32)),who=[...new Set([shown.owner||S.me.handle,...admins])];
-  await loadDir(who);const akeys={};for(const h of who)if(h===S.me.handle||S.dir[h])Object.assign(akeys,await wrapKey(secret,h,cid+'#a'));
+  await loadDir(who,true);const akeys={};for(const h of who)if(h===S.me.handle||S.dir[h])Object.assign(akeys,await wrapKey(secret,h,cid+'#a'));
   await S.db.setAdmins(cid,akeys,await adminCapFrom(cid,secret));ksPut(cid,'a',b64(secret));
   for(const x of [S.chatDocs.get(cid),convById(cid)])if(x)x.akeys=akeys;
 }
@@ -1804,7 +1824,7 @@ async function unban(cid,h){const [c,shown]=await chatAnd(cid);if(c.visibility==
 const reconciled=new Set();
 async function reconcileSvc(c,posts){ // an admin keeps the sealed member list in step with "joined" and "left" notes
   if(!c||typeOf(c)==='dm'||c.visibility==='public'||!isAdmin(c))return;
-  for(const p of posts||[]){if(!p||!p.svc||!['join','leave'].includes(p.svc)||!p.from||reconciled.has(p._id))continue;
+  for(const p of posts||[]){if(!p||!p.svc||!['join','leave'].includes(p.svc)||!p.from||p.prev||reconciled.has(p._id))continue; // a note signed by a key its author has since replaced is shown, never acted on
     const members=c.members||[];
     if(p.svc==='join'&&!members.includes(p.from)){reconciled.add(p._id);
       try{const [cur]=await chatAnd(c.id);await S.db.doc('channels/'+c.id).update({meta:await sealMetaFor(cur,Object.assign(metaOf(c),{members:[...members,p.from]}))});c.members=[...members,p.from]}catch{reconciled.delete(p._id)}}
@@ -2143,7 +2163,7 @@ async function openProfile(h){
     body.append(grid,p1);
     if(!changed){const vb=el('button',isVerified(h)?'secondary verified':'secondary',isVerified(h)?'\u2713 Verified':'Mark as verified');vb.style.width='100%';
       vb.onclick=()=>{if(isVerified(h)){delete S.verified[h];vb.textContent='Mark as verified';vb.className='secondary'}
-        else{if(!S.pins[h])S.pins[h]=keysOf(S.dir[h]);S.verified[h]=fpOf(S.pins[h]);vb.textContent='\u2713 Verified';vb.className='secondary verified'}saveContacts()};
+        else{if(!S.pins[h])S.pins[h]=pinOf(S.dir[h]);S.verified[h]=fpOf(S.pins[h]);vb.textContent='\u2713 Verified';vb.className='secondary verified'}saveContacts()};
       body.append(vb,el('p','hint','Mark as verified once the numbers match. If the code ever changes, Hush will warn you and pause the chat until you check again.'))}
   }
   body.append(blk);
@@ -2250,6 +2270,12 @@ function settingsLogin(body,me){
       body.append(el('p','hint','Log in on another device with any of these and your password. Or with no password: on the new device tap Log in \u2192 Log in with my other device, and scan the code this one shows. Your chats come along.'))}
     else{const r=html('button','menu-item flush',I.lockMd+'<span>Add a password</span>');r.append(el('span','role','Not set up'));r.onclick=()=>openSetupLogin();body.append(r)}}
   {const lk=html('button','menu-item flush',I.device+'<span>Link a new device</span>');lk.append(el('span','role','Show code'));lk.onclick=openLinkScanner;body.append(lk)}
+  {const list=el('div');body.append(el('div','menu-label flush','Your devices'),list,el('p','hint','Removing a device gives your account new keys. It is locked out at once, your other devices are logged out and link again from here, and your contacts see that your security code changed.'));
+    const row=(name,sub,fn)=>{const r=html('div','menu-item flush static',I.device);r.append(el('span',null,name),el('span','role',sub));if(fn){const b=el('button','link sm danger-t','Remove');b.onclick=fn;r.append(b)}list.append(r)};
+    verifiedDevs(me.handle).then(async devs=>{if(S.me!==me||!list.isConnected)return;const all=(S.dir[me.handle]&&S.dir[me.handle].devs)||{},mine=me.dev&&me.dev.id; // the device's name on the profile, never the display name
+      for(const d of devs.sort((a,b)=>(b.id===mine)-(a.id===mine)||(b.ts||0)-(a.ts||0))){const e=d.id===mine?me.dev:all[d.id],name=(await openDevName(d.id,e&&e.nm))||'A device',key=await devShort({id:d.id,x:d.ecdh.x,y:d.ecdh.y,sx:d.sig.x,sy:d.sig.y});
+        row(name,key+(d.id===mine?' · This device':' · '+fmtListTime(d.ts||0)),d.id===mine?null:()=>removeDevice(d.id,name,key))}
+      for(const i of Object.keys(all))if(!devs.some(d=>d.id===i))row((await openDevName(i,all[i]&&all[i].nm))||'A device','Can’t be checked',null)}).catch(()=>{})}
   {const li=loginInfo(me.handle);if(li){const r=html('button','menu-item flush',I.lockMd+'<span>'+(li.loc?'Change password':'Add a password')+'</span>');r.append(el('span','role',li.loc?'On':'Optional'));r.onclick=openSetupLogin;body.append(r)}}
 }
 function settingsAdvanced(body,me){
@@ -2346,41 +2372,46 @@ async function openDevName(id,nm){if(typeof nm!=='string'||nm.split('.').length!
   try{return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(a),additionalData:enc.encode('hush-devname-v1|'+S.me.handle+'|'+id)},await vaultKey(),unb64u(b)))}catch{return null}}
 function vaultKey(){
   const k='vault:'+S.me.handle;
-  if(!S.chanKeys.has(k))S.chanKeys.set(k,(async()=>aesKey(await myKey('e'),await pubKey(S.me.ecdh,'e'),'hush-vault:'+S.me.handle))());
+  if(!S.chanKeys.has(k))S.chanKeys.set(k,vaultKeyOf(S.me));
   return S.chanKeys.get(k);
 }
 // The vault's copy of the login note, read back with every login of the account (all), not just the one this device
 // used: dropping all made a device that logged in by username forget the email login, and then wrote that loss back.
 const loginPref=l=>l&&typeof l.login==='string'?{login:l.login,...(typeof l.loc==='string'?{loc:l.loc}:{}),...(l.all&&typeof l.all==='object'?{all:Object.fromEntries(Object.entries(l.all).filter(([k,v])=>normLogin(k)===k&&typeof v==='string'&&/^[A-Za-z0-9_-]{43}$/.test(v)))}:{})}:undefined;
+async function readVaultWith(id){ // the vault as `id`'s keys find it: the parsed object, or null when there is none; throws when it can't be read or opened
+  const s=await S.db.doc(await vaultPathOf(id)).get();if(!s.exists)return null;const v=s.data();
+  return JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('vault|'+id.handle)},await vaultKeyOf(id),unb64(v.ct))))}
+function applyVault(o){ // what the vault holds, into the page: contacts, pinned keys, verified marks and the settings
+  const arr=Array.isArray(o)?o:(o.contacts||[]);
+  S.contacts=arr.filter(c=>c&&typeof c.id==='string'&&typeof c.name==='string');
+  const pr=!Array.isArray(o)&&o.prefs||{};
+  const okK=k=>k&&k.ecdh&&k.sig&&typeof k.ecdh.x==='string'&&typeof k.ecdh.y==='string'&&typeof k.sig.x==='string'&&typeof k.sig.y==='string';
+  const okP=p=>p&&p.sig&&typeof p.sig.x==='string'&&typeof p.sig.y==='string'&&Number.isFinite(p.until);
+  if(!Array.isArray(o)&&o.pins&&typeof o.pins==='object')Object.entries(o.pins).forEach(([h,k])=>{if(okK(k))S.pins[h]=Object.assign(keysOf(k),Array.isArray(k.prev)?{prev:k.prev.filter(okP).slice(-8).map(p=>({sig:{x:p.sig.x,y:p.sig.y},until:p.until}))}:{})});
+  if(!Array.isArray(o)&&o.verified&&typeof o.verified==='object')Object.entries(o.verified).forEach(([h,v])=>{if(typeof v==='string')S.verified[h]=v});
+  S.prefs={pinned:Array.isArray(pr.pinned)?pr.pinned.filter(x=>typeof x==='string'):[],muted:pr.muted&&typeof pr.muted==='object'?pr.muted:{},archived:Array.isArray(pr.archived)?pr.archived.filter(x=>typeof x==='string'):[],backup:pr.backup===true,
+    rec:pr.rec&&typeof pr.rec.loc==='string'?{loc:pr.rec.loc,ts:+pr.rec.ts||0}:undefined,
+    login:loginPref(pr.login),
+    blocked:Array.isArray(pr.blocked)?pr.blocked.filter(h=>typeof h==='string'&&validHandle(h)):[],
+    blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[],
+    secure:pr.secure===true||undefined,tier:TIERS.includes(pr.tier)?pr.tier:undefined,
+    dms:Object.fromEntries(Object.entries(pr.dms&&typeof pr.dms==='object'?pr.dms:{}).filter(([cid,i])=>/^d[A-Za-z0-9_-]{22}$/.test(cid)&&i&&typeof i==='object'&&!Array.isArray(i)&&validHandle(i.peer)&&(i.req===undefined||['in','out','ok','no'].includes(i.req))).map(([cid,i])=>[cid,Object.assign({peer:i.peer},i.req?{req:i.req}:{})])), // each one-on-one chat under its person (SPEC.md 5.6): the alias a key change relies on
+    pub:Array.isArray(pr.pub)?pr.pub.filter(x=>typeof x==='string'&&/^[gc][A-Za-z0-9]{12}$/.test(x)):[]}}
 async function loadContacts(){
-  let vaultOk=false;S.contacts=[];S.prefs={pinned:[],muted:{},archived:[]};S.pins={};S.verified={};S.warned=new Set();S.contactsReady=false;rebuildNames();
+  S.contacts=[];S.prefs={pinned:[],muted:{},archived:[]};S.pins={};S.verified={};S.warned=new Set();S.contactsReady=false;S.vaultOk=undefined;rebuildNames();
   if(!S.db)return;const me=S.me.handle;
-  let s;
-  const readVault=async()=>S.db.doc(await vaultPath(me)).get();
-  try{s=await readVault()}
-  catch{await new Promise(r=>setTimeout(r,800));try{s=await readVault()}catch{}}  // device binding may still be settling on a fresh login; give it a moment
-  try{if(!s){S.contactsReady=true;return}
-    if(S.me.handle!==me)return;
-    if(s.exists){const v=s.data();const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode('vault|'+me)},await vaultKey(),unb64(v.ct));
-      const o=JSON.parse(dec.decode(pt));const arr=Array.isArray(o)?o:(o.contacts||[]);
-      S.contacts=arr.filter(c=>c&&typeof c.id==='string'&&typeof c.name==='string');
-      const pr=!Array.isArray(o)&&o.prefs||{};
-      const okK=k=>k&&k.ecdh&&k.sig&&typeof k.ecdh.x==='string'&&typeof k.ecdh.y==='string'&&typeof k.sig.x==='string'&&typeof k.sig.y==='string';
-      if(!Array.isArray(o)&&o.pins&&typeof o.pins==='object')Object.entries(o.pins).forEach(([h,k])=>{if(okK(k))S.pins[h]=keysOf(k)});
-      if(!Array.isArray(o)&&o.verified&&typeof o.verified==='object')Object.entries(o.verified).forEach(([h,v])=>{if(typeof v==='string')S.verified[h]=v});
-      S.prefs={pinned:Array.isArray(pr.pinned)?pr.pinned.filter(x=>typeof x==='string'):[],muted:pr.muted&&typeof pr.muted==='object'?pr.muted:{},archived:Array.isArray(pr.archived)?pr.archived.filter(x=>typeof x==='string'):[],backup:pr.backup===true,
-        rec:pr.rec&&typeof pr.rec.loc==='string'?{loc:pr.rec.loc,ts:+pr.rec.ts||0}:undefined,
-        login:loginPref(pr.login),
-        blocked:Array.isArray(pr.blocked)?pr.blocked.filter(h=>typeof h==='string'&&validHandle(h)):[],
-        blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[],
-        secure:pr.secure===true||undefined,tier:TIERS.includes(pr.tier)?pr.tier:undefined}}
-    vaultOk=true}
-  catch{toast('Your contacts couldn\u2019t be unlocked on this device.')}
-  S.contactsReady=true;
-  if(vaultOk&&s&&!s.exists&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;S.prefs.tier='';saveContacts()} // new account: Message backup on from the start, and no power tier yet
-  if(vaultOk&&S.me.handle===me&&backupOn())S.keySync=syncBackup().then(n=>{if(n&&S.me&&S.me.handle===me)keysArrived()}).catch(()=>{}); // every app open: take the keys the backup has, add the ones it lacks
+  let o=null,ok=false,err=null;
+  for(let i=0;i<2&&!ok;i++){try{o=await readVaultWith(S.me);ok=true}catch(e){err=e;if(!i)await new Promise(r=>setTimeout(r,800))}}  // device binding may still be settling on a fresh login; give it a moment
+  if(S.me.handle!==me)return;
+  if(!ok&&err&&typeof err.code==='string'){S.vaultOk=false;S.contactsReady=true;return} // the server refused or the connection dropped: nothing to show, and nothing is written over the vault (saveContacts)
+  if(ok&&o)try{applyVault(o)}catch{ok=false}
+  if(!ok)toast('Your contacts couldn\u2019t be unlocked on this device.');
+  S.vaultOk=ok;S.contactsReady=true;
+  const pending=o===null&&!!(ls.get('hush:rekey:'+me,null)||{}).stage&&!!(S.me.prev&&S.me.prev.ecdhPriv); // a device removal half done: finishRekey writes the new vault from the old one, so nothing is saved here yet
+  if(ok&&!pending&&o===null&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;S.prefs.tier='';saveContacts()} // new account: Message backup on from the start, and no power tier yet
+  if(ok&&!pending&&S.me.handle===me&&backupOn())S.keySync=syncBackup().then(n=>{if(n&&S.me&&S.me.handle===me)keysArrived()}).catch(()=>{}); // every app open: take the keys the backup has, add the ones it lacks
   if(tierQueued&&tierQueued.h===me){const t=tierQueued.t;tierQueued=null;noteTier(t)}
-  if(vaultOk&&S.me.handle===me){const r=recLocal(me),v=S.prefs.rec; // tell your other devices about words set up here (and words set up before this update)
+  if(ok&&!pending&&S.me.handle===me){const r=recLocal(me),v=S.prefs.rec; // tell your other devices about words set up here (and words set up before this update)
     if(r&&r.loc&&r.conf!==false&&(!v||(v.loc!==r.loc&&(r.ts||0)>(v.ts||0)))){S.prefs.rec={loc:r.loc,ts:r.ts||Date.now()};saveContacts()}
     // Keep the login note and its vault copy in step, so a login saved on the server survives a cleared browser.
     const hint=reconcileLoginHint(loginInfo(me),S.prefs.login);
@@ -2398,6 +2429,7 @@ let vaultQ=Promise.resolve();
 const pwVerified=new Map(); // account -> {login, loc}: a box address just proven right by logging in here with the password
 function saveContacts(keepLogin){ // keepLogin: this save carries a password change made here, so its box addresses win
   if(!S.contactsReady||!S.db)return Promise.resolve();
+  if(S.vaultOk===false){if(!S.vaultWarned){S.vaultWarned=true;toast('Your settings can’t be saved on this device until your contacts can be unlocked. Reload to try again.')}return Promise.resolve()} // a device that could not read its vault never writes an empty one over it
   const me=S.me.handle,doc=JSON.parse(JSON.stringify({v:3,contacts:S.contacts,prefs:P(),pins:S.pins,verified:S.verified}));rebuildNames();renderContacts();renderList();
   vaultQ=vaultQ.then(async()=>{
     // saved whole, so a device still holding the addresses from before another device's password change would put them back
@@ -2710,6 +2742,7 @@ function parseInto(parent,t,depth){
 function richText(t){const f=document.createDocumentFragment();parseInto(f,t,0);return f}
 function plainText(t){return String(t||'').replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,'$1').replace(/\|\|[\s\S]*?\|\|/g,'\u2022\u2022\u2022\u2022').replace(/```|\*\*|__|\+\+|~~|`/g,'')}
 /* ---------- key pinning: remember each person's key the first time, warn if it ever changes ---------- */
+const pinOf=d=>Object.assign(keysOf(d),Array.isArray(d.prev)?{prev:d.prev.filter(p=>p&&p.sig&&typeof p.sig.x==='string'&&typeof p.sig.y==='string'&&Number.isFinite(p.until)).slice(-8).map(p=>({sig:{x:p.sig.x,y:p.sig.y},until:p.until}))}:{}); // a pin with the profile's key history as first seen: their older messages verify by it
 const keyChanged=h=>!!(S.me&&h!==S.me.handle&&S.pins&&S.pins[h]&&S.dir[h]&&!sameKeys(S.pins[h],S.dir[h]));
 const fpOf=k=>k?[k.ecdh.x,k.sig.x].join('.'):'';
 const isVerified=h=>!!(S.verified&&S.pins&&S.pins[h]&&S.verified[h]===fpOf(S.pins[h])&&!keyChanged(h));
@@ -2718,7 +2751,7 @@ function pinAll(){
   if(!S.contactsReady||!S.me)return;let added=false;
   const hs=new Set();(S.contacts||[]).forEach(c=>c.handle&&hs.add(c.handle));S.convs.forEach(c=>(c.members||[]).forEach(h=>hs.add(h)));
   const cur=curConv();if(cur)(cur.members||[]).forEach(h=>hs.add(h));
-  hs.forEach(h=>{if(h!==S.me.handle&&!S.pins[h]&&S.dir[h]){S.pins[h]=keysOf(S.dir[h]);added=true}});
+  hs.forEach(h=>{if(h!==S.me.handle&&!S.pins[h]&&S.dir[h]){S.pins[h]=pinOf(S.dir[h]);added=true}});
   if(added){clearTimeout(pinSaveT);pinSaveT=setTimeout(saveContacts,1500)}
   checkKeys();
 }
@@ -2726,15 +2759,29 @@ function checkKeys(){
   Object.keys(S.pins||{}).forEach(h=>{if(keyChanged(h)&&!S.warned.has(h)){S.warned.add(h);
     toast(`\u26a0\ufe0f ${displayName(h)}\u2019s security code changed`,'Review',()=>openProfile(h))}});
 }
-function acceptKey(h){
-  if(!S.dir[h])return;S.pins[h]=keysOf(S.dir[h]);delete S.verified[h];S.warned.delete(h);
+async function acceptKey(h){
+  if(!S.dir[h])return;
+  for(const c of S.convs)if(typeOf(c)==='dm'&&!isSelf(c)&&dmPeer(c)===h)await dmBaseBits(c).catch(()=>{}); // the secret our chat began with, while S.pins still gives their old key: its history stays readable (release 21)
+  const old=S.pins[h];S.pins[h]=Object.assign(keysOf(S.dir[h]),old&&old.sig?{prev:[...(old.prev||[]).slice(-7),{sig:old.sig,until:Date.now()}]}:{}); // the key accepted before stays pinned as history: their old messages verify by it, and by nothing the server could name
+  delete S.verified[h];S.warned.delete(h);
   S.cache.clear();S.chanKeys.clear();saveContacts();toast(`Accepted ${displayName(h)}\u2019s new security code`);
-  if(S.chan){const id=S.chan;setTimeout(()=>openConv(id),50)}
+  dmIds.delete(h);for(const [id,c] of S.previews)if(typeOf(c)==='dm'&&dmPeer(c)===h&&!dmInfo(id)&&!S.convs.some(x=>x.id===id))S.previews.delete(id); // the id their old key gave: a chat opened under it, never created, is forgotten
+  if(S.chan){const id=S.chan;setTimeout(()=>convById(id)?openConv(id):openDm(h),50)} // the open chat again, or the one their key names now
+  rewrapFor(h).catch(()=>{});
+}
+async function rewrapFor(h){ // after accepting someone's new key: our chat keys to their devices again (wrapKey refused while it was unaccepted), and a fresh key for our one-on-one chat. Once per key version of theirs.
+  const me=S.me.handle,k='hush:rewrapped:'+h,kv=(S.dir[h]&&S.dir[h].kv)||1,was=ls.get(k,null),done=was&&was.kv===kv&&Array.isArray(was.cids)?was:{kv,cids:[]};
+  for(const c of S.convs.slice()){if(!S.me||S.me.handle!==me)return;if(done.cids.includes(c.id))continue;const dm=typeOf(c)==='dm';
+    if(dm?(isSelf(c)||dmPeer(c)!==h||epochOf(c)<1):(c.visibility==='public'||!(c.members||[]).includes(h)||!(await adminSecret(c).catch(()=>null))))continue;
+    let ok=false;for(let rl=0;!ok;){await pause(300);
+      try{if(dm){await rotateTo(c,{members:[me,h]});await S.db.rebaseChat(c.id,await memberCap(c,0))}else await resendKeys(c.id,h);ok=true} // the one-on-one chat's base key from the two current keys, too: a removal that found their key unaccepted left it
+      catch(e){if(e&&e.code==='ratelimit'){await pause(REKEY_BACKOFF[Math.min(rl++,REKEY_BACKOFF.length-1)]);continue}break}}
+    if(ok){done.cids.push(c.id);ls.set(k,done)}}
 }
 function keyWarnBox(h,onReview){
   const w=el('div','keywarn');w.innerHTML=I.shield;const m=el('div','kw-main');
   m.append(el('b',null,`${displayName(h)}\u2019s security code changed`),
-    el('span',null,'Hush accounts keep the same code forever, so this is unusual. It can mean someone is trying to intercept your messages. Check with them in person or on a call before you accept it.'));
+    el('span',null,'A code changes when someone removes a lost device or sets their account up again — or when someone is trying to intercept your messages. Check with them in person or on a call before you accept it.'));
   const row=el('div','kw-row');const rv=el('button','secondary','Review');rv.onclick=onReview||(()=>openProfile(h));
   const ok=el('button','secondary danger-t','Accept new code');ok.onclick=()=>{if(confirm(`Only accept if ${displayName(h)} confirmed the change. Accept their new security code?`))acceptKey(h)};
   row.append(rv,ok);m.append(row);w.append(m);return w;
@@ -2799,7 +2846,8 @@ function openRestore(prefill){
       ls.set('hush:recovered:'+id.handle,Date.now());S.resetFor={handle:id.handle}; // path three: the password was forgotten, so a new one is set next
       if(!(await enterAccount(id))){go.disabled=false;go.textContent='Restore account';return}
       close();toast(S.backupRestored?'Welcome back, '+id.name+'. Your past messages are back too.':'Welcome back, '+id.name);
-    }catch(e){err.textContent=e&&e.message==='nomatch'?'Those words don\u2019t match an account. Check the order and spelling.':'Couldn\u2019t restore. Check your connection and try again.';
+    }catch(e){err.textContent=e&&e.message==='nomatch'?'Those words don\u2019t match an account. Check the order and spelling.'
+        :e&&e.message==='stale'?'These recovery words are from before your account\u2019s keys were replaced. Use a device you\u2019re still logged in on, then make new words. If you aren\u2019t logged in anywhere, these words can\u2019t bring the account back: whoever replaced the keys has it.':'Couldn\u2019t restore. Check your connection and try again.';
       go.disabled=false;go.textContent='Restore account'}};
 }
 async function enterAccount(id){ // shared by log in and restore
@@ -3078,8 +3126,203 @@ async function claimLink(text){
     throw new Error('timeout')})();
   return {key:await devShort(devk),done,cancel:()=>{stop=true}};
 }
-function signedOutHere(){
-  const h=S.me.handle;S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);
+/* ---------- device removal (SPEC.md 14.15, release 21) ----------
+   Every device holds the account's private keys, so a lost one is locked out by giving the account new keys: this
+   device publishes them (kv+1) with itself as the only device left, the server closes the account's other connections
+   and refuses the old keys, and this device then moves what the old keys guarded (vault, chat-list notes, message
+   backup, password boxes), changes the chat keys it can and re-bases its one-on-one chats so the old shared secrets no
+   longer open them. The old keys stay here as S.me.prev (the private parts for 30 days) so old notes and messages still
+   open and verify. The run is a stage machine kept in the sealed store from the first server write on, so a reload or a
+   dropped connection mid-way picks it up where it stopped (finishRekey, at start). */
+const REKEY_BACKOFF=[2000,5000,15000,30000],REKEY_NET='Couldn’t reach the server. Check your connection.';
+const withLock=(name,opts,fn)=>typeof navigator!=='undefined'&&navigator.locks?navigator.locks.request(name,opts,fn):fn(true); // one tab at a time runs a removal; a lock dies with its tab
+const signWith=async(jwk,msg)=>b64u(new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},await crypto.subtle.importKey('jwk',jwk,DS,false,['sign']),enc.encode(msg)))); // a sign-in signature by any account key, the old one included
+function rekeyCaches(h){ // everything derived from the account keys, or from which keys this device believes it has
+  S.keys.clear();S.chanKeys.clear();S.cache.clear();S._vp=null;delete backupPaths[h];dmIds.clear();S.dmPeers={};devCache.clear();wrapSynced.clear();tagCache.clear();unsealCache.clear();metaCache.clear();healed.clear();loginHealed.delete(h);baseDone.clear()}
+function rekeySheet(title){ // the locked progress sheet of a removal: one status line, and a button when a tap is needed
+  const {body,close}=sheet(title,{locked:true}),line=el('div','link-wait'),spin=el('span','spin'),txt=el('span'),box=el('div');line.append(spin,txt);body.append(line,box);
+  const ask=(text,label,then)=>new Promise(res=>{txt.textContent=text;spin.hidden=true;box.replaceChildren();const b=el('button','primary',label);b.style.width='100%';b.onclick=()=>{box.replaceChildren();spin.hidden=false;if(then)then();res()};box.append(b)});
+  return {step:t=>{txt.textContent=t;spin.hidden=false;box.replaceChildren()},retry:t=>ask(t,'Try again'),fail:t=>ask(t,'Close',close),
+    done:node=>{close();const s=sheet('Device removed',{locked:true}),row=el('div','row2'),w=el('button','secondary','Make new recovery words'),ok=el('button','primary','Done');
+      const end=()=>{s.close();if(S.tab==='profile')setTab('profile')};w.onclick=()=>{end();openBackup()};ok.onclick=end;row.append(w,ok);s.body.append(node,row)}};
+}
+function rekeyPassword(h,li){ // the new password a removal asks for when the account has one: the lost device may know the old one
+  return new Promise(res=>{const {body,close}=sheet('Choose a new password',{locked:true}),login=li.login||h,strong=isSecure(h);
+    body.append(el('p',null,'The removed device may know your current password, so choose a new one. It replaces the old one for every device.'));
+    const {f:f1,i:p1}=pwField(strong?'New password (at least 12 characters)':'New password','new-password'),{f:f2,i:p2}=pwField('Type it again','new-password');
+    const go=el('button','primary','Continue'),no=el('button','link','Cancel'),err=el('div','err');go.style.width='100%';
+    body.append(f1,pwMeter(p1,()=>({login:isHandleLogin(login)?null:login,handle:h})),f2,go,err,no);setTimeout(()=>p1.focus(),50);
+    no.onclick=()=>{close();res(null)};
+    go.onclick=async()=>{const pw=p1.value;err.textContent='';
+      const bad=loginsOf(h).map(l=>pwProblem(pw,isHandleLogin(l)?null:l,h)).find(Boolean)||(strong&&pw.length<12?'Use at least 12 characters: this password guards your groups and channels.':null);
+      if(bad){err.textContent=bad;return}if(pw!==p2.value){err.textContent='The passwords don’t match.';return}
+      go.disabled=true;go.textContent='Checking…';const same=(await loginSecrets(login,pw)).loc===((li.all&&li.all[login])||li.loc);go.disabled=false;go.textContent='Continue';
+      if(same){err.textContent='That’s your current password. The lost device may know it: choose a new one.';p1.focus();return}
+      close();res(pw)}})}
+async function removeDevice(devId,name,key){ // Settings → Login and devices → Your devices → Remove
+  if(!S.db||!S.db.online){toast('You need to be online for this.');return}
+  if(!S.me||!S.me.dev||devId===S.me.dev.id||S.rekeying)return;const h=S.me.handle;
+  if(!S.contactsReady||S.vaultOk===false){toast('Your settings haven’t loaded yet. Try again in a moment.');return}
+  if(!(await confirmSheet('Remove this device?',`${name} (key ${key}) will be locked out of your account at once.`,{danger:true,yes:'Remove device',no:'Keep it',
+    note:'Your account gets new keys. Every other device of yours is logged out too and links again with a code from this one. If you use a password you will choose a new one. Your recovery words stop working and must be made again, and your contacts will see that your security code changed.'})))return;
+  let pw=null;const li=loginInfo(h);if(li&&li.loc){pw=await rekeyPassword(h,li);if(!pw)return}
+  if(!S.me||S.me.handle!==h||S.rekeying)return;
+  await withLock('hush:rekey:'+h,{ifAvailable:true},lock=>lock?rekeyRun({stage:'read',devId,name,key,pw},rekeySheet('Removing device')):toast('A device removal is already running in another tab.'));
+}
+async function rekeyRun(rec,ui){ // the stages in order; the record is kept from 'write' on, and a resumed run starts at its stage
+  const h=S.me.handle,key='hush:rekey:'+h,save=()=>{rec.at=Date.now();ls.set(key,rec)}; // the whole record, the new password included, in the sealed store (as safe there as the keys): a reload goes on from it
+  const needDir=async hs=>{const miss=hs.filter(m=>m&&m!==h&&!S.dir[m]);if(miss.length)try{await loadDir(miss,true)}catch{}if(hs.some(m=>m&&m!==h&&!S.dir[m]))throw Object.assign(new Error(S.db.online?'a member’s profile could not be fetched':'offline'),{code:S.db.online?'nodir':'offline'})}; // never re-key a chat without a member it would wrap for
+  const resumed=rec.stage!=='read',acct=id=>proofFor(id).then(p=>Object.assign(p,{dev:'',signDev:null})); // an account-key proof: only it may change the keys
+  const timed=p=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(Object.assign(new Error('timeout'),{code:'timeout'})),30000))]);
+  const prove=idn=>timed(S.db.prove(null).then(()=>S.db.prove(idn))); // a fresh sign-in: the adapter keeps a proven connection otherwise
+  const chatFor=async cid=>{let c=S.chatDocs.get(cid);if(c&&(c.meta||typeOf(c)==='dm'||c.visibility==='public'))return c; // the whole record, sealed description included: a read without a level gives only a preview (after a reload, before the chat list is up)
+    await S.db.refreshChat(cid).catch(()=>{});c=await freshChan(cid);S.chatDocs.set(cid,c);await S.db.refreshChat(cid).catch(()=>{});return c}; // opened once to read it whole, then again at the level the whole record shows this account holds
+  S.rekeying=true;
+  try{
+    if(resumed&&(!S.contactsReady||S.vaultOk===false)){const old=['write','mirror','rotate','vault'].includes(rec.stage); // the settings the stages read: from the old vault with the old keys until the vault stage has moved it, then from the new one
+      for(;;){try{const o=await readVaultWith(old?{handle:h,ecdhPriv:S.me.prev.ecdhPriv,ecdh:S.me.prev.ecdh}:S.me);if(o)applyVault(o);S.contactsReady=true;S.vaultOk=true;break}catch{await ui.retry('Couldn’t read your settings. Check your connection.')}}}
+    if(rec.stage==='read'){ui.step('Reading your chats');
+      clearTimeout(backupT);if(S.unsubConvs){S.unsubConvs();S.unsubConvs=null}S.recheckChats=null;S.forgetPointers=null; // nothing else writes while this runs
+      if(backupOn()){S.rekeying=false;try{await syncBackup()}catch{}S.rekeying=true} // the keys my other devices backed up, while the old keys still open the backup
+      rec.notes=[];rec.chats=[];
+      const q=await S.db.collection('inbox/'+h+'/c').limit(500).get();
+      for(const d of q.docs){try{const p=await openPointer(d.data());rec.notes.push({id:d.id,p:{t:p.t,cid:p.cid,type:p.type,peer:p.peer}})}catch{}} // a note this device can't open is left as it is
+      rec.oldBackupPath=await backupPath(S.me);
+      rec.oldRecs=[...new Set([recLocal(h)&&recLocal(h).loc,S.prefs&&S.prefs.rec&&S.prefs.rec.loc].filter(Boolean))];
+      rec.myName=(await openDevName(S.me.dev.id,S.me.dev.nm))||deviceName();
+      for(const [cid,i] of Object.entries(P().dms||{}))if(i&&i.peer&&!S.dmPeers[cid])S.dmPeers[cid]=i.peer;
+      for(const n of rec.notes)if(n.p.peer&&!S.dmPeers[n.p.cid])S.dmPeers[n.p.cid]=n.p.peer;
+      for(const n of rec.notes)if(n.p.peer&&/^d/.test(n.p.cid)&&!dmInfo(n.p.cid))setDmInfo(n.p.cid,{peer:n.p.peer}); // every one-on-one chat filed under its person before the ids it derives change
+      const cids=[...new Set([...S.convs.map(c=>c.id),...S.chatDocs.keys(),...Object.keys(P().dms||{}),...rec.notes.map(n=>n.p.cid)])];
+      for(const cid of cids){let c=S.chatDocs.get(cid)||convById(cid);if(!c){await pause(250);try{c=await freshChan(cid)}catch{continue}} // at most four reads a second
+        try{const dm=typeOf(c)==='dm',shown=await showMeta(c),owner=shown.owner===h,admin=(shown.admins||[]).includes(h);
+          if(!dm&&c.visibility!=='public')await allRaws(c); // every key this device can unwrap goes into the key store: the new key could not open an account-key wrap
+          if(owner||admin)await adminSecret(c);
+          if(dm)await dmBaseBits(c); // the shared secret the chat began with, kept: its history stays readable after the change
+          rec.chats.push({cid,type:typeOf(c),vis:c.visibility,owner,admin,admins:shown.admins||[],members:shown.members||c.members||[],peer:dm?dmPeer(c):undefined,name:dm?displayName(dmPeer(c)):shown.name||'',
+            unlocked:dm||c.visibility==='public'||!!(await convKey(c,epochOf(c)))})}catch{}}
+      ui.step('Checking with the server');
+      for(;;){try{await prove(await acct(S.me));break}
+        catch(e){if(e&&e.code==='denied'){S.rekeying=false;start(S.me);ui.fail('Your account’s keys were already replaced from another device, so this device can’t act for the account any more. If that wasn’t you, whoever holds that device has the account: old keys and old recovery words no longer open it.');return}
+          await ui.retry(REKEY_NET)}}
+      rec.stage='keys'}
+    if(rec.stage==='keys'){ui.step('Making new keys');
+      rec.trust=S.me.trust||[];rec.dev={by:S.me.dev.by,s:S.me.dev.s,forSig:S.me.dev.forSig,nm:S.me.dev.nm,ts:S.me.dev.ts}; // what a roll-back puts back
+      await rekeyIdentity(S.me);S.me.trust=[];
+      rec.stage='write';save();ls.set('hush:ids',S.ids);await saveSecrets(); // on disk before the server hears of them: a tab closed in between must not lose the account
+      let onDisk=false;for(let i=0;i<2&&!onDisk;i++){if(i){ls.set('hush:ids',S.ids);await saveSecrets()}onDisk=((await peekSealed('hush:ids'))||[]).some(x=>x&&x.handle===h&&(x.kv||1)===S.me.kv)} // and checked there: a full store would otherwise lose them
+      if(!onDisk){unrekeyIdentity(S.me);Object.assign(S.me.dev,rec.dev);S.me.trust=rec.trust||[];ls.set('hush:ids',S.ids);ls.set(key,{done:Date.now()});rekeyCaches(h);S.rekeying=false;start(S.me);ui.fail('Couldn’t save the new keys on this device. Nothing was changed.');return}
+      rekeyCaches(h)}
+    if(rec.stage==='write'){ui.step('Updating your profile');
+      if(!(S.dir[h]&&S.dir[h].devs))try{await loadDir([h],true)}catch{} // the device list as the server has it: every other entry is dropped by the write
+      // Which keys the server has: ours already (the write landed), still the old ones (it never did), or someone else's.
+      const probe=async()=>{for(;;){while(!S.db.online)await pause(1000);
+        try{await prove(await acct(S.me));return 'new'}catch(e){if(!(e&&e.code==='denied')){await ui.retry(REKEY_NET);continue}}
+        try{await prove({h,pub:{x:S.me.prev.sig.x,y:S.me.prev.sig.y},dev:'',signDev:null,signAcct:m=>signWith(S.me.prev.sigPriv,m)});return 'old'}
+        catch(e){if(e&&e.code==='denied')return 'lost';await ui.retry(REKEY_NET)}}};
+      const write=async()=>{const d=S.me.dev;d.by='';d.forSig='';await ensureDev(S.me); // this device's entry, signed by the new account key
+        d.nm=await sealDevName(d.id,rec.myName);d.ts=Date.now();ls.set('hush:ids',S.ids);
+        const devs={[d.id]:devEntry(d)};for(const i of Object.keys((S.dir[h]&&S.dir[h].devs)||{}))if(i!==d.id)devs[i]=null; // every other device entry goes: they link again by code
+        await S.db.doc('directory/'+h).update({ecdh:S.me.ecdh,sig:S.me.sig,kv:S.me.kv,ts:Date.now(),devs})}; // one write: the server closes the account's other connections
+      let state=resumed?await probe():'old';
+      while(state!=='new'){
+        if(state==='lost'){unrekeyIdentity(S.me);Object.assign(S.me.dev,rec.dev);S.me.trust=rec.trust||[];ls.set('hush:ids',S.ids);ls.set(key,{done:Date.now()});await saveSecrets();rekeyCaches(h);S.rekeying=false; // back to the keys this device really had, on disk, so the sign-out below sees them as outdated
+          try{await loadDir([h],true)}catch{}ui.fail('Your account’s keys were replaced from another device while this was running. This device can’t act for the account any more.');signedOutHere();return}
+        try{await write()}
+        catch(e){if(e&&['denied','invalid','toolarge','notfound','conflict'].includes(e.code)){ // refused for good: back to the old keys, nothing changed
+            unrekeyIdentity(S.me);Object.assign(S.me.dev,rec.dev);S.me.trust=rec.trust||[];ls.set('hush:ids',S.ids);ls.set(key,{done:Date.now()});rekeyCaches(h);S.rekeying=false;await S.db.prove(null);start(S.me);
+            ui.fail('Couldn’t update your account ('+(e.message||e.code)+'). Nothing was changed.');return}}
+        state=await probe()} // whether or not the write landed, the new keys prove this connection from here on
+      rec.stage='mirror';save()}
+    if(rec.stage==='mirror'){try{await loadDir([h],true)}catch{} // the server's copy, with the key history it keeps (prev)
+      Object.assign(S.dir[h]=S.dir[h]||{handle:h},{ecdh:S.me.ecdh,sig:S.me.sig,kv:S.me.kv,devs:{[S.me.dev.id]:devEntry(S.me.dev)}});
+      devCache.clear();ls.set('hush:ids',S.ids);rec.stage='rotate';save()}
+    if(rec.stage==='rotate'){rec.rotated=rec.rotated||[];const n=rec.chats.length; // the chats first: every second until their keys are replaced is one in which the lost device's holder could replace them himself
+      for(const x of rec.chats)if(x.type==='dm'&&x.peer)S.dmPeers[x.cid]=x.peer; // a one-on-one record names nobody: the page knows its person from the read
+      const hs=[...new Set(rec.chats.flatMap(x=>[...(x.members||[]),...(x.peer?[x.peer]:[])]))];
+      for(let i=0;i<hs.length;i+=20){try{await loadDir(hs.slice(i,i+20),true)}catch{}if(i+20<hs.length)await pause(300)} // fresh profiles before wrapping for everyone
+      for(const x of rec.chats){if(rec.rotated.some(d=>d.cid===x.cid))continue;ui.step(`Changing chat keys (${rec.rotated.length+1} of ${n})`);
+        let res=null,again=0,rl=0;
+        while(!res){await pause(250);
+          try{const c=await chatFor(x.cid);
+            if(x.type==='dm'){if(x.peer&&x.peer!==h&&keyChanged(x.peer))res={cid:x.cid,skip:'keychanged'}; // their new code isn't accepted here yet: a base key from their old one would lock them out; re-keyed on accepting (rewrapFor)
+              else{await needDir([x.peer]);await rotateTo(c,{members:[...new Set([h,x.peer].filter(Boolean))]},undefined,{noLoad:true});await pause(250);await S.db.rebaseChat(x.cid,await memberCap(c,0));res={cid:x.cid,ok:true}}} // the new shared secret becomes the base key
+            else if(!x.unlocked)res={cid:x.cid,skip:'locked'};
+            else if(x.owner||x.admin){const shown=await showMeta(c),v=metaOf(shown);
+              if(x.vis!=='public'&&!shown._unlocked)res={cid:x.cid,skip:'locked'}; // the description did not open: a rotation would re-seal an empty member list
+              else{v.members=[...new Set([...(v.members.length?v.members:x.members),h])];
+                if(x.vis!=='public'){await needDir(v.members);await rotateTo(c,v,undefined,{noLoad:true})}
+                if(x.owner){await pause(250);await S.db.setOwner(x.cid,await ownerCap(x.cid));await pause(250);await rotateAdmins(x.cid,v.admins.length?v.admins:x.admins)} // the owner key from the new secret, then an admin secret the old key never wrapped
+                res={cid:x.cid,ok:true}}}
+            else res={cid:x.cid,skip:'member'}}
+          catch(e){const code=e&&e.code;
+            if(code==='ratelimit'||code==='offline'){await pause(REKEY_BACKOFF[Math.min(rl++,REKEY_BACKOFF.length-1)]);continue} // never skipped for a busy server or a dropped connection
+            if(code==='denied'&&/could not be opened/.test((e&&e.message)||'')){if(!S.db.online){await pause(REKEY_BACKOFF[Math.min(rl++,REKEY_BACKOFF.length-1)]);continue}res={cid:x.cid,skip:'taken'};continue} // no key this account derives opens it any more: someone replaced it first
+            if((code==='conflict'||code==='nodir')&&again<1){again++;if(code==='conflict')try{const c=await freshChan(x.cid);S.chatDocs.set(x.cid,c);if(epochOf(c)>=31)res={cid:x.cid,skip:'epochcap'}}catch{}continue}
+            res={cid:x.cid,skip:'error',msg:String((e&&e.message)||code||e)}}}
+        rec.rotated.push(res);save()}
+      rec.stage='vault';save()}
+    if(rec.stage==='vault'){ui.step('Moving your contacts and settings');
+      for(;;){await saveContacts(true);let ok=false;try{ok=(await S.db.doc(await vaultPath(h)).get()).exists}catch{}if(ok)break;await ui.retry('Couldn’t save your settings. Check your connection.')}
+      rec.stage='backup';save()} // the old vault stays where it is (vaults are never deleted): it holds only what the lost device had already
+    if(rec.stage==='backup'){ui.step('Moving your Message backup');
+      if(backupOn()){S.rekeying=false;try{await syncBackup()}catch{}S.rekeying=true} // refused while rekeying; it writes at the new address, under the new key
+      if(rec.oldBackupPath)await S.db.doc(rec.oldBackupPath).delete().catch(()=>{});
+      rec.stage='notes';save()}
+    if(rec.stage==='notes'){rec.noted=rec.noted||[];const n=rec.notes.length;
+      for(const x of rec.notes){if(rec.noted.includes(x.id))continue;ui.step(`Rewriting your chat list (${rec.noted.length+1} of ${n})`);const p=x.p;
+        for(let rl=0;;){await pause(250);
+          try{await dropPointer(h,Object.assign({t:p.t,cid:p.cid,from:h},p.type?{type:p.type}:{},p.peer?{peer:p.peer}:{}));break} // sealed to the new key, as my own note
+          catch(e){if(e&&e.code==='ratelimit'){await pause(REKEY_BACKOFF[Math.min(rl++,REKEY_BACKOFF.length-1)]);continue}await ui.retry(REKEY_NET)}}
+        await S.db.doc('inbox/'+h+'/c/'+x.id).delete().catch(()=>{});rec.noted.push(x.id);save()}
+      rec.stage='boxes';save()}
+    if(rec.stage==='boxes'){const li=loginInfo(h);
+      if(rec.pw&&li){ui.step('Updating your password');const login=li.login||h,old=Object.assign({},li.all||{},li.loc?{[login]:li.loc}:{}); // as openSetupLogin does after a password change
+        for(;;){try{const all=await saveLoginBoxes(S.me,loginsOf(h),rec.pw);rememberPw(login,rec.pw).catch(()=>{});
+            for(const [l,x] of Object.entries(old))if(all[l]!==x)await dropLoginBox(l,x).catch(()=>{});
+            rememberLogin(h,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+h,Date.now());ls.set('hush:recovered:'+h,null);
+            if(pwStrongEnough(rec.pw))await markSecure().catch(()=>{});S.prefs.login=loginInfo(h);await saveContacts(true);break}
+          catch{await ui.retry('Couldn’t save your new password. Check your connection.')}}}
+      else if(li&&li.loc)rec.pwSkipped=true; // resumed after a reload: the new password was only in memory
+      delete rec.pw;rec.stage='recovery';save()}
+    if(rec.stage==='recovery'){for(const l of rec.oldRecs||[])S.db.doc('accounts/'+l).delete().catch(()=>{}); // the old words opened a box holding the old keys
+      ls.set('hush:recovery:'+h,null);ls.set('hush:recovered:'+h,null);if(S.prefs)delete S.prefs.rec;await saveContacts(true);rec.stage='reconnect';save()}
+    if(rec.stage==='reconnect'){ui.step('Reconnecting');rec.rotated=rec.rotated||[];ls.set(key,{done:Date.now()});S.rekeying=false;await S.db.prove(null);start(S.me); // a 'done' mark rather than nothing: a stale copy of the record in another tab can't bring it back
+      for(let i=0;i<150&&!S.contactsReady;i++)await pause(100);renderBanner();ui.done(rekeySummary(rec))}
+  }catch(e){ // not foreseen: with a record kept a reload picks the run up; before one, nothing has changed
+    if((ls.get(key,null)||{}).stage)ui.fail('Removing the device stopped ('+((e&&e.message)||e)+'). Reload Hush to finish it.');
+    else{S.rekeying=false;start(S.me);ui.fail('Couldn’t remove the device ('+((e&&e.message)||e)+'). Nothing was changed.')}}
+}
+function rekeySummary(rec){ // what changed, and what the removed device still holds, in plain words
+  const nameOf=cid=>(rec.chats.find(x=>x.cid===cid)||{}).name||'a chat',names=k=>rec.rotated.filter(d=>d.skip===k).map(d=>nameOf(d.cid)),n=el('div'),ok=rec.rotated.filter(d=>d.ok).length;
+  n.append(el('p',null,`${rec.name} can’t use your account any more. Your account has new keys.`),el('p',null,`Chat keys changed in ${ok} chat${ok===1?'':'s'}.`));
+  const mem=names('member');if(mem.length)n.append(el('p','hint','The removed device can still read these groups until an admin changes their key: '+mem.join(', ')+'.'));
+  const adm=rec.chats.filter(x=>x.admin&&!x.owner&&x.type!=='dm').map(x=>x.name||'a chat');
+  if(adm.length)n.append(el('p','hint','The removed device still holds the admin key of '+adm.join(', ')+'; ask the owner to change admins.'));
+  const taken=names('taken');if(taken.length)n.append(el('p','warnbox','Someone replaced the key of '+taken.join(', ')+' first, most likely from the removed device. Start those chats afresh.'));
+  const kc=names('keychanged');if(kc.length)n.append(el('p','hint','The chat with '+kc.join(', ')+' gets its new key once you accept their new security code.'));
+  const bad=[...names('epochcap'),...names('error'),...names('locked')];if(bad.length)n.append(el('p','hint','Couldn’t change the key of '+bad.join(', ')+'.'));
+  n.append(el('p','hint','For 30 days, messages dated before today in chats that were not re-keyed can’t be told apart from the removed device’s.'),
+    el('p','hint','Invite links of the changed chats stopped working.'),el('p','hint','Your other devices were logged out: link them again from here (Link a new device).'));
+  if(rec.pwSkipped)n.append(el('p','warnbox','Set a new password in Settings: the lost device may know the old one.'));
+  return n}
+async function finishRekey(){ // at start: a removal cut short by a reload or a dropped connection goes on from its stage, in one tab at a time; true when one ran here or in another tab
+  const h=S.me.handle,key='hush:rekey:'+h;if(!rekeyPending(ls.get(key,null))||!S.me.prev)return false;
+  const run=async()=>{const rec=ls.get(key,null);if(!rekeyPending(rec))return false;await rekeyRun(rec,rekeySheet('Finishing device removal'));return true};
+  const r=await withLock(key,{ifAvailable:true},lock=>lock?run():null);if(r!==null)return !!r;
+  const {body,close}=sheet('Finishing device removal',{locked:true});body.append(el('p',null,'Hush is finishing a device removal in another tab. This tab reloads when it’s done.'));
+  await withLock(key,{},async()=>{}); // until the other tab is done, or gone
+  if(rekeyPending(await peekSealed(key))){close();await withLock(key,{ifAvailable:true},lock=>lock?run():null);return true} // gone mid-way: this tab goes on from the record
+  location.reload();return true}
+async function peekSealed(k){try{const b=localStorage.getItem('hush:sealed');if(!b||!SECK)return null;const m=await unsealBlob(SECK,b);return m[k]}catch{return null}} // an entry as the blob on disk has it now: another tab may have written since
+let movedOnBusy=false;
+async function keysMovedOn(){ // the server closed this connection for newer keys, or refused its sign-in: read the profile now, whatever else is in flight (refreshDir yields to a refresh already running), and sign out if the keys moved on
+  if(movedOnBusy||!S.db||!S.me||S.rekeying)return;movedOnBusy=true;const h=S.me.handle;
+  try{for(let i=0;i<3&&S.me&&S.me.handle===h;i++){try{await loadDir([h],true)}catch{}if(S.dir[h]&&(S.dir[h].kv||1)>(S.me.kv||1)){signedOutHere();return}await pause(2000)}}finally{movedOnBusy=false}}
+async function signedOutHere(){
+  const h=S.me.handle,fresh=await peekSealed('hush:ids'),mine=Array.isArray(fresh)&&fresh.find(x=>x&&x.handle===h);
+  if(mine&&(mine.kv||1)>=Math.max((S.dir[h]&&S.dir[h].kv)||1,(S.db&&S.db.kv)||1)){location.reload();return} // another tab of this browser replaced the keys (release 21): this tab reloads into them instead of wiping the account
+  if(!S.me||S.me.handle!==h)return;S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);
   forgetAccountData(h).then(()=>{
     if(S.ids.length){start(S.ids[0]);toast(atOf(h)+' was moved to a new device and logged out here.')}
     else{S.me=null;dropUnsealed();if(S.db&&S.db.prove)S.db.prove(null);showOnboard(false,'Your account was set up fresh on another device, so it was logged out here.')}});
@@ -3170,7 +3413,7 @@ let dirBusy=false;
 // What is there on this device's first look counts as known; only devices whose entries check out are announced.
 let devNoticeBusy=false;
 async function noticeNewDevices(){
-  const me=S.me,d=me&&S.dir[me.handle];if(!d||devNoticeBusy)return;devNoticeBusy=true;
+  const me=S.me,d=me&&S.dir[me.handle];if(!d||devNoticeBusy||S.rekeying||(ls.get('hush:rekey:'+me.handle,null)||{}).stage)return;devNoticeBusy=true; // not while this device replaces the keys: the list is being rewritten
   try{const k='hush:devsSeen:'+me.handle,ids=Object.keys(d.devs||{}),seen=ls.get(k,null);ls.set(k,ids);if(!seen)return;
     const fresh=ids.filter(i=>!seen.includes(i)&&i!==(me.dev&&me.dev.id));if(!fresh.length)return;
     const ok=new Set((await verifiedDevs(me.handle)).map(v=>v.id));
@@ -3180,7 +3423,7 @@ async function noticeNewDevices(){
   catch{}finally{devNoticeBusy=false}
 }
 async function refreshDir(force){
-  if(dirBusy||!S.db||!S.me)return;dirBusy=true;let changed=false;try{changed=await loadDir(relevantHandles(),force)}finally{dirBusy=false}
+  if(dirBusy||!S.db||!S.me||S.rekeying)return;dirBusy=true;let changed=false;try{changed=await loadDir(relevantHandles(),force)}finally{dirBusy=false}
   if(S.dir[S.me.handle]&&(S.dir[S.me.handle].kv||1)>(S.me.kv||1)){signedOutHere();return}
   const first=!S.dirReady;if(first){S.dirReady=true}if(first||force){republishSelf().then(publishDev).catch(()=>{});syncSearch()}
   noticeNewDevices();
@@ -3338,7 +3581,7 @@ function showOnboard(adding,notice){
       if(r.kind==='new'){busy(go);err.textContent='There’s no account with that username. Check it, or tap “Sign up” to create one.';return}
       busy(go,'Unlocking your account…');
       try{const {id,loc}=r;rememberLogin(id.handle,{login:l,loc});pwVerified.set(id.handle,{login:l,loc});rememberPw(l,p.value);if(await enterAccount(id)){toast('Welcome back, '+id.name);if(pwStrongEnough(p.value))markSecure()}else busy(go)}
-      catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account was set up fresh. Tap “Forgot password?”':'Couldn’t log in. Check your connection and try again.'}};
+      catch(e){busy(go);err.textContent=e&&e.message==='stale'?'That password is from before your account’s keys were replaced (a device was removed, or the account was set up fresh). Log in from a device you’re still logged in on, or use your new recovery words.':'Couldn’t log in. Check your connection and try again.'}};
   };
   // Sign-up, one screen and no code: a username, the name people see, and a password. The account is logged in to with
   // the username and the password; no email address or phone number is asked for, stored or reserved (release 20).
@@ -3516,8 +3759,9 @@ async function noteOk(p){
   if(!p||typeof p.from!=='string'||!validHandle(p.from))return false;
   if(p.to&&p.to!==S.me.handle)return false;
   if(isBlocked(p.from)&&!(p.t==='invite'&&heldKey(p.cid)))return false; // a blocked person can't add me to anything new; groups I'm already in stay
-  if(p.type==='dm'||p.t==='dm'||p.t==='request'){const peer=p.peer||p.from;if(!(await senderKeys(peer)))return false;return p.cid===await dmIdFor(peer)}
-  if(p.t==='invite'){if(!p.sg)return true;return sideOk(p.from,p.sg,'hush-drop-v1',['invite',p.from,S.me.handle,String(p.cid),String(p.ts)])}
+  if(p.type==='dm'||p.t==='dm'||p.t==='request'){const peer=p.peer||p.from;if(!(await senderKeys(peer)))return false;const cid=await dmIdFor(peer),known=(dmInfo(p.cid)||{}).peer||S.dmPeers[p.cid];
+    return p.cid===cid||(known?known===peer:!!(/^d/.test(p.cid)&&ksMap()[p.cid]))} // or a chat this device already knows under that person (its id is from before a key change); one it holds keys for but knows under nobody counts once, and never under someone else
+  if(p.t==='invite'){if(!p.sg)return true;return !!(await sideOk(p.from,p.sg,'hush-drop-v1',['invite',p.from,S.me.handle,String(p.cid),String(p.ts)],p.ts,true))} // an invitation signed before the inviter's key change still counts: its date is in what is signed
   return false;
 }
 /* Blocking, kept in the encrypted vault so every device of mine agrees and nobody else (the server included) knows.
@@ -3563,7 +3807,7 @@ async function ensureInbox(c,only,fresh){ // make sure everyone in a chat has a 
   done[c.id]=[...had];ls.set(key,done);
 }
 function notePointer(cid,p){ // what a pointer tells this device about a chat
-  if(p.type==='dm'||p.t==='dm'||p.t==='request'){const peer=p.peer||p.from;S.dmPeers[cid]=peer;dmIds.set(peer,cid);
+  if(p.type==='dm'||p.t==='dm'||p.t==='request'){const peer=p.peer||p.from;if(S.dmPeers[cid]&&S.dmPeers[cid]!==peer)return;S.dmPeers[cid]=peer;dmIds.set(peer,cid); // a chat keeps the person it is known under
     const i=dmInfo(cid);if(p.t==='request'&&p.from!==S.me.handle&&!(i&&i.req))setDmInfo(cid,{peer,req:'in'});else if(!i)setDmInfo(cid,{peer})}
 }
 function watchDoc(ref,cb,err){
@@ -3585,7 +3829,7 @@ function watchDoc(ref,cb,err){
    were removed), has its pointer tidied away. */
 function pointerVerdict({exists,mine,held,fresh}){return !exists?(fresh?'wait':'forget'):mine?'show':held?'forget':'wait'}
 /* ===== HUSH INBOX RULE END ===== */
-const heldKey=cid=>{const m=ksMap()[cid];return !!(m&&Object.keys(m).some(e=>e!=='a'))};
+const heldKey=cid=>{const m=ksMap()[cid];return !!(m&&Object.keys(m).some(e=>e!=='a'&&e!=='b'))};
 function watchInbox(id,cb){
   const h=id.handle,docs=new Map(),subs=new Map(),ptrs=new Map(),waiting=new Set(),firstSeen=new Map(),kept=new Map(),renoted=new Set();let ready=false,pend=0,dead=false;
   const FRESH_MS=2*60e3;const fresh=cid=>{if(!firstSeen.has(cid))firstSeen.set(cid,Date.now());return Date.now()-firstSeen.get(cid)<FRESH_MS};
@@ -3598,7 +3842,8 @@ function watchInbox(id,cb){
     const seen=new Map();kept.clear();
     for(const d of s.docs){let p=ptrs.get(d.id);
       if(p===undefined){try{p=await openPointer(d.data());if(!(await noteOk(p)))p=null}catch{p=null}ptrs.set(d.id,p);
-        if(p===null)S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{})} // unreadable, forged or from someone blocked: gone
+        if(p===null){if(S.contactsReady&&S.vaultOk!==false&&!S.rekeying&&!(ls.get('hush:rekey:'+h,null)||{}).stage&&S.dir[h]&&(S.dir[h].kv||1)===(S.me.kv||1)&&(d.data().ts||0)<Date.now()-7*864e5)S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{}); // unreadable, forged or from someone blocked: gone, once a week old (another device of mine, or my old key, may still open a fresh one)
+          else ptrs.delete(d.id)}} // unless this device may simply not know yet (settings not read, keys changing): looked at again next time
       if(!p)continue;
       // a second note for a chat already listed: the newest stays (on a tie, one I wrote myself) and the other goes
       const x=d.data(),k=kept.get(p.cid),rank=n=>(n.ts||0)*2+(n.own===1?1:0),lose=k&&rank(k.x)>=rank(x)?d.id:k&&k.id;
@@ -3622,14 +3867,14 @@ function watchInbox(id,cb){
       settle(cid,pointerVerdict({exists:!!c,mine,held:heldKey(cid),fresh:fresh(cid)}),shown)},
     // Only a refusal says we were removed (or not let in yet). A rate limit, a timeout or a server error says nothing
     // about the chat: it stays in the list and is looked at again.
-    e=>{done();subs.delete(cid);if(e&&e.code==='denied')settle(cid,pointerVerdict({exists:true,mine:false,held:heldKey(cid),fresh:fresh(cid)}),null);else{waiting.add(cid);emit()}}))}
+    e=>{done();subs.delete(cid);if(e&&e.code==='denied')settle(cid,pointerVerdict({exists:true,mine:false,held:heldKey(cid)&&!/^d/.test(cid),fresh:fresh(cid)}),null);else{waiting.add(cid);emit()}}))} // a one-on-one chat can't remove me: a refusal there means a key I don't hold yet, so it waits
   // A chat in the list rests on a note I wrote myself: the server sweeps other people's notes after 30 days. A note
   // someone else left (an invite, a DM), or one from before release 17, is replaced by my own once the chat shows, and
   // tidying then keeps the newest. A message request I haven't answered stays as it came.
   function adopt(cid,shown){const k=kept.get(cid),i=dmInfo(cid);if(!k||k.x.own===1||renoted.has(cid)||(i&&i.req==='in'))return;renoted.add(cid);
     const dm=typeOf(shown)==='dm';dropPointer(h,{t:dm?'dm':'invite',cid,from:h,type:typeOf(shown),peer:dm?(k.p.peer||k.p.from):undefined}).catch(()=>renoted.delete(cid))}
   function settle(cid,verdict,shown){
-    if(verdict==='show'){waiting.delete(cid);docs.set(cid,shown);if(typeOf(shown)==='dm')recordBase(shown);adopt(cid,shown)}
+    if(verdict==='show'){waiting.delete(cid);docs.set(cid,shown);if(typeOf(shown)==='dm'){recordBase(shown);const pr=dmPeer(shown);if(pr&&S.contactsReady&&!dmInfo(cid))setDmInfo(cid,{peer:pr})}adopt(cid,shown)} // every one-on-one chat filed under its person: the alias a key change relies on
     else if(verdict==='wait'){docs.delete(cid);waiting.add(cid);if(shown)noKeyNotice(shown,epochOf(shown))} // keep the pointer: a wrap for this device, or the record, may still arrive
     else{waiting.delete(cid);docs.delete(cid);forget(cid)} // deleted, or we were removed: tidy the pointer away
     emit()}
@@ -3645,7 +3890,8 @@ function watchInbox(id,cb){
 /* ---------- boot ---------- */
 function start(id){
   try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist().catch(()=>{})}catch{}
-  S.me=id;ls.set('hush:active',id.handle);S.contacts=[];S.contactsReady=false;rebuildNames();ensureDev(id).catch(()=>{});dmIds.clear();S.dmPeers={};S.chatDocs.clear();dmIdFor(id.handle).catch(()=>{});
+  S.me=id;ls.set('hush:active',id.handle);S.contacts=[];S.contactsReady=false;rebuildNames();trimPrev(id);S.rekeying=!!(id.prev&&rekeyPending(ls.get('hush:rekey:'+id.handle,null))); // a removal left half done resumes below; until then nothing republishes the old keys
+  ensureDev(id).catch(()=>{});dmIds.clear();S.dmPeers={};S.chatDocs.clear();dmIdFor(id.handle).catch(()=>{});
   if(S.unsubConvs)S.unsubConvs();S.unsubConvs=null;
   Object.assign(S,{convs:[],seenLast:new Map(),convsLoaded:false,unread:new Map(),unreadKey:new Map(),mentions:new Map(),showArchived:false});S.previews.clear();
   closeConv();setListTitle();if(S.tab==='profile')setTab('profile');
@@ -3665,13 +3911,15 @@ function start(id){
       else{if((c.ttl||0)!==S.curTtl){S.curTtl=c.ttl||0;S.rendered=null}refreshHeader();renderConv();drawPinBar();if(S.commentsView)S.commentsView.render()}}
     renderList();computeUnread();
   };
-  // Your inbox is only readable once this device has proven it's yours, so start it after binding.
+  // Your inbox is only readable once this device has proven it's yours, so start it after binding. A device removal
+  // left half done is finished first (it starts the page again itself), then the settings are read, then the chat list:
+  // a one-on-one note with an id from before a key change is then known through its alias (dmIdFor), not deleted.
   // healLogin after the settings are read: a password changed on another device moved the boxes, it didn't lose them
-  bindDevice(id).catch(()=>{}).then(()=>{if(S.me!==id)return;if(S.unsubConvs)S.unsubConvs();S.unsubConvs=watchInbox(id,onConvs);loadContacts().catch(()=>{}).then(()=>healLogin(id))});heartbeat(true);renderBanner();refreshDir().then(refreshPresence);
+  bindDevice(id).catch(()=>{}).then(async()=>{if(S.me!==id)return;if(await finishRekey().catch(()=>false)||S.me!==id)return;await loadContacts().catch(()=>{});if(S.me!==id)return;if(S.unsubConvs)S.unsubConvs();S.unsubConvs=watchInbox(id,onConvs);healLogin(id)});heartbeat(true);renderBanner();refreshDir().then(refreshPresence);
 }
 async function republishSelf(){
   // Puts your public keys in the directory if they're missing, and puts them back if someone replaced them.
-  if(!S.db||!S.me||!S.dirReady)return;const m=S.me,d=S.dir[m.handle];if(d&&(d.kv||1)>(m.kv||1))return;
+  if(!S.db||!S.me||!S.dirReady||S.rekeying)return;const m=S.me,d=S.dir[m.handle];if(d&&(d.kv||1)>(m.kv||1))return;
   try{if(!d)await S.db.doc('directory/'+m.handle).set(Object.assign({handle:m.handle,name:m.name,ecdh:m.ecdh,sig:m.sig,ts:Date.now()},dispOk(m.disp,m.handle)?{disp:m.disp}:{},m.dev&&m.dev.s?{devs:{[m.dev.id]:devEntry(m.dev)}}:{}));
     else if(dispOk(m.disp,m.handle)&&d.disp!==m.disp){await S.db.doc('directory/'+m.handle).update({disp:m.disp});d.disp=m.disp}
     else if(!sameKeys(keysOf(d),{ecdh:m.ecdh,sig:m.sig})){toast('Your security code on the server doesn\u2019t match this device. Restore from your backup, or contact the app owner.')}}catch{}

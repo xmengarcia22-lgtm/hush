@@ -39,7 +39,7 @@ const bad = (what, field) => fail('invalid', `${what}: bad "${field}"`);
 
 // ---- identity-plane collections -------------------------------------------
 
-const DIRECTORY_KEYS = new Set(['handle', 'name', 'disp', 'bio', 'photo', 'ecdh', 'sig', 'devs', 'findable', 'requests', 'kv', 'ts']);
+const DIRECTORY_KEYS = new Set(['handle', 'name', 'disp', 'bio', 'photo', 'ecdh', 'sig', 'devs', 'findable', 'requests', 'kv', 'ts', 'prev']);
 function directory(ctx, d) {
   const w = 'directory';
   only(d, DIRECTORY_KEYS, w); need(d, ['handle', 'ecdh', 'sig'], w);
@@ -63,6 +63,10 @@ function directory(ctx, d) {
       if (e.ts !== undefined && !num(e.ts)) bad(w, 'devs');
       if (e.nm !== undefined && !str(e.nm, 1, 400)) bad(w, 'devs');   // the device's name, sealed for the account's own devices
     }
+  }
+  if (d.prev !== undefined) {   // the key history (SPEC.md 4.2, release 21): old signing keys, written by the server (store.js), never by a client (authz.js)
+    if (!Array.isArray(d.prev) || d.prev.length > 8) bad(w, 'prev');
+    for (const e of d.prev) if (!isPlain(e) || !XY(e.sig) || !num(e.until)) bad(w, 'prev');
   }
 }
 
@@ -226,6 +230,10 @@ function sealedPost(ctx, d, what, extra = new Set()) {
   if (!str(d.d, 0)) bad(what, 'd');
   if (ctx.op !== 'update') {
     if (d.ts < ctx.now - POST_TS_PAST_MS || d.ts > ctx.now + POST_TS_FUTURE_MS) bad(what, 'ts');
+  } else if (ctx.prev && d.ts !== ctx.prev.ts) {
+    // An edit keeps the message's time. Only a scheduled message sent early moves, from its future time to now: a
+    // back-dated edit would otherwise make a signature by a replaced account key check out past the key history's window.
+    if (!(ctx.prev.ts > ctx.now - 60_000 && d.ts >= ctx.now - POST_TS_PAST_MS && d.ts <= ctx.now + POST_TS_FUTURE_MS)) bad(what, 'ts');   // a minute's grace: the page's clock decides what is still scheduled
   }
 }
 

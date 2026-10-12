@@ -105,6 +105,7 @@ test('key rotation: only with the account key and a higher kv', async () => {
   assert.equal((await viaDevice.call('update', { p: 'directory/alice', d: { ecdh: next.ecdh, sig: next.sig, kv: 2 } })).e, 'denied', 'a device key may not rotate the account keys');
   await viaDevice.close();
   await A.ok('set', { p: 'directory/alice', d: rotated });
+  assert.equal((await A.ok('get', { p: 'directory/alice' })).d.prev.length, 1, 'the server keeps the old signing key in prev (release 21)');
   await assert.rejects(connectAs(S.url, alice), /denied/, 'the old key no longer proves');
   const c = await connectAs(S.url, { ...alice, sigKey: next.sigKey });
   assert.equal(c.via, 'account');
