@@ -184,10 +184,13 @@ if(typeof addEventListener==='function')addEventListener('storage',e=>{if(e.key!
 const rekeyPending=rec=>!!(rec&&typeof rec==='object'&&typeof rec.stage==='string'); // a removal record mid-way; a finished one is only a done mark
 /* ===== HUSH STORE END ===== */
 const hue=s=>{let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h};
+// Avatar colours as [hue, saturation %, lightness %]: no purples (hue 235–320 is skipped), white initials 4.8:1 or more.
+const AV_COLORS=[[215,55,42],[188,55,32],[160,40,32],[80,35,33],[38,60,36],[18,55,42],[355,45,44],[205,22,40],[200,45,38],[150,35,30]];
+const avColor=s=>AV_COLORS[hue(s)%AV_COLORS.length]; // same key, same colour
 const safePhoto=p=>typeof p==='string'&&p.length<250000&&/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p)?p:null;
 function avatar(key,name,cls='',photo){const a=el('div','avatar '+cls);const ph=safePhoto(photo);
   if(ph){const i=el('img');i.src=ph;i.alt='';a.append(i)}
-  else{a.textContent=(name||key||'?').trim().charAt(0).toUpperCase();a.style.background=`hsl(${hue(key||'?')} 52% 52%)`}
+  else{a.textContent=(name||key||'?').trim().charAt(0).toUpperCase();const [h,s,l]=avColor(key||'?');a.style.background=`hsl(${h} ${s}% ${l}%)`}
   return a}
 const userAvatar=(h,cls='')=>avatar(h,displayName(h),cls,S.dir[h]&&S.dir[h].photo);
 const convAvatar=(c,cls='')=>isSelf(c)?html('div','avatar saved '+cls,I.bookmark):typeOf(c)==='dm'?userAvatar(dmPeer(c),cls):avatar(c.id,c.name,cls,c.photo);
@@ -230,7 +233,7 @@ const S={db:null,ids:ls.get('hush:ids',[]),me:null,dir:{},dirReady:false,presenc
   reads:{},typing:{},agg:new Map(),unsubs:[],unsubConvs:null,serverView:false,cache:new Map(),keys:new Map(),chanKeys:new Map(),media:new Map(),
   rendered:null,stick:true,query:'',replyTo:null,editing:null,comp:null,seenLast:new Map(),convsLoaded:false,
   unread:new Map(),unreadKey:new Map(),readWritten:new Map(),pendingJoin:null,mentions:new Map(),ccount:new Map(),comments:[],scheduled:[],future:[],older:[],flushDraft:null,pins:{},verified:{},warned:new Set(),warnShown:false,mediaBlobs:new Map(),prefs:null,showArchived:false,rawPosts:[],purged:new Set(),recCancel:null,audio:null,newBelow:0,contacts:[],contactsReady:false,cnames:new Map(),tab:'chats',badges:{}};
-function applyTheme(){const t=ls.get('hush:theme','system');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;else delete document.documentElement.dataset.theme}
+function applyTheme(){const t=ls.get('hush:theme','light');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;else delete document.documentElement.dataset.theme}
 applyTheme();
 
 /* ===== HUSH NAV HISTORY BEGIN ===== */
@@ -1182,18 +1185,18 @@ function buildComposer(p,c){
       const m={kind:'voice',mime:out.blob.type||'audio/webm',src:out.blob,w:0,h:0,dur:Math.round(out.dur*10)/10,wave:out.wave,chunks:Math.max(1,Math.ceil(out.blob.size/lim().pieceBytes))};
       let done=0;const d=await uploadMedia(cc,m,()=>{done++;progress(done/m.chunks,'Sending\u2026')},mediaExp(cc));
       await sendBody(cid,buildBody({media:[d],reply}));S.replyTo=null;sync()}
-    catch(err){toast(sendErr(err))}
+    catch(err){toast(sendErr(err,t))}
     busy=false;prog.hidden=true;upd()};
   const doSend=async at=>{
     const text=getText();if(busy||!S.db)return;
     if(S.editing){const {p:op,o}=S.editing;if(!text.trim()&&!(o.media&&o.media.length))return;
       busy=true;upd();
-      try{await editPost(cid,op,o,text);S.editing=null;clearEd();sync()}catch(err){toast(sendErr(err))}
+      try{await editPost(cid,op,o,text);S.editing=null;clearEd();sync()}catch(err){toast(sendErr(err,t))}
       busy=false;upd();return}
     if(!text.trim()&&!files.length)return;
     const reply=S.replyTo;S.stick=true;
     if(!files.length){const keep=[...ed.childNodes];clearEd();ed.focus();S.replyTo=null;sync();
-      try{await sendBody(cid,buildBody({text,reply}),at)}catch(err){ed.replaceChildren(...keep);S.replyTo=reply;sync();saveDraft();toast(sendErr(err))}return}
+      try{await sendBody(cid,buildBody({text,reply}),at)}catch(err){ed.replaceChildren(...keep);S.replyTo=reply;sync();saveDraft();toast(sendErr(err,t))}return}
     busy=true;upd();drawStrip();prog.hidden=false;progress(0,'Encrypting\u2026');
     try{
       const cc=convById(cid),fs=files.map(x=>x.f),prep=[];
@@ -1205,7 +1208,7 @@ function buildComposer(p,c){
       progress(1,'Sending\u2026');
       await sendBody(cid,buildBody({text,media,reply}),at);
       files.forEach(x=>URL.revokeObjectURL(x.url));files=[];clearEd();S.replyTo=null;sync();
-    }catch(err){toast(sendErr(err))}
+    }catch(err){toast(sendErr(err,t))}
     busy=false;prog.hidden=true;drawStrip();upd();
   };
   send.onclick=()=>{if(send._noClick&&Date.now()-send._noClick<600)return;doSend()};
@@ -1301,7 +1304,8 @@ async function deletePost(cid,p){
   if(c.last&&c.last.sig===p.sig){const rest=S.posts.filter(x=>x._id!==p._id),l=rest[rest.length-1];
     await S.db.doc('channels/'+cid).update(lastUpd(c,{last:l?lastOf(l):null}))}
 }
-const sendErr=err=>err&&err.code==='quota_exceeded'?'Storage is full. Older posts need clearing before new ones can be sent.'
+const sendErr=(err,t)=>err&&err.code==='quota_exceeded'?'Storage is full. Older posts need clearing before new ones can be sent.'
+  :err&&err.message==='nokey'&&t==='dm'?'This phone doesn\u2019t have this chat\u2019s key yet. Close the chat and open it again, and Hush will set up a key for the two of you.' // a DM has no admin: opening it fetches their keys or starts a fresh key (healKeys)
   :err&&err.message==='nokey'?'This phone doesn\u2019t have this chat\u2019s key yet. An admin\u2019s phone will add it when they next open the chat.'
   :err&&err.message==='reqtext'?'Only a text message can be sent as a request. Photos and files can be sent once they accept.'
   :err&&err.message==='reqone'?'Your request was sent. You can send more once they accept.'
@@ -1625,7 +1629,7 @@ function msgNode(c,p,o,cont){
   if(vis.length){wrap.classList.add('fit');wrap.style.setProperty('--mw',mediaFitWidth(vis)+'px')}
   const b=el('div','bubble tail'+(mine&&t!=='channel'?' out':'')+(t==='group'&&!mine&&o.text&&mentionsMe(o.text)?' mentioned':''));
   if(t==='channel')b.append(el('div','post-from',c.name));
-  else if(t==='group'&&!mine&&!cont){const n=el('div','post-from',displayName(p.from));n.style.color=`hsl(${hue(p.from)} 55% 46%)`;withBadge(n,p.from);if(isAdminH(c,p.from))n.append(el('span','role-sm',p.from===c.owner?'owner':'admin'));b.append(n)}
+  else if(t==='group'&&!mine&&!cont){const n=el('div','post-from',displayName(p.from));n.style.color=`hsl(${avColor(p.from)[0]} 55% var(--name-l))`;withBadge(n,p.from);if(isAdminH(c,p.from))n.append(el('span','role-sm',p.from===c.owner?'owner':'admin'));b.append(n)}
   const parts=[];
   if(S.serverView)b.append(el('span','cipher',p.ct.slice(0,160)+'\u2026'));
   else if(o.text==null){if(o.nokey)noKeyNotice(c,p.e??0);b.append(el('span','bad',o.nokey?'Sent before this device was added, so its key isn\u2019t on this device.':'Couldn\u2019t decrypt this message.'))}
@@ -2212,7 +2216,7 @@ function buildSettingsPage(body){
   body.append(setRow(I.shield,'Privacy','',go('settings:privacy')),
     setRow(I.device,'Login and devices',loginInfo(me.handle)?'':'Not set up',go('settings:login'),true));
   body.append(el('div','menu-label flush','Appearance'),
-    segControl([['system','Auto'],['light','Light'],['dark','Dark']],ls.get('hush:theme','system'),v=>{ls.set('hush:theme',v);applyTheme()}));
+    segControl([['system','Auto'],['light','Light'],['dark','Dark']],ls.get('hush:theme','light'),v=>{ls.set('hush:theme',v);applyTheme()}));
   body.append(el('hr','pf-sep'));
   body.append(el('div','menu-label flush','Accounts on this device'));
   S.ids.forEach(id=>{const b=el('button','menu-item flush');b.append(userAvatar(id.handle),withBadge(el('span',null,displayName(id.handle)),id.handle));
@@ -2851,6 +2855,7 @@ function openRestore(prefill){
       go.disabled=false;go.textContent='Restore account'}};
 }
 async function enterAccount(id){ // shared by log in and restore
+  const was=S.ids.find(x=>x&&x!==id&&x.handle===id.handle); // the account is still on this browser (Add or restore account): ensureDev keeps its device key, or replacedDev below retires it
   try{await ensureDev(id)}catch{} // a device key that could not be made or signed: the account key still signs in below
   try{await bindDevice(id)}catch{}
   S.backupRestored=await restoreBackup(id);
@@ -2860,6 +2865,7 @@ async function enterAccount(id){ // shared by log in and restore
     if(!confirm('The security code on the server doesn\u2019t match your account. Someone may have tampered with it. Continue and put your real code back?'))return false;
     await ref.update({ecdh:id.ecdh,sig:id.sig,kv:id.kv||1,ts:Date.now()})}
   else if(!s.exists)await ref.set(Object.assign({handle:id.handle,name:id.name,ecdh:id.ecdh,sig:id.sig,kv:id.kv||1,ts:Date.now()},id.dev&&id.dev.s?{devs:{[id.dev.id]:devEntry(id.dev)}}:{}));
+  {const old=s.exists?replacedDev(was,id,s.data().devs):null;if(old){await ref.update({devs:{[old]:null}}).catch(()=>{});if(S.dir[id.handle]&&S.dir[id.handle].devs)delete S.dir[id.handle].devs[old]}} // linked again here: this browser's old device comes off, as a logout takes it off
   S.ids=S.ids.filter(x=>x.handle!==id.handle);S.ids.push(id);ls.set('hush:ids',S.ids);
   document.querySelectorAll('.onboard').forEach(x=>x.remove());start(id);
   if(S.resetFor&&(!S.resetFor.handle||S.resetFor.handle===id.handle)){const r=S.resetFor;S.resetFor=null;rememberLogin(id.handle,{login:r.login});

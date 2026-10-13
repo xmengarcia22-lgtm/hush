@@ -41,7 +41,19 @@ async function aesKey(priv,pub,salt){return aesKeyFrom(await crypto.subtle.deriv
 const devMsg=(h,d)=>enc.encode(['hush-dev-v1',h,d.id,d.ecdh.x,d.ecdh.y,d.sig.x,d.sig.y,d.by||''].join('|'));
 const devEntry=d=>({x:d.ecdh.x,y:d.ecdh.y,sx:d.sig.x,sy:d.sig.y,by:d.by||'',s:d.s,ts:d.ts||Date.now(),...(d.nm?{nm:d.nm}:{})}); // nm: the device's name, sealed (sealDevName)
 async function newDev(){const k=await newIdentity();return {id:rid().slice(0,12),ecdhPriv:k.ecdhPriv,ecdh:k.ecdh,sigPriv:k.sigPriv,sig:k.sig,by:'',s:'',ts:Date.now()}}
+// Logging in again to an account this browser still holds (Add or restore account): the record it keeps, if its device
+// key is for these very account keys. That key carries over, so the same browser stays one device on the profile. Only
+// a key held here ever carries; another browser, or keys that moved on since, gets a new device as before.
+function heldBy(id){const was=S.ids.find(x=>x&&x!==id&&x.handle===id.handle);
+  return was&&was.dev&&was.dev.s&&sameKeys(was,id)&&(was.kv||1)===(id.kv||1)?was:null}
+// Linked again where the account still is: the new device key replaces this browser's old one, which comes off the profile
+// the way logging out takes it off (logOutAccount), since its private keys go with the record replaced here. Named only
+// when the profile's entry carries exactly the keys this browser holds and no device was added from it; otherwise null,
+// and it stays listed for Remove.
+function replacedDev(was,id,devs){const o=was&&was!==id&&was.handle===id.handle&&was.dev,e=o&&devs&&devs[o.id];
+  return o&&o.ecdh&&o.sig&&id.dev&&id.dev.id!==o.id&&e&&e.x===o.ecdh.x&&e.y===o.ecdh.y&&e.sx===o.sig.x&&e.sy===o.sig.y&&!Object.values(devs).some(v=>v&&v.by===o.id)?o.id:null}
 async function ensureDev(id){ // this account's key for THIS device; a first device signs its own entry with the account key
+  const was=id.dev?null:heldBy(id);if(was){id.dev=was.dev;id.trust=id.trust||was.trust}
   const d=id.dev||await newDev();
   if(!d.s||(!d.by&&d.forSig!==id.sig.x)){const sk=await crypto.subtle.importKey('jwk',id.sigPriv,DS,false,['sign']);
     d.by='';d.s=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},sk,devMsg(id.handle,d)));d.forSig=id.sig.x}
