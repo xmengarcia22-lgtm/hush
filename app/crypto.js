@@ -70,7 +70,7 @@ function verifiedDevs(h){ // someone's devices whose entries check out; others g
     const ok=new Map(),ids=Object.keys(all).filter(i=>/^[a-zA-Z0-9]{6,20}$/.test(i)&&all[i]&&['x','y','sx','sy','s'].every(f=>typeof all[i][f]==='string'));
     const check=async i=>{const e=all[i],d={id:i,ecdh:{x:e.x,y:e.y},sig:{x:e.sx,y:e.sy},by:typeof e.by==='string'?e.by:''};
       try{const parent=d.by?ok.get(d.by):null;if(d.by&&!parent)return null;
-        return (await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(parent?parent.sig:pk.sig,'s'),unb64(e.s),devMsg(h,d)))?Object.assign(d,{ts:e.ts||0}):null}catch{return null}};
+        return (await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(parent?parent.sig:pk.sig,'s'),unb64(e.s),devMsg(h,d)))&&await pubKey(d.ecdh,'e')?Object.assign(d,{ts:e.ts||0}):null}catch{return null}};
     for(let round=0;round<4;round++){let grew=false;for(const i of ids){if(ok.has(i))continue;const d=await check(i);if(d){ok.set(i,d);grew=true}}if(!grew)break}
     return [...ok.values()];
   })());
@@ -171,7 +171,7 @@ async function wrapKey(raw,handle,base,e){
   if(handle!==S.me.handle&&typeof keyChanged==='function'&&keyChanged(handle))return {}; // a key this device hasn't accepted: its devices can't be checked, and the fallback would wrap to the old account key
   const pk=peerKeys(handle);if(!pk)throw new Error('nokey');
   const devs=await verifiedDevs(handle),out={};
-  if(!devs.length)out[rid22()]=await wrapTo(raw,pk.ecdh,wrapSalt(base,e,handle)); // no device on their profile yet: to the account key
+  if(!devs.length)try{out[rid22()]=await wrapTo(raw,pk.ecdh,wrapSalt(base,e,handle))}catch{} // no device on their profile yet: to the account key (one that doesn't import gets nothing, rather than stopping the key change)
   for(const dv of devs)out[rid22()]=await wrapTo(raw,dv.ecdh,wrapSalt(base,e,handle,dv.id));
   return out;
 }
@@ -226,9 +226,12 @@ async function ownerCap(cid){return b64u(await hkdf(ownIkm(S.me),'hush-cap-v1','
 async function memberCap(c,e){
   if(typeOf(c)==='dm'&&Number(e)===0){const s=await dmSecret(dmPeer(c));return s?memberCapFrom(c.id,0,s):null}
   const k=await convKey(c,e);return k&&k.raw?memberCapFrom(c.id,e,k.raw):null}
-async function adminSecret(c){ // the admin secret, if this device can unwrap it
-  const kept=ksGet(c.id,'a');if(kept)return unb64(kept);
-  const raw=await unwrapMine(c.akeys,c.id+'#a');if(raw)ksPut(c.id,'a',b64(raw));return raw}
+const adminCache=new Map();
+async function adminSecret(c){ // the admin secret, if this device can unwrap it from the record's current akeys
+  if(!c.akeys){const kept=ksGet(c.id,'a');return kept?unb64(kept):null}
+  const k=S.me.handle+':'+((S.me.dev&&S.me.dev.id)||'')+':'+c.id+':'+JSON.stringify(c.akeys);
+  if(!adminCache.has(k))adminCache.set(k,unwrapMine(c.akeys,c.id+'#a').then(raw=>{if(raw)ksPut(c.id,'a',b64(raw));return raw},()=>null));
+  return adminCache.get(k)}
 const postData=(cid,p)=>enc.encode([cid,p.from,p.ts,p.iv,p.ct].concat(p.e!=null?[p.e]:[]).concat(p.exp?['x'+p.exp]:[]).join('|'));
 async function sealPost(c,text,ts,exp){
   const e=epochOf(c),ck=await convKey(c,e);if(!ck)throw new Error('nokey');
@@ -318,31 +321,37 @@ const unsealAll=(c,a)=>Promise.all((a||[]).map(p=>p&&p.sv===1?unsealSvc(c,p):uns
    server only ever stores gibberish ("meta"). Public channels stay readable so people can find them.
    showMeta() makes a separate on-screen copy with the readable values. That copy is never saved back. */
 const metaCache=new Map();
-const metaAD=cid=>enc.encode('hush-meta-v1|'+cid);
+// `o`: the owner's part only (name, description, photo, owner, admins), kept in `ometa`, which only the owner key may
+// write (SPEC.md 5.3). Its own additional data, so neither blob can be passed off as the other.
+const metaAD=(cid,o)=>enc.encode((o?'hush-ometa-v1|':'hush-meta-v1|')+cid);
 const HANDLE_RE=/^[a-z0-9_]{3,20}$/;
 const handleList=a=>Array.isArray(a)?a.filter(h=>typeof h==='string'&&HANDLE_RE.test(h)):[];
-async function sealMeta(cid,e,raw,v){ // name, description, photo AND who is in the chat: all locked with the chat key (SPEC.md 5.3)
+async function sealMeta(cid,e,raw,v,o){ // name, description, photo AND who is in the chat: all locked with the chat key (SPEC.md 5.3)
   const key=await crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt']),iv=crypto.getRandomValues(new Uint8Array(12));
-  const pt=enc.encode(JSON.stringify({name:String(v.name||''),desc:String(v.desc||''),photo:v.photo||null,owner:v.owner||'',admins:handleList(v.admins),members:handleList(v.members),banned:handleList(v.banned)}));
-  return {e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:metaAD(cid)},key,pt))};
+  const x={name:String(v.name||''),desc:String(v.desc||''),photo:v.photo||null,owner:v.owner||'',admins:handleList(v.admins)};
+  if(!o)Object.assign(x,{members:handleList(v.members),banned:handleList(v.banned)});
+  return {e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:metaAD(cid,o)},key,enc.encode(JSON.stringify(x))))};
 }
-async function sealMetaFor(c,v){const e=epochOf(c),k=await convKey(c,e);if(!k||!k.raw)throw new Error('nokey');return sealMeta(c.id,e,k.raw,v)}
-async function readMeta(c,raws){ // the readable description and member list, or null if this device can't unlock it
-  const m=c&&c.meta;if(!m||typeof m.iv!=='string'||typeof m.ct!=='string')return null;
+async function sealMetaFor(c,v,o){const e=epochOf(c),k=await convKey(c,e);if(!k||!k.raw)throw new Error('nokey');return sealMeta(c.id,e,k.raw,v,o)}
+const sealOMeta=(cid,e,raw,v)=>sealMeta(cid,e,raw,v,true),sealOMetaFor=(c,v)=>sealMetaFor(c,v,true);
+async function readMeta(c,raws,o){ // the readable description and member list, or null if this device can't unlock it
+  const m=c&&(o?c.ometa:c.meta);if(!m||typeof m.iv!=='string'||typeof m.ct!=='string')return null;
   // Sealed under another epoch than the record's: a stale copy (the server keeps meta re-sealed at every rotation),
   // which would show a member list from before someone was removed and have the next rotation wrap for them again.
-  if(Number(m.e)!==epochOf(c))return null;
-  const ck=c.id+':'+m.e+':'+m.iv;
+  // The owner's part is not re-sealed at rotations: any epoch up to the current one.
+  if(o?!(Number.isInteger(m.e)&&m.e>=0&&m.e<=epochOf(c)):Number(m.e)!==epochOf(c))return null;
+  const ck=(o?'o:':'')+c.id+':'+m.e+':'+m.iv;
   if(!metaCache.has(ck))metaCache.set(ck,(async()=>{try{
     let key;
     if(raws&&raws[m.e])key=await crypto.subtle.importKey('raw',unb64(raws[m.e]),{name:'AES-GCM'},false,['decrypt']);
     else{const k=await convKey(c,m.e);if(!k)return null;key=k.key}
-    const v=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(m.iv),additionalData:metaAD(c.id)},key,unb64(m.ct))));
-    return {name:String(v.name||'').slice(0,60),desc:String(v.desc||'').slice(0,200),photo:typeof v.photo==='string'?v.photo:null,
-      owner:HANDLE_RE.test(v.owner||'')?v.owner:'',admins:handleList(v.admins),members:handleList(v.members),banned:handleList(v.banned),_unlocked:true};
+    const v=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(m.iv),additionalData:metaAD(c.id,o)},key,unb64(m.ct))));
+    const x={name:String(v.name||'').slice(0,60),desc:String(v.desc||'').slice(0,200),photo:typeof v.photo==='string'?v.photo:null,owner:HANDLE_RE.test(v.owner||'')?v.owner:'',admins:handleList(v.admins)};
+    return o?x:Object.assign(x,{members:handleList(v.members),banned:handleList(v.banned),_unlocked:true});
   }catch{return null}})());
   const v=await metaCache.get(ck);if(!v)metaCache.delete(ck);return v; // don't remember failures: keys may arrive later
 }
+const readOMeta=(c,raws)=>readMeta(c,raws,true);
 /* invite links carry a secret in the part after #, which never reaches the server */
 async function inviteKey(secret,cid,iid){const ikm=await crypto.subtle.importKey('raw',secret,'HKDF',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt:enc.encode(cid+':'+iid),info:enc.encode('hush-invite-v1')},ikm,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}

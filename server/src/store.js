@@ -2,7 +2,7 @@
 //   docs    – SQLite table `docs` in hush.db (everything durable)
 //   media   – SQLite tables `chunks` (encrypted media pieces) and `media_ids` (size and expiry per media id) in media.db
 //   memory  – presence and typing, never written to disk
-// plus the `chats` table: per chat, the hashes of its room keys and its epoch.
+// plus the `chats` table: per chat, the hashes of its room keys and its epoch; and `bans`: keyed tags of blocked usernames.
 //
 // Every successful write emits a `change` event after it is committed; the
 // subscription registry turns those into pushes. A key rotation or admin change
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS chats(
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gone(k TEXT PRIMARY KEY, ts REAL NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS bans(cid TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(cid, tag)) WITHOUT ROWID;
 `;
 
 const SCHEMA_MEDIA = `
@@ -100,8 +101,14 @@ const sha256hex = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 export const hashEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 // Sealed metadata is sealed under the chat's current epoch and nothing else (SPEC.md 5.3): a copy from an earlier
 // epoch would show a member list from before someone was removed, and clients ignore one.
+// Writes that only add wraps stop here, so a rotation (a removal) always has room in a chat record (SPEC.md 5.4).
+const keysRoomOk = (d) => byteLength(d) <= MAX_BYTES.channels * 0.75;
+// And what members and admins write (wraps, the sealed lists, invite links) leaves room for the owner's own part (ometa).
+const ownerRoomOk = (d) => byteLength(d) <= MAX_BYTES.channels - 300 * 1024;
 const metaEpochOk = (d) => !isPlain(d.meta) || d.meta.e === (d.epoch === undefined ? 0 : d.epoch);
-const metaChanged = (d, prev) => isPlain(d.meta) && JSON.stringify(d.meta) !== JSON.stringify(prev && prev.meta);
+// The owner's part (`ometa`) is not re-sealed at every rotation: any epoch the chat has had, up to the current one.
+const ometaEpochOk = (d) => !isPlain(d.ometa) || d.ometa.e <= (d.epoch === undefined ? 0 : d.epoch);
+const metaChanged = (d, prev, f = 'meta') => isPlain(d[f]) && JSON.stringify(d[f]) !== JSON.stringify(prev && prev[f]);
 
 // SPEC.md 4.2 (release 21): when an account's keys change (kv rises) the server appends the old signing key and the
 // time to `prev`, so every device can still check messages signed before the change. Clients may not write it.
@@ -222,6 +229,11 @@ export class Store extends EventEmitter {
       chatRebase: this.db.prepare('UPDATE chats SET cap_b = ? WHERE cid = ?'),
       chatOwner: this.db.prepare('UPDATE chats SET cap_o = ? WHERE cid = ?'),
       chatDel: this.db.prepare('DELETE FROM chats WHERE cid = ?'),
+      banGet: this.db.prepare('SELECT 1 FROM bans WHERE cid = ? AND tag = ?'),
+      banPut: this.db.prepare('INSERT OR IGNORE INTO bans(cid, tag) VALUES (?, ?)'),
+      banDel: this.db.prepare('DELETE FROM bans WHERE cid = ? AND tag = ?'),
+      banCount: this.db.prepare('SELECT COUNT(*) AS n FROM bans WHERE cid = ?'),
+      banDelChat: this.db.prepare('DELETE FROM bans WHERE cid = ?'),
       chunkGet: this.media.prepare('SELECT i, iv, d FROM chunks WHERE cid = ? AND mid = ? AND i = ?'),
       chunkPut: this.media.prepare('INSERT INTO chunks(cid, mid, i, iv, d) VALUES (?, ?, ?, ?, ?) ON CONFLICT(cid, mid, i) DO UPDATE SET iv = excluded.iv, d = excluded.d'),
       chunkDel: this.media.prepare('DELETE FROM chunks WHERE cid = ? AND mid = ? AND i = ?'),
@@ -362,12 +374,15 @@ export class Store extends EventEmitter {
     const now = this.now();
     const prev = this._read(p, now);
     this._check(actor, 'set', p, { d, prev });
+    if (p.kind === 'channels' && d.visibility === 'public' && d.ometa !== undefined) { d = { ...d }; delete d.ometa; }   // a public channel's description is plain
     if (p.kind === 'directory') { d = withKeyHistory(d, prev, now); this._checkSize(p.kind, d); }
     if (prev && SEALED_KINDS.has(p.kind)) fail('exists', 'a message with this id already exists');
     if (p.kind === 'channels' && metaChanged(d, prev) && !metaEpochOk(d)) fail('invalid', 'chat: sealed meta must be sealed under the current epoch');
+    if (p.kind === 'channels' && metaChanged(d, prev, 'ometa') && !ometaEpochOk(d)) fail('invalid', 'chat: ometa must be sealed under an epoch the chat has reached');
     validateForKind(p.kind, { ...p, now, op: 'set', prev }, d);
     if (p.kind === 'inbox' && !prev) this.makeRoom(p.parent, this.limits.inboxMax - 1);   // the owner's own notes count too, so they can't pile up
     this._write(p, d, now);
+    if (p.kind === 'channels' && d.visibility === 'public' && prev && prev.visibility !== 'public') this.q.banDelChat.run(p.id);   // a public channel has no blocks
     this._emit(p, d, 'set', actor);
     return { id: p.id };
   }
@@ -382,10 +397,17 @@ export class Store extends EventEmitter {
     validateDoc(merged);
     this._checkSize(p.kind, merged);
     this._check(actor, 'update', p, { d: merged, prev, patch });
+    if (p.kind === 'channels' && merged.visibility === 'public' && merged.ometa !== undefined) delete merged.ometa;   // a public channel's description is plain
+    if (p.kind === 'channels' && JSON.stringify(merged.keys) !== JSON.stringify(prev.keys) && !keysRoomOk(merged)) fail('toolarge', 'this chat has no room for more keys');
+    if (p.kind === 'channels' && ['keys', 'meta', 'invites'].some((f) => JSON.stringify(merged[f]) !== JSON.stringify(prev[f])) && byteLength(merged) > byteLength(prev) && !ownerRoomOk(merged)) fail('toolarge', 'this chat has no room for that; a removal clears space');
+    const nInv = (d) => (isPlain(d.invites) ? Object.keys(d.invites).length : 0);
+    if (p.kind === 'channels' && nInv(merged) > 50 && nInv(merged) > nInv(prev)) fail('toolarge', 'too many invite links: revoke some first');
     if (p.kind === 'directory') { merged = withKeyHistory(merged, prev, now); this._checkSize(p.kind, merged); }
     if (p.kind === 'channels' && metaChanged(merged, prev) && !metaEpochOk(merged)) fail('invalid', 'chat: sealed meta must be sealed under the current epoch');
+    if (p.kind === 'channels' && metaChanged(merged, prev, 'ometa') && !ometaEpochOk(merged)) fail('invalid', 'chat: ometa must be sealed under an epoch the chat has reached');
     validateForKind(p.kind, { ...p, now, op: 'update', prev }, merged);
     this._write(p, merged, now);
+    if (p.kind === 'channels' && merged.visibility === 'public' && prev.visibility !== 'public') this.q.banDelChat.run(p.id);   // a public channel has no blocks (ometa: dropped above)
     this._emit(p, merged, 'set', actor);
     return { id: p.id, d: merged };
   }
@@ -404,6 +426,7 @@ export class Store extends EventEmitter {
         this._remove(p);
         this.q.delUnder.run('channels/' + p.id, 'channels/' + p.id.replace(/[%_\\]/g, '\\$&') + '/%');
         this.q.chatDel.run(p.id);
+        this.q.banDelChat.run(p.id);
         this.q.chunkDelChat.run(p.id);
         this.q.midDelChat.run(p.id);
       });
@@ -497,7 +520,7 @@ export class Store extends EventEmitter {
     else if (!ID.CAP.test(caps.a || '') || !ID.CAP.test(caps.o || '')) fail('invalid', 'chat.create: groups and channels need admin and owner keys');
     const now = this.now();
     validateForKind('channels', { ...p, now, op: 'set', prev: null }, d);
-    if (!metaEpochOk(d)) fail('invalid', 'chat.create: sealed meta must be sealed under the chat\'s epoch');
+    if (!metaEpochOk(d) || !ometaEpochOk(d)) fail('invalid', 'chat.create: sealed meta must be sealed under the chat\'s epoch');
     const existing = this._read(p, now);
     if (existing) {
       const row = this.q.chatGet.get(p.id), h = sha256hex(caps.m);
@@ -562,10 +585,12 @@ export class Store extends EventEmitter {
     return { level, epoch: Number(row.epoch), type: row.type, h };
   }
 
-  // One invite's sealed key history, for a link holder about to join (SPEC.md 5.5).
+  // One invite's sealed key history, for a link holder about to join (SPEC.md 5.5). A banned person gets none.
   inviteOf({ cid, iid }, actor) {
     if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
     if (!ID.CID.test(String(cid)) || !ID.ITEM_ID.test(String(iid))) fail('invalid', 'chat.invite: bad id');
+    if (!this._read(parseDocPath('directory/' + actor.handle), this.now())) fail('unauth', 'create your account first');
+    if (this.isBanned(cid, actor.handle)) fail('banned', 'you were removed from this chat');
     const { doc } = this._chatDoc(cid);
     const inv = doc && isPlain(doc.invites) ? doc.invites[iid] : null;
     if (!inv) fail('notfound', 'no such invite');
@@ -577,10 +602,12 @@ export class Store extends EventEmitter {
     if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
     if (!ID.CID.test(String(cid)) || !ID.ITEM_ID.test(String(iid))) fail('invalid', 'chat.join: bad id');
     if (typeof proof !== 'string' || proof.length < 20 || proof.length > 128) fail('invalid', 'chat.join: bad proof');
+    if (!this._read(parseDocPath('directory/' + actor.handle), this.now())) fail('unauth', 'create your account first');   // see inviteOf
     const { p, doc } = this._chatDoc(cid);
     if (!doc) fail('notfound', 'no such chat');
     const inv = isPlain(doc.invites) ? doc.invites[iid] : null;
     if (!inv || typeof inv.ph !== 'string' || !hashEq(sha256hex(proof), inv.ph.toLowerCase())) fail('denied', 'this invite link is not valid');
+    if (this.isBanned(cid, actor.handle)) fail('banned', 'you were removed from this chat');   // after the proof, so only a valid link hears it; not `denied`, so not a wrong link
     if (!isPlain(wraps) || !Object.keys(wraps).length) fail('invalid', 'chat.join: wraps are required');
     const keys = { ...(doc.keys || {}) };
     for (const [e, m] of Object.entries(wraps)) {
@@ -591,6 +618,7 @@ export class Store extends EventEmitter {
     }
     const next = { ...doc, keys };
     this._checkSize('channels', next);
+    if (!keysRoomOk(next)) fail('toolarge', 'this chat has no room for more keys');
     validateForKind('channels', { ...p, now: this.now(), op: 'update', prev: doc }, next);
     this._write(p, next, this.now());
     this._emit(p, next, 'set', actor);
@@ -598,15 +626,20 @@ export class Store extends EventEmitter {
   }
 
   // A new epoch: new wraps, new member key, optionally new sealed meta (kick, leave, heal, go private).
-  rotateChat({ cid, epoch, keys, cap, meta, openKeys }, actor) {
+  rotateChat({ cid, epoch, keys, cap, meta, openKeys, why }, actor) {
     if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
     if (!ID.CID.test(String(cid))) fail('invalid', 'chat.rotate: bad chat id');
     const { p, doc, row } = this._chatDoc(cid);
     if (!doc || !row) fail('notfound', 'no such chat');
     const need = doc.type === 'dm' ? 1 : 2;
     if (rankOf(actor, cid) < need) fail('denied', doc.type === 'dm' ? 'open this chat with its key first' : 'this needs admin access to the chat');
+    // Publishing a key, or re-keying a public channel (its new posts would no longer be public), is the owner's call.
+    if ((openKeys !== undefined || doc.visibility === 'public') && doc.type !== 'dm' && levelOf(actor, cid) !== 'owner') fail('denied', 'publishing a key, or a new key for a public channel, needs owner access to the chat');
     const cur = doc.epoch === undefined ? 0 : doc.epoch;
     if (epoch !== cur + 1 || epoch > 31) fail('conflict', `chat.rotate: the next epoch is ${cur + 1}`);
+    if (why !== undefined && (why !== 'leave' || doc.type === 'dm')) fail('invalid', 'chat.rotate: "why" may only be "leave", in a group or channel');
+    // Any member can make admin pages rotate (leave, get back in, leave again), so leaves get only part of the 32 epochs.
+    if (why === 'leave' && epoch > this.limits.leaveRotateMaxEpoch) fail('conflict', 'chat.rotate: the key changes kept for people leaving are used up; the rest are for removing someone');
     if (!ID.CAP.test(cap || '')) fail('invalid', 'chat.rotate: bad member key');
     labelMap(keys || {}, 'chat.rotate');
     if (meta !== undefined) { sealedMeta(meta, 'chat.rotate'); if (meta.e !== epoch) fail('invalid', 'chat.rotate: sealed meta must be sealed under the new epoch'); }
@@ -660,6 +693,33 @@ export class Store extends EventEmitter {
     if (levelOf(actor, cid) !== 'owner') fail('denied', 'only the owner changes the owner key');
     this.q.chatOwner.run(sha256hex(cap), cid);
     this.emit('evict', { cid, keep: actor.conn || null });
+    return {};
+  }
+
+  // Blocked usernames (SPEC.md 5.6) are kept as tags keyed like the blind addresses (8.3): no names in a copy of the database.
+  _banTag(cid, h) { return keyedId(this.addrKey, 'ban', cid + '|' + h); }
+  isBanned(cid, h) { return typeof h === 'string' && !!this.q.banGet.get(cid, this._banTag(cid, h)); }
+
+  // An admin blocks a username from a group or channel, or lets it back in. A blocked username's member key no longer
+  // opens the chat (chat.open), and that person's connections lose their level at once.
+  setBan({ cid, h, on }, actor) {
+    if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
+    if (!ID.CID.test(String(cid)) || typeof h !== 'string' || !ID.HANDLE.test(h) || typeof on !== 'boolean') fail('invalid', 'chat.ban: bad chat id, username or on');
+    const { doc, row } = this._chatDoc(cid);
+    if (!row) fail('notfound', 'no such chat');
+    if (row.type === 'dm') fail('denied', 'a DM has no bans');
+    if (rankOf(actor, cid) < 2) fail('denied', 'this needs admin access to the chat');
+    const owner = levelOf(actor, cid) === 'owner';
+    // A blocked admin still holds the admin key until the owner replaces it; it does not lift their own block.
+    if (!owner && this.isBanned(cid, actor.handle)) fail('denied', 'you were removed from this chat');
+    const tag = this._banTag(cid, h);
+    if (!on) { this.q.banDel.run(cid, tag); return {}; }
+    if (doc && doc.visibility === 'public') fail('denied', 'a public channel has no blocks: anyone may read it');
+    if (this.q.banGet.get(cid, tag)) return {};
+    // The tags can't be listed, so junk an admin added can't be found: the owner may block as many again.
+    if (Number(this.q.banCount.get(cid).n) >= this.limits.bansPerChat * (owner ? 2 : 1)) fail('toolarge', 'this chat has blocked as many people as it can');
+    this.q.banPut.run(cid, tag);
+    this.emit('evict', { cid, keep: actor.conn || null, h });
     return {};
   }
 

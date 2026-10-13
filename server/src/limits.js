@@ -63,10 +63,12 @@ export const DEFAULT_LIMITS = Object.freeze({
                                 // which the page does out of sight while the person is still typing (SPEC.md 9.4)
   signupsPerDayPerAddr: 100,    // and, as a backstop only, so many new accounts per address under a salt that turns daily
   chatCreatesPerDay: 200,       // per connection
+  bansPerChat: 1000,            // usernames blocked from one group or channel (chat.ban, SPEC.md 5.6)
   searchPerMin: 30,             // per connection
   postsPerMin: 60,              // posts and comments per connection (SPEC.md 9.4 counts per chat; a connection is one person)
   sideWritesPerMin: 120,        // reactions, read marks and typing marks per connection
   invitesPerMinPerAddr: 20,     // chat.invite lookups per address tag (SPEC.md 5.5)
+  leaveRotateMaxEpoch: 23,      // the highest epoch a rotation for someone leaving may reach; 24 to 31 stay for removals (SPEC.md 5.6)
   powerNeedsSecure: true,       // owners and admins of groups and channels need a secured account (SPEC.md 4.6); always on in production
   boxGoneMs: 30 * 86400_000,   // a deleted password box's address is remembered this long: asking about it is not a wrong password (SPEC.md 4.5)
   pwMissesPerLogin: 10,         // wrong passwords per login (SPEC.md 4.5), whoever tries them; they come back at this many an hour

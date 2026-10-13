@@ -69,7 +69,9 @@ test('levels decide who may do what in a channel', async () => {
   await B.ok('set', { p: `channels/${CID2}/reads/0~${TAG}`, d: { ts: Date.now(), iv: 'aXY=', ct: 'c2ln' } });
   await B.ok('update', { p: `channels/${CID2}`, d: { ts: 5, last: { ts: 5, sl: 1 } } });
   assert.equal((await B.call('update', { p: `channels/${CID2}`, d: { pins: [PID] } })).e, 'denied', 'pins are an admin matter outside DMs');
-  await C.ok('update', { p: `channels/${CID2}`, d: { pins: [PID], reactions: { mode: 'off' } } });
+  await C.ok('update', { p: `channels/${CID2}`, d: { pins: [PID] } });
+  assert.equal((await C.call('update', { p: `channels/${CID2}`, d: { reactions: { mode: 'off' } } })).e, 'denied', 'reactions are a setting: the owner\'s');
+  await A.ok('update', { p: `channels/${CID2}`, d: { reactions: { mode: 'off' } } });
   assert.equal((await C.call('update', { p: `channels/${CID2}`, d: { epoch: 1 } })).e, 'denied', 'epochs change through chat.rotate');
   assert.equal((await C.call('update', { p: `channels/${CID2}`, d: { type: 'group' } })).e, 'denied');
   assert.equal((await C.call('update', { p: `channels/${CID2}`, d: { akeys: { [label()]: wrap() } } })).e, 'denied', 'admin keys change through chat.admins');

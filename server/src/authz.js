@@ -53,7 +53,9 @@ function keysOnlyAdded(prev, d) {
 
 const MEMBER_FIELDS = new Set(['ts', 'last', 'closed', 'keys']);
 const DM_MEMBER_FIELDS = new Set([...MEMBER_FIELDS, 'pins', 'ttl']);
-const ADMIN_FIELDS = new Set([...DM_MEMBER_FIELDS, 'meta', 'reactions', 'comments', 'invites', 'visibility', 'openKeys', 'name', 'desc', 'photo', 'owner', 'admins']);
+// A group's or channel's settings and description are the owner's (SPEC.md 5.4); admins keep `meta`, `invites`, `pins`.
+const OWNER_FIELDS = new Set(['reactions', 'comments', 'ttl', 'visibility', 'openKeys', 'name', 'desc', 'photo', 'owner', 'admins', 'ometa']);
+const ADMIN_FIELDS = new Set([...DM_MEMBER_FIELDS, ...OWNER_FIELDS, 'meta', 'invites']);
 const FROZEN_FIELDS = new Set(['type', 'epoch', 'akeys']);
 
 function chatRecord(a, op, p, ctx) {
@@ -80,6 +82,7 @@ function chatRecord(a, op, p, ctx) {
       const d = ctx.d, prev = ctx.prev;
       for (const f of FROZEN_FIELDS) if (JSON.stringify(d[f]) !== JSON.stringify(prev[f])) fail('denied', `"${f}" cannot change this way`);
       keysOnlyAdded(prev, d);
+      if (changedKeys(prev, d).some((f) => OWNER_FIELDS.has(f))) needLevel(a, cid, 'owner');
       return;
     }
     case 'update': {
@@ -88,7 +91,7 @@ function chatRecord(a, op, p, ctx) {
       for (const f of changed) if (FROZEN_FIELDS.has(f)) fail('denied', `"${f}" cannot change this way`);
       const memberOk = prev.type === 'dm' ? DM_MEMBER_FIELDS : MEMBER_FIELDS;
       for (const f of changed) if (!ADMIN_FIELDS.has(f)) fail('denied', `"${f}" cannot change`);
-      needLevel(a, cid, changed.every((f) => memberOk.has(f)) ? 'member' : 'admin');
+      needLevel(a, cid, changed.every((f) => memberOk.has(f)) ? 'member' : prev.type !== 'dm' && changed.some((f) => OWNER_FIELDS.has(f)) ? 'owner' : 'admin');
       if (changed.includes('keys')) keysOnlyAdded(prev, d);
       return;
     }

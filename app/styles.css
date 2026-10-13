@@ -344,6 +344,11 @@ button.po:hover{background:color-mix(in srgb,var(--text) 6%,transparent)}
 body{overscroll-behavior:none;touch-action:manipulation}
 .bar,.thread,.tab,.fab,.chat-head,.menu-item,.icon-btn,.tabs,.chip,.c-actions,.searchrow,.cbar,.recbar,.arch-head{-webkit-user-select:none;user-select:none}
 .msg .bubble,.thread{-webkit-touch-callout:none}
+/* press and hold a message: it dips under the finger, then the menu opens; on touch screens nothing in it is selected or dragged */
+.msg .bubble.grab{animation:grab .3s ease-out}
+@keyframes grab{40%{transform:scale(.95)}}
+@media (pointer:coarse){.msg .bubble{-webkit-user-select:none;user-select:none}.msg img{-webkit-user-drag:none}}
+@media (prefers-reduced-motion:reduce){.msg .bubble.grab{animation:none}}
 .bar.top{padding-right:16px}
 .list-title{flex:1;margin:0;font-size:20px;font-weight:600}
 .net{font-size:13px;color:var(--muted)}

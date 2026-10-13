@@ -98,6 +98,7 @@ function createHushAdapter(url,opts){
   api.setBase=async(cid,cap)=>{await needOpen(cid);return call('chat.base',{cid,cap})}; // a DM from before base keys were kept
   api.rebaseChat=async(cid,cap)=>{await needOpen(cid);return call('chat.rebase',{cid,cap})}; // a DM's base key after an account key change (release 21)
   api.setOwner=async(cid,cap)=>{await needOpen(cid);return call('chat.owner',{cid,cap})}; // the owner key, from the owner's new account secret
+  api.banChat=async(cid,h,on)=>{await needOpen(cid);return call('chat.ban',{cid,h,on:!!on})}; // block a username from a group or channel, or let it back in: the server refuses a blocked member key
   // ---- media over HTTP (SPEC.md 7.7): this connection vouches for a short-lived ticket, then raw encrypted pieces
   // travel over plain HTTP requests. A ticket dies with its connection, so every reconnect starts afresh. ----
   const FETCH=opts.fetch||(typeof fetch!=='undefined'?fetch.bind(globalThis):null);

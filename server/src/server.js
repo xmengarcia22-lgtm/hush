@@ -104,8 +104,9 @@ export function createServer(cfg) {
   const subs = new SubRegistry(limits);
   const conns = new Set();
   store.on('change', (evt) => subs.dispatch(evt));
-  // A rotation, admin change or deletion: everyone else loses their level and their live views of that chat.
-  store.on('evict', ({ cid, keep }) => { for (const c of conns) if (c !== keep) c.evict(cid); });
+  // A rotation, admin change or deletion: everyone else loses their level and their live views of that chat. A ban names
+  // the blocked username (`h`): only that person's connections at member level lose it.
+  store.on('evict', ({ cid, keep, h }) => { for (const c of conns) if (c !== keep && (!h || (c.proven === h && (c.chats.get(cid) || {}).level === 'member'))) c.evict(cid); });
   // New account keys (release 21): every other connection proven for that account holds the old ones. It is closed
   // with 4401 so the page signs out at once; the writer's own connection is marked up to date.
   store.on('change', (e) => {

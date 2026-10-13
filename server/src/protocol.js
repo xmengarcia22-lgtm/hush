@@ -203,7 +203,11 @@ const HANDLERS = {
     if (!c.ctx.openFails.peek(c.addrTag)) fail('ratelimit', 'too many wrong chat keys from here; wait a minute');
     let r;
     try { r = c.ctx.store.openChat({ cid: f.cid, cap: f.cap }, c.actor()); }
-    catch (e) { if (e instanceof HushError && e.code === 'denied') c.ctx.openFails.take(c.addrTag); throw e; }
+    // A connection that already holds the chat is not guessing: the page may try a better key it may hold (an owner key).
+    catch (e) { if (e instanceof HushError && e.code === 'denied' && !c.chats.has(f.cid)) c.ctx.openFails.take(c.addrTag); throw e; }
+    // A blocked username's member key is the right key, so this is not counted as a wrong one (SPEC.md 5.6). It goes by the
+    // level the key gave: an owner or admin key is never refused, not even one held at member level below.
+    if (r.level === 'member' && c.ctx.store.isBanned(f.cid, c.proven)) fail('denied', 'you were removed from this chat');
     // An owner or admin whose account isn't secured opens at member level: their tools wait, and `held` says why.
     if (r.type !== 'dm' && (r.level === 'owner' || r.level === 'admin') && !secured(c)) {
       const held = r.level;
@@ -225,7 +229,7 @@ const HANDLERS = {
     catch (e) { if (e instanceof HushError && e.code === 'denied') c.ctx.openFails.take(c.addrTag); throw e; }
   },
   'chat.rotate'(c, f) {
-    const r = c.ctx.store.rotateChat({ cid: f.cid, epoch: f.epoch, keys: f.keys, cap: f.cap, meta: f.meta, openKeys: f.openKeys }, c.actor());
+    const r = c.ctx.store.rotateChat({ cid: f.cid, epoch: f.epoch, keys: f.keys, cap: f.cap, meta: f.meta, openKeys: f.openKeys, why: f.why }, c.actor());
     const e = c.chats.get(f.cid);
     if (e) c.chats.set(f.cid, { ...e, epoch: r.epoch, h: r.h });
     return { epoch: r.epoch };
@@ -242,6 +246,10 @@ const HANDLERS = {
   },
   'chat.owner'(c, f) {
     return c.ctx.store.setOwner({ cid: f.cid, cap: f.cap }, c.actor());
+  },
+  // An admin blocks a username from a group or channel, or lets it back in (SPEC.md 5.6).
+  'chat.ban'(c, f) {
+    return c.ctx.store.setBan({ cid: f.cid, h: f.h, on: f.on }, c.actor());
   },
 
   // ---- media over HTTP (SPEC.md 7.7): a short-lived ticket that lets HTTP requests act with this connection's

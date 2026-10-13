@@ -205,6 +205,11 @@ function lastSeen(h){
 const fmtTime=ts=>new Date(ts).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
 function fmtListTime(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return fmtTime(ts);if(n-d<6*864e5)return d.toLocaleDateString([], {weekday:'short'});return d.toLocaleDateString([], {month:'short',day:'numeric'})}
 function fmtDay(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return 'Today';const y=new Date(n);y.setDate(n.getDate()-1);if(d.toDateString()===y.toDateString())return 'Yesterday';return d.toLocaleDateString([], {month:'long',day:'numeric'})}
+// A short tap where the browser can vibrate (Android and others); iPhone browsers have no Vibration API, so nothing
+// happens there. Never with reduced motion. firm: destructive actions and errors.
+const haptic=firm=>{try{if(navigator.vibrate&&!matchMedia('(prefers-reduced-motion: reduce)').matches)navigator.vibrate(firm?20:10)}catch{}};
+const toastErr=(msg,action,fn)=>{haptic(true);toast(msg,action,fn)}; // a toast that says something failed
+const confirmDanger=msg=>{const ok=confirm(msg);if(ok)haptic(true);return ok}; // a destructive action, confirmed
 let toastT;function toast(msg,action,fn){
   document.querySelectorAll('.toast').forEach(x=>x.remove());const t=el('div','toast');t.setAttribute('role','status');t.append(el('span',null,msg));
   if(action){const b=el('button','toast-act',action);b.onclick=()=>{t.remove();fn()};t.append(b)}
@@ -297,9 +302,10 @@ const titleNode=(tag,cls,c)=>{const n=el(tag,cls,convTitle(c));if(typeOf(c)==='d
 const convById=id=>S.convs.find(c=>c.id===id)||S.previews.get(id);
 const curConv=()=>S.chan?convById(S.chan):null;
 const isMember=c=>!!c&&(c.members||[]).includes(S.me.handle);
-const isOwner=c=>!!c&&c.owner===S.me.handle;
+const levelHere=c=>c&&c.id&&S.db&&S.db.chatLevel?S.db.chatLevel(c.id):null; // what the server gave this connection's key
+const isOwner=c=>!!c&&(c.owner===S.me.handle||levelHere(c)==='owner');
 const isAdminH=(c,h)=>!!c&&(c.owner===h||(c.admins||[]).includes(h));
-const isAdmin=c=>!!(c&&S.me)&&isAdminH(c,S.me.handle);
+const isAdmin=c=>!!(c&&S.me)&&(isAdminH(c,S.me.handle)||['owner','admin'].includes(levelHere(c)));
 const canPost=c=>isMember(c)&&(typeOf(c)!=='channel'||isAdmin(c));
 const canPin=c=>isMember(c)&&(typeOf(c)==='dm'||isAdmin(c));
 const mentionsMe=t=>!!(t&&S.me&&new RegExp('(^|[^\\p{L}\\p{N}_@])@'+S.me.handle+'(?![\\p{L}\\p{N}_])','iu').test(t));
@@ -421,7 +427,7 @@ function updateTitle(){let n=0;S.unread.forEach((v,k)=>{const c=convById(k);if(k
 /* ---------- chat organization: pins, mutes and archive live in your encrypted vault ---------- */
 const P=()=>S.prefs||(S.prefs={pinned:[],muted:{},archived:[]});
 const isPinned=id=>P().pinned.includes(id),isMuted=id=>!!P().muted[id],isArchived=id=>P().archived.includes(id);
-function prefsOk(){if(!S.contactsReady){toast('Still loading your settings. Try again in a moment.');return false}return true}
+function prefsOk(){if(!S.contactsReady){toastErr('Still loading your settings. Try again in a moment.');return false}return true}
 function togglePin(id){if(!prefsOk())return;const p=P();p.pinned=isPinned(id)?p.pinned.filter(x=>x!==id):[id,...p.pinned];if(isPinned(id))p.archived=p.archived.filter(x=>x!==id);saveContacts()}
 function toggleMute(id){if(!prefsOk())return;const p=P();if(p.muted[id])delete p.muted[id];else p.muted[id]=true;saveContacts();updateTitle();toast(isMuted(id)?'Muted. You won\u2019t get alerts from this chat.':'Unmuted')}
 function toggleArchive(id,on,quiet){if(!prefsOk())return;const p=P();p.archived=p.archived.filter(x=>x!==id);
@@ -445,13 +451,17 @@ function chatMenu(anchor,c){
   items.forEach(([ic,label,fn])=>{const b=html('button','menu-item',ic);b.append(el('span',null,label));b.onclick=()=>{m.remove();fn()};m.append(b)});
   placeMenu(m,anchor);
 }
-function addLongPress(node,fn){
-  let t=null,x=0,y=0;const clr=()=>{if(t){clearTimeout(t);t=null}};
-  node.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;x=e.touches[0].clientX;y=e.touches[0].clientY;clr();
-    t=setTimeout(()=>{t=null;node._noClick=Date.now();if(navigator.vibrate)navigator.vibrate(10);fn()},480)},{passive:true});
+// grab: an element that dips under the finger when the hold completes (messages), with the haptic tap; then fn.
+function addLongPress(node,fn,grab){
+  let t=null,x=0,y=0,touching=false,fired=false;const clr=()=>{if(t){clearTimeout(t);t=null}};
+  node.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;touching=true;fired=false;x=e.touches[0].clientX;y=e.touches[0].clientY;clr();
+    t=setTimeout(()=>{t=null;fired=true;node._noClick=Date.now();haptic();if(!grab){fn();return}
+      grab.classList.remove('grab');void grab.offsetWidth;grab.classList.add('grab');setTimeout(fn,150);setTimeout(()=>grab.classList.remove('grab'),400)},480)},{passive:true});
   node.addEventListener('touchmove',e=>{if(Math.abs(e.touches[0].clientX-x)>8||Math.abs(e.touches[0].clientY-y)>8)clr()},{passive:true});
-  node.addEventListener('touchend',clr);node.addEventListener('touchcancel',clr);
-  node.addEventListener('contextmenu',e=>{e.preventDefault();clr();fn()});
+  const up=()=>{clr();touching=false;if(fired)node._noClick=Date.now()}; // the tap a browser may send when the finger lifts after a hold does nothing
+  node.addEventListener('touchend',up);node.addEventListener('touchcancel',up);
+  // A mouse's right click opens it at once; the one Android sends during a hold is the hold itself, already handled
+  node.addEventListener('contextmenu',e=>{e.preventDefault();if(touching||Date.now()-(node._noClick||0)<1000)return;clr();fn()});
 }
 function addSwipe(node,{dir,max=80,threshold=55,on,target,when}){
   let x0=0,y0=0,dx=0,active=false,lock=null;const tg=target||node;
@@ -460,7 +470,7 @@ function addSwipe(node,{dir,max=80,threshold=55,on,target,when}){
     if(lock===null){if(Math.abs(mx)<10&&Math.abs(my)<10)return;lock=Math.abs(mx)>Math.abs(my)*1.5&&Math.sign(mx)===dir?'x':'y';if(lock==='x')node._noClick=Date.now()}
     if(lock!=='x')return;dx=Math.max(0,Math.min(max,mx*dir));tg.style.transform=`translateX(${dx*dir}px)`;tg.classList.toggle('swipe-ready',dx>=threshold)},{passive:true});
   const end=()=>{if(!active)return;active=false;tg.style.transition='transform .2s ease';tg.style.transform='';tg.classList.remove('swipe-ready');
-    if(lock==='x'){node._noClick=Date.now();if(dx>=threshold){if(navigator.vibrate)navigator.vibrate(8);on()}}};
+    if(lock==='x'){node._noClick=Date.now();if(dx>=threshold){haptic();on()}}};
   node.addEventListener('touchend',end);node.addEventListener('touchcancel',end);
 }
 /* ---------- saved messages, forwarding, disappearing messages ---------- */
@@ -477,7 +487,7 @@ function openForward(p,o){
     S.convs.filter(c=>canPost(c)&&!isSelf(c)).sort((a,b)=>(b.ts||0)-(a.ts||0)).forEach(c=>tgs.push({title:convTitle(c),h:typeOf(c)==='dm'?dmPeer(c):'',av:()=>convAvatar(c,'sm'),id:()=>c.id}));
     (S.contacts||[]).filter(ct=>ct.handle&&S.dir[ct.handle]&&!S.convs.some(c=>c.id===dmIds.get(ct.handle))).forEach(ct=>tgs.push({title:ct.name,h:ct.handle,av:()=>userAvatar(ct.handle,'sm'),id:()=>ensureDmPreview(ct.handle)}));
     tgs.filter(t=>!q||t.title.toLowerCase().includes(q)).forEach(t=>{const b=el('button','thread');const m=el('div','t-main');m.append(withBadge(el('div','t-name',t.title),t.h||''));
-      b.append(t.av(),m);b.onclick=()=>{close();const id=t.id();if(!id){toast('That chat isn’t ready yet. Try again in a moment.');return}forwardTo(id,p,o,src,t.title)};list.append(b)});
+      b.append(t.av(),m);b.onclick=()=>{close();const id=t.id();if(!id){toastErr('That chat isn’t ready yet. Try again in a moment.');return}forwardTo(id,p,o,src,t.title)};list.append(b)});
     if(!list.children.length)list.append(el('div','empty','No matches.'));
   };
   inp.oninput=draw;draw();
@@ -494,7 +504,7 @@ async function forwardTo(tid,p,o,src,title){
     const fwd=o.fwd||(typeOf(src)==='channel'?{name:src.name}:{name:(S.dir[p.from]&&S.dir[p.from].name)||p.from});
     await sendBody(tid,buildBody({text:o.text,media,fwd}));
     toast('Forwarded to '+title,'Open',()=>openConv(tid));
-  }catch{toast('Couldn\u2019t forward that. Check your connection and try again.')}
+  }catch{toastErr('Couldn\u2019t forward that. Check your connection and try again.')}
 }
 const TTLS=[[0,'Off'],[300,'5 minutes'],[3600,'1 hour'],[86400,'1 day'],[604800,'1 week']];
 const ttlLabel=v=>(TTLS.find(x=>x[0]===v)||[0,Math.round(v/60)+' minutes'])[1];
@@ -508,7 +518,7 @@ function openTtl(cid){
       try{await ensureDmDoc(c);await S.db.doc('channels/'+cid).update({ttl:v});
         await S.db.collection(`channels/${cid}/posts`).add(await sealSvc(c,'ttl',v));
         toast(v?'New messages will disappear after '+l.toLowerCase():'Disappearing messages are off')}
-      catch{toast('That didn\u2019t go through. Check your connection and try again.')}};
+      catch{toastErr('That didn\u2019t go through. Check your connection and try again.')}};
     body.append(b)});
   body.append(el('p','hint','People can still take a screenshot or copy a message before it disappears.'));
 }
@@ -531,7 +541,7 @@ async function loadOlder(){
     if(S.chan!==c.id)return;const docs=await unsealAll(c,s.docs.map(d=>Object.assign({_id:d.id},d.data())));if(S.chan!==c.id)return;if(docs.length<200)S.allLoaded=true;
     const box=$('#msgs');if(box)S.keepScroll={h:box.scrollHeight,top:box.scrollTop};
     S.older=[...docs.reverse(),...(S.older||[])];applyExpiry();await renderConv();
-  }catch{toast('Couldn\u2019t load earlier messages. Check your connection.')}
+  }catch{toastErr('Couldn\u2019t load earlier messages. Check your connection.')}
   S.loadingOlder=false;
 }
 async function purgePost(c,p){ // whoever sees an expired message first deletes it, including its encrypted files
@@ -630,14 +640,28 @@ async function capsFor(cid){ // the keys this device holds for a chat, best firs
   if(!c){const s=await S.db.preview(cid);if(!s.exists)return null;c=Object.assign({id:cid},s.data());S.chatDocs.set(cid,c)}
   if(typeOf(c)==='dm'){const e=epochOf(c);return [e>0&&await memberCap(c,e),await memberCap(c,0),await dmBaseCapOld(c)].filter(Boolean)} // the base key always lets you back in to heal; after a key change the one from before is tried too
   const shown=await showMeta(c),me=S.me.handle;
-  if(shown.owner===me){noteTier('owner');const caps=[await ownerCap(cid),await ownerCapOld(cid)].filter(Boolean);if(S.rekeying)caps.reverse(); // the server knows the old owner key until this device replaces it (rekeyRun): while that runs it is tried first, so no open fails
+  // Named owner only by meta (any admin may rewrite it): the owner key once this connection holds the chat (not counted then)
+  const unsure=c.visibility!=='public'&&!shown._ometa&&!(S.db.chatLevel(cid)&&!notOwner(cid));
+  if(shown.owner===me&&unsure)ownTried.delete(cid);
+  if(shown.owner===me&&!unsure){noteTier('owner');if(c.visibility!=='public'&&!shown._ometa)ownTried.add(cid);const caps=[await ownerCap(cid),await ownerCapOld(cid)].filter(Boolean);if(S.rekeying)caps.reverse(); // the server knows the old owner key until this device replaces it (rekeyRun): while that runs it is tried first, so no open fails
     const a=await adminSecret(c).catch(()=>null);return [...caps,a?await adminCapFrom(cid,a):null,await memberCap(c,epochOf(c))].filter(Boolean)} // then the admin and member keys: a chat whose owner key is no longer mine still opens to read
-  if((shown.admins||[]).includes(me)){noteTier('admin');const a=await adminSecret(c);if(a)return adminCapFrom(cid,a)}
+  if((shown.admins||[]).includes(me))noteTier('admin');
+  // Only the owner and admins hold the admin secret. Where nothing only the owner writes names the owner and admins (a
+  // preview, a group from before ometa, an ometa this device can't open), it is tried before the member key, so a blocked
+  // or keyless owner or admin still opens; once this connection holds the chat the owner key is tried too (not counted
+  // as a wrong key then), and the whole record opens it again (noteChatDoc).
+  const known=c.visibility==='public'||!!shown._ometa;
+  const a=!known||(shown.admins||[]).includes(me)?await adminSecret(c).catch(()=>null):null;
+  const own=a&&!known&&S.db.chatLevel(cid)&&!notOwner(cid)?await ownerCap(cid):null;if(own)ownTried.add(cid);else ownTried.delete(cid);
+  if(a)return [own,await adminCapFrom(cid,a),await memberCap(c,epochOf(c))].filter(Boolean);
   return memberCap(c,epochOf(c));
 }
 function noteChatDoc(c){ // remember the server's copy; a new epoch or new admin keys mean the connector should open the chat again
   const prev=S.chatDocs.get(c.id);S.chatDocs.set(c.id,c);
-  if(prev&&((prev.epoch||0)!==(c.epoch||0)||JSON.stringify(prev.akeys||{})!==JSON.stringify(c.akeys||{}))&&S.db&&S.db.refreshChat)S.db.refreshChat(c.id).catch(()=>{});
+  if(!prev||!S.db||!S.db.refreshChat)return;
+  if((prev.epoch||0)!==(c.epoch||0)||JSON.stringify(prev.akeys||{})!==JSON.stringify(c.akeys||{}))S.db.refreshChat(c.id).catch(()=>{});
+  // so does the first whole record after a preview (it names no owner), where opening again can climb
+  else if(!prev.meta&&!prev.ometa&&(c.meta||c.ometa))showMeta(c).then(async s=>{if(s.owner===S.me.handle||c.visibility!=='public'&&!s._ometa&&!notOwner(c.id)&&await adminSecret(c))await climb(c)}).catch(()=>{});
 }
 async function onChatEvicted(cid){ // the server took our level away (a rotation, or we were removed): fetch the new record before trying again
   try{const s=await S.db.preview(cid);if(s.exists)S.chatDocs.set(cid,Object.assign({id:cid},s.data()));else S.chatDocs.delete(cid)}catch{}
@@ -654,7 +678,7 @@ async function syncWraps(c){ // wrap the chat keys this device holds for my othe
   }catch{wrapSynced.delete(c.id)}
 }
 async function rotateTo(c,v,extra,opts){ // a fresh chat key for everyone in `v.members`, plus a fresh sealed description; returns the new epoch. opts.noLoad: the profiles were fetched a moment ago
-  if(typeOf(c)!=='dm'&&!(v.members||[]).includes(S.me.handle))throw new Error('notmember'); // a list that leaves me out is stale or forged: never hand the chat to it
+  v=Object.assign({},v,{members:(v.members||[]).filter(h=>h===S.me.handle||!(v.banned||[]).includes(h))});if(typeOf(c)!=='dm'&&!v.members.includes(S.me.handle))throw new Error('notmember'); // never a wrap for someone blocked; a list that leaves me out is stale or forged: never hand the chat to it
   const e=epochOf(c)+1,raw=crypto.getRandomValues(new Uint8Array(32));if(!(opts&&opts.noLoad))await loadDir(v.members,true); // fresh profiles before wrapping for everyone
   const keys=await wrapAll(raw,v.members,c.id,e),meta=typeOf(c)==='dm'?undefined:await sealMeta(c.id,e,raw,v);
   await S.db.rotateChat(c.id,Object.assign({epoch:e,keys,cap:await memberCapFrom(c.id,e,raw)},meta?{meta}:{},extra||{}));
@@ -724,17 +748,40 @@ async function showMeta(c,raws){ // an on-screen copy with the readable fields f
   const v=c.meta?await readMeta(c,raws):null;
   if(v){Object.assign(out,v);if(me&&!out.members.includes(me)&&(await convKey(c,epochOf(c))))out.members=[...out.members,me]} // joined by link, not yet written into the list
   else{out.name=typeOf(c)==='group'?'Private group':'Private channel';out.desc='';out.photo=null;out.members=c.members||[];out.admins=c.admins||[];out.owner=c.owner||''}
+  // The owner's own part (ometa), which only the owner key writes: once there, what an admin seals into meta names no owner, admins or name
+  if(c.ometa){const o=await readOMeta(c,raws);Object.assign(out,o?{...o,_ometa:true}:{owner:'',admins:[]})} // unopened: meta's name, description and photo, but no owner or admins
   if(!out.name)out.name=typeOf(c)==='group'?'Group':'Channel';
   return out;
+}
+const ownTried=new Set(),notOwnerKey=()=>'hush:notOwner:'+S.me.handle,notOwner=cid=>!!ls.get(notOwnerKey(),{})[cid];
+let climbQ=Promise.resolve();
+const climb=c=>climbQ=climbQ.then(async()=>{try{await S.db.refreshChat(c.id); // open again, best key first (capsFor); a few a second
+  if(ownTried.has(c.id)&&S.db.chatLevel(c.id)==='admin'){const m=ls.get(notOwnerKey(),{});m[c.id]=1;ls.set(notOwnerKey(),m)}}catch{} // the owner key was refused: no chat changes owner, so it is not tried again on this device
+  await new Promise(r=>setTimeout(r,250))});
+const handedKey=()=>'hush:handed:'+S.me.handle;
+const handOver=async(c,shown)=>{ // a group from before ometa: its blocks predate the server's list; handed over once per device and list
+  if(c.ometa)return;const b=JSON.stringify([...(shown.banned||[])].sort()),m=ls.get(handedKey(),{});if(b==='[]'||m[c.id]===b)return;
+  for(const h of shown.banned)await S.db.banChat(c.id,h,true);m[c.id]=b;ls.set(handedKey(),m)};
+const oAdopted=new Set();
+async function adoptOMeta(c,shown){ // ometa (SPEC.md 5.3), once per page load and epoch where this device holds the admin secret
+  if(!S.db||!S.me||!c||!c.meta||!shown||typeOf(c)==='dm'||c.visibility==='public'||S.rekeying)return;
+  const k=c.id+':'+epochOf(c);if(oAdopted.has(k)||c.ometa&&(!shown._ometa||c.ometa.e>=epochOf(c)))return;oAdopted.add(k); // nothing to do: up to date, or unopened here; a failure waits for the next load
+  try{if(!(await adminSecret(c).catch(()=>null)))return; // only the owner and admins hold it
+    if(!c.ometa&&!notOwner(c.id))await climb(c);const lv=S.db.chatLevel(c.id); // the owner key is tried while only meta names the owner (capsFor)
+    if(lv!=='owner'&&lv!=='admin')return;
+    if(shown._unlocked)await handOver(c,shown); // first: a failure leaves no ometa, so the next load tries again
+    // the owner is whoever the owner key opens for, not what meta says (even a meta an admin made unreadable); a later
+    // ometa is sealed again under the current epoch, so a device added since (it holds only the later keys) can open it
+    if(lv==='owner')await S.db.doc('channels/'+c.id).update({ometa:await sealOMetaFor(c,Object.assign({},shown,c.ometa?{}:{owner:S.me.handle}))})}catch{}
 }
 async function chatAnd(cid){const c=S.chatDocs.get(cid)||await freshChan(cid);return [c,await showMeta(c)]} // the server's record and its readable copy
 async function setVisibility(cid,vis){
   const [c,shown]=await chatAnd(cid);if(c.visibility===vis)return;const v=metaOf(shown);
   if(vis==='public'){ // history becomes readable to anyone, and so do the name and photo, so people can find it
-    await S.db.doc('channels/'+cid).update({visibility:'public',openKeys:await allRaws(c),name:v.name,desc:v.desc,photo:v.photo,owner:v.owner||S.me.handle,admins:v.admins,meta:null,invites:{}})}
+    await S.db.doc('channels/'+cid).update({visibility:'public',openKeys:await allRaws(c),name:v.name,desc:v.desc,photo:v.photo,owner:v.owner||S.me.handle,admins:v.admins,meta:null,ometa:null,invites:{}})}
   else{ // a fresh key from here on, and the description goes back under seal
     await rotateTo(c,v);
-    await S.db.doc('channels/'+cid).update({visibility:'private',name:null,desc:null,photo:null,owner:null,admins:null,invites:{}})}
+    await S.db.doc('channels/'+cid).update({visibility:'private',name:null,desc:null,photo:null,owner:null,admins:null,invites:{},ometa:await sealOMetaFor(c,v)})}
   ls.set('hush:inv:'+cid,null);
 }
 async function createInvite(cid){
@@ -753,23 +800,20 @@ async function inviteRaws(cid,j){ // the key history inside an invite link, fetc
 async function handleJoin(code){
   const am=String(code||'').match(/add=([a-z0-9_]{3,20})/);
   if(am){const h=am[1];
-    if(!S.db||!S.me){toast('This link can\u2019t be opened right now. Check your connection.');return false}
+    if(!S.db||!S.me){toastErr('This link can\u2019t be opened right now. Check your connection.');return false}
     if(h===S.me.handle){toast('That\u2019s your own invite link. Send it to a friend.');return true}
-    if(!S.dir[h]){try{const s=await S.db.doc('directory/'+h).get();if(!s.exists){toast('No one on Hush has the username @'+h+'.');return false}S.dir[h]=s.data()}catch{toast('Couldn\u2019t open that link. Check your connection.');return false}}
+    if(!S.dir[h]){try{const s=await S.db.doc('directory/'+h).get();if(!s.exists){toastErr('No one on Hush has the username @'+h+'.');return false}S.dir[h]=s.data()}catch{toastErr('Couldn\u2019t open that link. Check your connection.');return false}}
     openDm(h);return true}
-  const j=parseJoin(code);if(!j){toast('That doesn\u2019t look like a Hush invite link.');return false}
-  if(!S.db||!S.me){toast('Joining isn\u2019t available right now. Check your connection.');return false}
+  const j=parseJoin(code);if(!j){toastErr('That doesn\u2019t look like a Hush invite link.');return false}
+  if(!S.db||!S.me){toastErr('Joining isn\u2019t available right now. Check your connection.');return false}
   let c;try{c=await freshChan(j.cid)}catch{toast('That channel doesn\u2019t exist anymore.');return false}
-  if(convById(j.cid)||c.visibility==='public'){S.previews.set(c.id,await showMeta(c));openConv(c.id);return true}
-  if(!j.iid||!j.secret){toast('This invite link is incomplete. Ask for a new one.');return false}
-  let raws=null;try{raws=await inviteRaws(j.cid,j)}catch(e){toast(e&&e.code==='notfound'?'This invite link was revoked. Ask for a new one.':'Couldn\u2019t read that invite link. Check your connection.');return false}
-  const shown=await showMeta(c,raws);
-  if((shown.banned||[]).includes(S.me.handle)){toast('You were removed from this channel.');return false}
-  confirmJoin(shown,j);return true;
+  if(S.convs.some(x=>x.id===j.cid)||c.visibility==='public'){S.previews.set(c.id,await showMeta(c));openConv(c.id);return true} // the list, not a preview left from before a removal
+  if(!j.iid||!j.secret){toastErr('This invite link is incomplete. Ask for a new one.');return false}
+  let raws=null;try{raws=await inviteRaws(j.cid,j)}catch(e){toastErr(e&&e.code==='notfound'?'This invite link was revoked. Ask for a new one.':e&&e.code==='banned'?'You were removed from this '+(typeOf(c)==='group'?'group.':'channel.'):'Couldn\u2019t read that invite link. Check your connection.');return false} // only the server can refuse a banned person: the preview has no blocked list
+  confirmJoin(await showMeta(c,raws),j);return true;
 }
 async function joinPrivate(cid,j){
-  const c=await freshChan(cid),raws=await inviteRaws(cid,j);
-  const shown=await showMeta(c,raws);if((shown.banned||[]).includes(S.me.handle))throw new Error('banned');
+  const raws=await inviteRaws(cid,j);
   const wraps={};for(const [e,r] of Object.entries(raws)){wraps[e]=await wrapKey(unb64(r),S.me.handle,cid,Number(e));ksPut(cid,e,r)}
   await S.db.joinChat(cid,j.iid,await joinProof(j.secret,cid,j.iid),wraps); // proves the link to the server and files our own wraps
   const full=await freshChan(cid);noteChatDoc(full);await S.db.refreshChat(cid);
@@ -843,7 +887,7 @@ function openConv(cid){
   mw.append(msgs,tbub,down);p.append(bar,pinbar,mw);
   if(!isMember(c)){
     if(t==='channel'&&c.visibility==='public'){const f=el('div','composer readonly');const j=el('button','primary join','Join channel');
-      j.onclick=async()=>{j.disabled=true;try{await joinPublic(cid)}catch(e){j.disabled=false;if(!e||e.message!=='banned')toast('Couldn\u2019t join. Check your connection and try again.')}};f.append(j);p.append(f)}
+      j.onclick=async()=>{j.disabled=true;try{await joinPublic(cid)}catch(e){j.disabled=false;if(!e||e.message!=='banned')toastErr('Couldn\u2019t join. Check your connection and try again.')}};f.append(j);p.append(f)}
   }else if(!canPost(c))p.append(el('div','composer readonly','Only the channel owner and admins can post here'));
   else if(t==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c))){const kw=el('div','composer readonly kwbar');kw.append(keyWarnBox(dmPeer(c)));p.append(kw)}
   else if(isRequest(c))p.append(requestBar(c));
@@ -859,7 +903,7 @@ function openConv(cid){
       S.rawPosts=un;reconcileSvc(convById(cid)||c,un).catch(()=>{});noteAccepted(cid,un);
       if(!s.metadata.fromCache&&s.docs.length<300&&!(S.older||[]).length)S.allLoaded=true;
       if(!s.metadata.fromCache)pruneIdx(cid,S.rawPosts,S.allLoaded);
-      applyExpiry();if(S.stick)markRead();renderConv();drawPinBar()},()=>toast('This chat stopped updating. Reload to reconnect.')),
+      applyExpiry();if(S.stick)markRead();renderConv();drawPinBar()},()=>{if(S.chan===cid)toastErr('This chat stopped updating. Reload to reconnect.')}),
     S.db.collection(base+'/acts').limit(1000).onSnapshot(s=>onActs(s.docs.map(d=>Object.assign({_id:d.id},d.data()))),()=>{}),
     S.db.collection(base+'/reads').limit(1000).onSnapshot(s=>readSide(cid,s.docs,'hush-seen-v1',r=>{S.reads=r;refreshNodes()}),()=>{}),
     S.db.collection(base+'/typing').limit(200).onSnapshot(s=>readSide(cid,s.docs,'hush-type-v1',r=>{S.typing=r;drawTyping();refreshHeader()}),()=>{}));
@@ -876,7 +920,7 @@ async function drawPinBar(){
   pb.replaceChildren();pb.hidden=false;pb.insertAdjacentHTML('beforeend',I.pin);
   const m=el('div','t-main');m.append(el('div','pb-title','Pinned message'+(pins.length>1?` ${idx+1} of ${pins.length}`:'')),el('div','t-sub',p?snippet(o):'Message no longer available'));pb.append(m);
   if(canPin(c)){const x=html('span','icon-btn pb-x',I.xs);x.setAttribute('role','button');x.setAttribute('aria-label','Unpin');
-    x.onclick=async e=>{e.stopPropagation();try{await S.db.doc('channels/'+c.id).update({pins:pins.filter(v=>v!==id)})}catch{toast('Couldn\u2019t unpin. Try again.')}};pb.append(x)}
+    x.onclick=async e=>{e.stopPropagation();try{await S.db.doc('channels/'+c.id).update({pins:pins.filter(v=>v!==id)})}catch{toastErr('Couldn\u2019t unpin. Try again.')}};pb.append(x)}
   pb.onclick=async()=>{if(p){if(!S.rendered||!S.rendered.nodes.get(id)){for(let k=0;k<10&&!S.allLoaded&&!(S.rendered&&S.rendered.nodes.get(id));k++)await loadOlder()}jumpTo(id)}
     if(pins.length>1){S.pinIdx=(S.pinIdx+1)%pins.length;drawPinBar()}};
 }
@@ -884,7 +928,7 @@ async function togglePinMsg(c,p){
   const cur=(c.pins||[]),on=!cur.includes(p._id),pins=cur.filter(x=>x!==p._id);if(on)pins.unshift(p._id);
   try{await ensureDmDoc(c);await S.db.doc('channels/'+c.id).update({pins:pins.slice(0,20)});
     if(on)await S.db.collection(`channels/${c.id}/posts`).add(await sealSvc(c,'pin',0));S.pinIdx=0;toast(on?'Message pinned':'Message unpinned')}
-  catch{toast('That didn\u2019t go through. Try again.')}
+  catch{toastErr('That didn\u2019t go through. Try again.')}
 }
 function openSearch(){
   const pane=$('#chatPane');const ex=pane.querySelector('.sbar');if(ex){ex.querySelector('input').focus();return}
@@ -935,7 +979,7 @@ function openComments(p,o){
     ta.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&matchMedia('(pointer:fine)').matches){e.preventDefault();go.click()}};
     go.onclick=async()=>{const text=ta.value.trim();if(!text)return;go.disabled=true;
       try{const cc=curConv();const cm=await sealPost(cc,buildBody({text,on:p._id}));cm.post=p._id;await S.db.collection(`channels/${cc.id}/comments`).add(cm);ta.value='';ta.oninput()}
-      catch{toast('Comment not sent. Try again.')}go.disabled=false;ta.focus()}}
+      catch{toastErr('Comment not sent. Try again.')}go.disabled=false;ta.focus()}}
   else body.append(el('p','hint',!allowed?'Comments are turned off for this channel.':'Join the channel to comment.'));
   let seq=0;
   const render=async()=>{if(!list.isConnected){S.commentsView=null;return}const my=++seq;const cc=curConv();if(!cc)return;
@@ -948,7 +992,7 @@ function openComments(p,o){
       if(oo.known&&!oo.verified)tx.append(el('span','warn','Signature check failed'));
       m.append(nm,tx,el('div','c-time',fmtDay(x.ts)+' '+fmtTime(x.ts)));r.append(userAvatar(x.from,'sm'),m);
       if(x.from===S.me.handle||isAdmin(cc)){const d=html('button','icon-btn c-del',I.trash);d.setAttribute('aria-label','Delete comment');
-        d.onclick=async()=>{if(!confirm('Delete this comment?'))return;try{await S.db.doc(`channels/${cc.id}/comments/${x._id}`).delete()}catch{toast('Couldn\u2019t delete it.')}};r.append(d)}
+        d.onclick=async()=>{if(!confirmDanger('Delete this comment?'))return;try{await S.db.doc(`channels/${cc.id}/comments/${x._id}`).delete()}catch{toastErr('Couldn\u2019t delete it.')}};r.append(d)}
       list.append(r)});
     list.scrollTop=list.scrollHeight};
   S.commentsView={render};render();if(ta)setTimeout(()=>ta.focus(),80);
@@ -1074,7 +1118,7 @@ function buildComposer(p,c){
     if(r.collapsed){toast('Select some text first, then pick a style.');return}
     let href=null;
     if(k==='link'){href=prompt('Paste the link (starting with https://)','https://');if(href==null)return;href=href.trim();
-      if(!/^https?:\/\/[^\s)]+$/.test(href)||href==='https://'){toast('Links need to start with https:// or http://');return}
+      if(!/^https?:\/\/[^\s)]+$/.test(href)||href==='https://'){toastErr('Links need to start with https:// or http://');return}
       sel.removeAllRanges();sel.addRange(r)}
     const frag=r.extractContents();
     frag.querySelectorAll('*').forEach(n=>{if(fmtMatch(n,k))unwrap(n)});
@@ -1149,8 +1193,8 @@ function buildComposer(p,c){
       tile.append(m,rm);if(x.f.type==='image/gif')tile.append(el('span','badge','GIF'));strip.append(tile)})};
   const addFiles=list=>{if(S.editing)return;for(const f of list){
       const k=mediaKind(f.type),max=lim().filesPerMessage;
-      if(files.length>=max){toast(`Up to ${max} files per message.`);break}
-      if(f.size>kindLimit(k)){toast(`${f.name||'That file'} is over the ${fmtLimit(kindLimit(k))} limit for ${k==='gif'?'GIFs':k==='file'?'files':k+'s'}.`);continue}
+      if(files.length>=max){toastErr(`Up to ${max} files per message.`);break}
+      if(f.size>kindLimit(k)){toastErr(`${f.name||'That file'} is over the ${fmtLimit(kindLimit(k))} limit for ${k==='gif'?'GIFs':k==='file'?'files':k+'s'}.`);continue}
       files.push({f,url:k==='file'?null:URL.createObjectURL(f)})}
     drawStrip();upd()};
   ed.addEventListener('keydown',e=>{
@@ -1175,28 +1219,29 @@ function buildComposer(p,c){
     const r=await startRecording(v=>{rlvl.style.transform=`scaleX(${Math.min(1,.12+v*1.6)})`});if(!r)return;
     rec=r;comp.hidden=true;recbar.hidden=false;fbar.hidden=true;rtime.textContent='0:00';
     recT=setInterval(()=>{const s=(Date.now()-r.t0)/1000;rtime.textContent=fmtDur(s);if(s>=lim().voiceSeconds)rsend.click()},250);
-    S.recCancel=()=>{const x=endRec();if(x)x.stop()};if(navigator.vibrate)navigator.vibrate(10)};
+    S.recCancel=()=>{const x=endRec();if(x)x.stop()};haptic()};
   rcancel.onclick=()=>{const x=endRec();if(x)x.stop()};
   rsend.onclick=async()=>{const r=endRec();if(!r)return;const out=await r.stop();
-    if(out.dur<.7||!out.blob.size){toast('That was too short. Tap the mic, speak, then tap send.');return}
-    if(out.blob.size>lim().voiceBytes){toast('That recording is too long to send.');return}
+    if(out.dur<.7||!out.blob.size){toastErr('That was too short. Tap the mic, speak, then tap send.');return}haptic();
+    if(out.blob.size>lim().voiceBytes){toastErr('That recording is too long to send.');return}
     const reply=S.replyTo;S.stick=true;busy=true;upd();prog.hidden=false;progress(0,'Encrypting voice message\u2026');
     try{const cc=convById(cid);
       const m={kind:'voice',mime:out.blob.type||'audio/webm',src:out.blob,w:0,h:0,dur:Math.round(out.dur*10)/10,wave:out.wave,chunks:Math.max(1,Math.ceil(out.blob.size/lim().pieceBytes))};
       let done=0;const d=await uploadMedia(cc,m,()=>{done++;progress(done/m.chunks,'Sending\u2026')},mediaExp(cc));
       await sendBody(cid,buildBody({media:[d],reply}));S.replyTo=null;sync()}
-    catch(err){toast(sendErr(err,t))}
+    catch(err){toastErr(sendErr(err,t))}
     busy=false;prog.hidden=true;upd()};
   const doSend=async at=>{
     const text=getText();if(busy||!S.db)return;
     if(S.editing){const {p:op,o}=S.editing;if(!text.trim()&&!(o.media&&o.media.length))return;
       busy=true;upd();
-      try{await editPost(cid,op,o,text);S.editing=null;clearEd();sync()}catch(err){toast(sendErr(err,t))}
+      try{await editPost(cid,op,o,text);S.editing=null;clearEd();sync()}catch(err){toastErr(sendErr(err,t))}
       busy=false;upd();return}
     if(!text.trim()&&!files.length)return;
+    haptic(); // once per message sent, never per keystroke
     const reply=S.replyTo;S.stick=true;
     if(!files.length){const keep=[...ed.childNodes];clearEd();ed.focus();S.replyTo=null;sync();
-      try{await sendBody(cid,buildBody({text,reply}),at)}catch(err){ed.replaceChildren(...keep);S.replyTo=reply;sync();saveDraft();toast(sendErr(err,t))}return}
+      try{await sendBody(cid,buildBody({text,reply}),at)}catch(err){ed.replaceChildren(...keep);S.replyTo=reply;sync();saveDraft();toastErr(sendErr(err,t))}return}
     busy=true;upd();drawStrip();prog.hidden=false;progress(0,'Encrypting\u2026');
     try{
       const cc=convById(cid),fs=files.map(x=>x.f),prep=[];
@@ -1208,7 +1253,7 @@ function buildComposer(p,c){
       progress(1,'Sending\u2026');
       await sendBody(cid,buildBody({text,media,reply}),at);
       files.forEach(x=>URL.revokeObjectURL(x.url));files=[];clearEd();S.replyTo=null;sync();
-    }catch(err){toast(sendErr(err,t))}
+    }catch(err){toastErr(sendErr(err,t))}
     busy=false;prog.hidden=true;drawStrip();upd();
   };
   send.onclick=()=>{if(send._noClick&&Date.now()-send._noClick<600)return;doSend()};
@@ -1220,8 +1265,8 @@ function buildComposer(p,c){
   S.comp={sync,syncFmt,setText,focus:()=>{ed.focus();placeCaretEnd()}};upd();S.setSchedCount((S.scheduled||[]).length);
   if(matchMedia('(pointer:fine)').matches)ed.focus();
 }
-function setReply(p,o){S.editing=null;S.replyTo={id:p._id,from:p.from,snip:snippet(o)};if(S.comp){S.comp.sync();S.comp.focus()}}
-function setEdit(p,o){S.replyTo=null;S.editing={p,o};if(S.comp){S.comp.setText(o.text||'');S.comp.sync();S.comp.focus()}}
+function setReply(p,o){haptic();S.editing=null;S.replyTo={id:p._id,from:p.from,snip:snippet(o)};if(S.comp){S.comp.sync();S.comp.focus()}}
+function setEdit(p,o){haptic();S.replyTo=null;S.editing={p,o};if(S.comp){S.comp.setText(o.text||'');S.comp.sync();S.comp.focus()}}
 async function ensureDmDoc(c){ // the first message in a DM creates it: a record with no names, and a sealed pointer for each side
   if(typeOf(c)!=='dm'||S.convs.some(x=>x.id===c.id))return;
   const peer=dmPeer(c),secret=await dmSecret(peer);if(!secret)throw new Error('nokey');
@@ -1270,9 +1315,9 @@ function openScheduled(){
     if(!items.length){list.append(el('div','empty','Nothing scheduled. Press and hold the send button to schedule a message.'));return}
     for(const p of items){const o=await openPost(c,p);const r=el('div','sched-row');const m=el('div','t-main');
       m.append(el('div','t-name',fmtWhen(p.ts)[0].toUpperCase()+fmtWhen(p.ts).slice(1)),el('div','t-sub',snippet(o)));
-      const now=el('button','pill','Send now');now.onclick=async()=>{now.disabled=true;try{await sendNowScheduled(c.id,p);toast('Sent');close()}catch{now.disabled=false;toast('Couldn\u2019t send it. Try again.')}};
+      const now=el('button','pill','Send now');now.onclick=async()=>{now.disabled=true;try{await sendNowScheduled(c.id,p);toast('Sent');close()}catch{now.disabled=false;toastErr('Couldn\u2019t send it. Try again.')}};
       const del=html('button','icon-btn',I.trash);del.setAttribute('aria-label','Delete scheduled message');
-      del.onclick=async()=>{if(!confirm('Delete this scheduled message?'))return;try{if(p.sl===1)await removeOwn(c.id,p);else await S.db.doc(`channels/${c.id}/posts/${p._id}`).delete();S.scheduled=S.scheduled.filter(x=>x._id!==p._id);draw()}catch{toast('Couldn\u2019t delete it.')}};
+      del.onclick=async()=>{if(!confirmDanger('Delete this scheduled message?'))return;try{if(p.sl===1)await removeOwn(c.id,p);else await S.db.doc(`channels/${c.id}/posts/${p._id}`).delete();S.scheduled=S.scheduled.filter(x=>x._id!==p._id);draw()}catch{toastErr('Couldn\u2019t delete it.')}};
       r.append(m,now,del);list.append(r)}};
   draw();body.append(el('p','hint','Scheduled messages are encrypted now and appear for everyone at the chosen time, even if you\u2019re offline.'));
 }
@@ -1419,7 +1464,7 @@ function fileNode(c,m,e){ // any other file: a card with a Download button; it i
   const btn=el('button','secondary fc-btn','Download');
   btn.onclick=async()=>{btn.disabled=true;btn.textContent='0%';
     try{const url=await loadMedia(c,m,e,f=>{btn.textContent=Math.floor(f*100)+'%'});saveAs(url,m.name||'file');btn.textContent='Download'}
-    catch{toast('Couldn’t download this file. Check your connection and try again.');btn.textContent='Download'}
+    catch{toastErr('Couldn’t download this file. Check your connection and try again.');btn.textContent='Download'}
     btn.disabled=false};
   w.append(html('span','fc-ic',I.clip),main,btn);return w}
 /* One photo or video in a message or in the shared-media grid. It downloads by itself once it is near the screen;
@@ -1443,11 +1488,11 @@ function mediaNode(c,m,single,e,open){
       spin.remove();info.textContent=about;box.prepend(v);mark();return url}).catch(err=>{job=null;info.textContent=about;fail();throw err}));
     box.append(info);
     if(auto)whenNear(box,()=>fetchIt().catch(()=>{}));else{spin.remove();mark()}
-    box.onclick=ev=>{ev.stopPropagation();fetchIt().catch(()=>{});view()};
+    box.onclick=ev=>{ev.stopPropagation();if(Date.now()-(box.closest('.msg')?._noClick||0)<600)return;fetchIt().catch(()=>{});view()}; // not the tap that ends a press-and-hold
   }else{
     if(m.kind==='gif')box.append(el('span','badge','GIF'));
-    whenNear(box,()=>queued(()=>loadMedia(c,m,e)).then(url=>{const img=el('img');img.alt='';img.src=url;img.onload=()=>spin.remove();box.prepend(img)}).catch(fail));
-    box.onclick=ev=>{ev.stopPropagation();view()};
+    whenNear(box,()=>queued(()=>loadMedia(c,m,e)).then(url=>{const img=el('img');img.alt='';img.draggable=false;img.src=url;img.onload=()=>spin.remove();box.prepend(img)}).catch(fail));
+    box.onclick=ev=>{ev.stopPropagation();if(Date.now()-(box.closest('.msg')?._noClick||0)<600)return;view()};
   }
   return box;
 }
@@ -1494,18 +1539,18 @@ function voiceNode(c,m,e){
       audio.ontimeupdate=()=>{paint(audio.currentTime/total());time.textContent=fmtDur(audio.currentTime)};
       audio.onended=()=>{paint(0);time.textContent=fmtDur(m.dur)};
       stopOtherAudio(audio);await audio.play();
-    }catch{btn.innerHTML=I.play;audio=null;toast('Couldn\u2019t play this voice message.')}
+    }catch{btn.innerHTML=I.play;audio=null;toastErr('Couldn\u2019t play this voice message.')}
   };
   return w;
 }
 async function startRecording(onLevel){
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.MediaRecorder){toast('Voice messages aren\u2019t supported in this browser.');return null}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.MediaRecorder){toastErr('Voice messages aren\u2019t supported in this browser.');return null}
   let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}
-  catch(e){toast(e&&e.name==='NotAllowedError'?'Microphone access was blocked. Allow it for this page to record voice messages.':'The microphone isn\u2019t available here.');return null}
+  catch(e){toastErr(e&&e.name==='NotAllowedError'?'Microphone access was blocked. Allow it for this page to record voice messages.':'The microphone isn\u2019t available here.');return null}
   // AAC in MP4 first: every browser and phone plays it. Opus in WebM where AAC can't be recorded (older iPhones
   // may not play that one). 32 kb/s is plenty for speech: 15 minutes is under 4 MB.
   const mime=['audio/mp4;codecs=mp4a.40.2','audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'].find(t=>MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(t))||'';
-  let rec;try{rec=new MediaRecorder(stream,Object.assign({audioBitsPerSecond:32000},mime?{mimeType:mime}:{}))}catch{stream.getTracks().forEach(t=>t.stop());toast('Recording isn\u2019t supported in this browser.');return null}
+  let rec;try{rec=new MediaRecorder(stream,Object.assign({audioBitsPerSecond:32000},mime?{mimeType:mime}:{}))}catch{stream.getTracks().forEach(t=>t.stop());toastErr('Recording isn\u2019t supported in this browser.');return null}
   const parts=[],levels=[];rec.ondataavailable=e=>{if(e.data&&e.data.size)parts.push(e.data)};
   let ac=null,iv=null;
   try{ac=new (window.AudioContext||window.webkitAudioContext)();const an=ac.createAnalyser();an.fftSize=512;ac.createMediaStreamSource(stream).connect(an);const buf=new Uint8Array(an.fftSize);
@@ -1659,38 +1704,39 @@ function msgNode(c,p,o,cont){
     if(cmt){const n=S.ccount.get(p._id)||0;cmt.hidden=cc.comments===false&&!n;cmt.lastChild.textContent=n?(n===1?'1 comment':n+' comments'):'Leave a comment'}
     parts.forEach(x=>x._refresh());
   };
-  b.onclick=e=>{if(wrap._noClick&&Date.now()-wrap._noClick<600)return;const sel=window.getSelection&&String(getSelection());if(sel)return;e.stopPropagation();msgMenu(b,p,o)};
-  b.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();msgMenu(b,p,o)};
+  b.onclick=e=>{if(wrap._noClick&&Date.now()-wrap._noClick<600){e.stopPropagation();return} // the tap that ends a hold: swallowed here, or it would close the menu the hold just opened
+    const sel=window.getSelection&&String(getSelection());if(sel)return;e.stopPropagation();msgMenu(b,p,o)};
+  addLongPress(wrap,()=>msgMenu(b,p,o,true),b); // press and hold anywhere on it (text, photo, video, the time over a photo); a right click too
   if(o.text!=null&&!S.serverView)addSwipe(wrap,{dir:-1,max:72,threshold:52,target:b,on:()=>{const cc=curConv();if(cc&&canPost(cc))setReply(p,o)}});
   wrap._refresh();return wrap;
 }
 function jumpTo(id){
-  const n=S.rendered&&S.rendered.nodes.get(id);if(!n){toast('That message isn\u2019t loaded or was deleted.');return}
+  const n=S.rendered&&S.rendered.nodes.get(id);if(!n){toastErr('That message isn\u2019t loaded or was deleted.');return}
   n.scrollIntoView({block:'center',behavior:'smooth'});n.classList.remove('flash');void n.offsetWidth;n.classList.add('flash');
 }
-function msgMenu(anchor,p,o){
+function msgMenu(anchor,p,o,quiet){ // quiet: a press-and-hold already gave the haptic tap
   const had=document.querySelector('.msgmenu');closeMenus();if(had&&had._for===p._id)return;
   const c=curConv();if(!c||S.serverView)return;
   const t=typeOf(c),mine=p.from===S.me.handle,admin=isAdmin(c),member=isMember(c);
   const m=el('div','popmenu msgmenu');m._for=p._id;
   if(member&&o.text!=null&&!isSelf(c)){const cfg=reactCfg(c);if(cfg.mode!=='off'){const a=S.agg.get(p._id)||{};const st=el('div','rstrip');
     cfg.allowed.forEach(e=>{const b=el('button','rp'+(a.myR===e?' me':''),e);b.setAttribute('aria-label','React '+e);
-      b.onclick=async()=>{m.remove();try{await setAct(curConv(),p._id,'r',a.myR===e?null:{emoji:e})}catch{toast('Reaction not saved. Check your connection and try again.')}};st.append(b)});
+      b.onclick=async()=>{m.remove();try{await setAct(curConv(),p._id,'r',a.myR===e?null:{emoji:e})}catch{toastErr('Reaction not saved. Check your connection and try again.')}};st.append(b)});
     m.append(st)}}
   const items=[];
   if(canPost(c)&&o.text!=null)items.push([I.reply,'Reply',()=>setReply(p,o)]);
   if(FEATURES.channelComments&&t==='channel'&&o.text!=null)items.push([I.comment,'Comments',()=>openComments(p,o)]);
-  if(canPin(c)&&o.text!=null)items.push([I.pin,(c.pins||[]).includes(p._id)?'Unpin':'Pin',()=>togglePinMsg(c,p)]);
+  if(canPin(c)&&o.text!=null)items.push([I.pin,(c.pins||[]).includes(p._id)?'Unpin':'Pin',()=>{haptic();togglePinMsg(c,p)}]);
   if(o.text!=null&&!o.poll)items.push([I.fwd,'Forward',()=>openForward(p,o)]);
-  if(o.text)items.push([I.copy,'Copy text',async()=>{try{await navigator.clipboard.writeText(plainText(o.text));toast('Copied')}catch{toast('Copying isn\u2019t allowed here. Press and hold the text to select it.')}}]);
+  if(o.text)items.push([I.copy,'Copy text',async()=>{try{await navigator.clipboard.writeText(plainText(o.text));haptic();toast('Copied')}catch{toastErr('Copying isn\u2019t allowed here. Press and hold the text to select it.')}}]);
   if(mine&&o.text!=null&&!o.poll&&S.comp)items.push([I.edit,'Edit',()=>setEdit(p,o)]);
-  if(o.poll&&!(c.closed&&c.closed[p._id])&&(mine||admin))items.push([I.chart,'Stop poll',async()=>{try{await S.db.doc('channels/'+c.id).update({closed:{[p._id]:true}})}catch{toast('Couldn\u2019t stop the poll. Try again.')}}]);
+  if(o.poll&&!(c.closed&&c.closed[p._id])&&(mine||admin))items.push([I.chart,'Stop poll',async()=>{try{await S.db.doc('channels/'+c.id).update({closed:{[p._id]:true}})}catch{toastErr('Couldn\u2019t stop the poll. Try again.')}}]);
   if(mine||(admin&&t!=='dm'))items.push([I.trash,'Delete',async()=>{
-    if(!confirm(isSelf(c)?'Delete this note?':t==='dm'?'Delete this message for both of you?':'Delete this message for everyone?'))return;
-    try{await deletePost(c.id,p)}catch{toast('Couldn\u2019t delete it. Try again.')}},'danger']);
+    if(!confirmDanger(isSelf(c)?'Delete this note?':t==='dm'?'Delete this message for both of you?':'Delete this message for everyone?'))return;
+    try{await deletePost(c.id,p)}catch{toastErr('Couldn\u2019t delete it. Try again.')}},'danger']);
   items.forEach(([ic,label,fn,cls])=>{const b=html('button','menu-item'+(cls?' '+cls:''),ic);b.append(el('span',null,label));b.onclick=()=>{m.remove();fn()};m.append(b)});
   if(!m.children.length)return;
-  if(navigator.vibrate)navigator.vibrate(6);
+  if(!quiet)haptic(); // the message menu opened by a tap
   placeMenu(m,anchor);
 }
 /* ---------- owner tools: reactions, polls, removing people ---------- */
@@ -1742,14 +1788,14 @@ function reactNode(p){
     const entries=cfg.mode==='off'?[]:Object.entries(a.r).filter(([e])=>cfg.allowed.includes(e)).sort((x,y)=>y[1]-x[1]);
     w.hidden=!entries.length;
     entries.forEach(([e,n])=>{const b=el('button','rc'+(a.myR===e?' me':''),e+' '+n);b.disabled=!member;b.setAttribute('aria-pressed',a.myR===e);
-      b.onclick=async ev=>{ev.stopPropagation();try{await setAct(curConv(),p._id,'r',a.myR===e?null:{emoji:e})}catch{toast('Reaction not saved. Check your connection and try again.')}};w.append(b)});
+      b.onclick=async ev=>{ev.stopPropagation();try{await setAct(curConv(),p._id,'r',a.myR===e?null:{emoji:e})}catch{toastErr('Reaction not saved. Check your connection and try again.')}};w.append(b)});
   };
   return w;
 }
 function pollNode(p,poll){
   const w=el('div','poll'),q=el('div','poll-q',poll.q),kind=el('div','poll-kind'),list=el('div'),foot=el('div','poll-foot');w.append(q,kind,list,foot);
   const pending=new Set();w.onclick=e=>e.stopPropagation();
-  const vote=async opts=>{try{await setAct(curConv(),p._id,'v',opts?{opts}:null);pending.clear()}catch{toast('Vote not saved. Check your connection and try again.')}};
+  const vote=async opts=>{try{await setAct(curConv(),p._id,'v',opts?{opts}:null);pending.clear()}catch{toastErr('Vote not saved. Check your connection and try again.')}};
   w._refresh=()=>{
     const c=curConv();if(!c)return;const a=S.agg.get(p._id)||{},member=isMember(c),closed=!!(c.closed&&c.closed[p._id]);
     const mine=a.myV,total=a.voters||0,show=closed||!!mine||!member;
@@ -1805,11 +1851,22 @@ function openReactSettings(cid){
 }
 async function kickMember(cid,h,opt={}){ // a new key for everyone else, and a sealed member list without them (SPEC.md 5.6)
   const [c,shown]=await chatAnd(cid);const v=metaOf(shown);
+  if(opt.why&&!v.members.includes(h))return; // a leave another page already handled
   v.members=v.members.filter(x=>x!==h);const wasAdmin=v.admins.includes(h);v.admins=v.admins.filter(x=>x!==h);
-  if(opt.ban!==false)v.banned=[...new Set([...v.banned,h])];
   if(c.visibility==='public'){if(wasAdmin){await S.db.doc('channels/'+cid).update({admins:v.admins});await rotateAdmins(cid,v.admins)}return} // nothing to lock: public posts are public
-  await rotateTo(c,v);
-  if(wasAdmin&&isOwner(shown))await rotateAdmins(cid,v.admins); // a demoted admin loses the admin key as well
+  if(wasAdmin&&isOwner(shown))await setAdmins(cid,v.admins); // first the admin key and the owner's sealed list: a blocked admin can't lift the block with the key
+  let full=false;if(opt.ban!==false){v.banned=[...new Set([...v.banned,h])];await S.db.banChat(cid,h,true).catch(e=>{if(!e||e.code!=='toolarge')throw e;full=true})} // the server refuses their member key from here on; a full list still lets the new key leave them out
+  try{try{await rotateTo(c,v,opt.why&&{why:opt.why})}
+  catch(e){if(!e||e.code!=='conflict'&&e.code!=='toolarge')throw e; // toolarge: the record has no room for a key change
+    const f=await freshChan(cid),w=metaOf(await showMeta(f)),still=w.members.includes(h);
+    w.members=w.members.filter(x=>x!==h);w.admins=w.admins.filter(x=>x!==h);if(opt.ban!==false)w.banned=[...new Set([...w.banned,h])];
+    if(epochOf(f)!==epochOf(c)&&still)try{await rotateTo(f,w,opt.why&&{why:opt.why});return full?'full':undefined}catch(e2){if(!e2||e2.code!=='conflict'&&e2.code!=='toolarge')throw e2} // another admin changed the key first: once more, from their record
+    // no key change left for this (leaves past their budget, anything at epoch 31), or theirs already left them out: the
+    // lists only, never a retry (SPEC.md 5.6); a block stays on the server, which then is all that keeps them out
+    if(still||opt.ban!==false)await S.db.doc('channels/'+cid).update({meta:await sealMetaFor(f,w)})}}
+  catch(e){if(opt.ban!==false)try{const f=await freshChan(cid);if(epochOf(f)===epochOf(c)&&!metaOf(await showMeta(f)).banned.includes(h))await S.db.banChat(cid,h,false)}catch{} // the record shows nothing applied (a lost reply may hide a key change that was): the server lets them in again, as the sealed list does; unsure, they stay blocked
+    throw e}
+  return full?'full':undefined;
 }
 async function rotateAdmins(cid,admins){ // a fresh admin secret, wrapped to the owner and the current admins only
   const [c,shown]=await chatAnd(cid);const secret=crypto.getRandomValues(new Uint8Array(32)),who=[...new Set([shown.owner||S.me.handle,...admins])];
@@ -1820,20 +1877,22 @@ async function rotateAdmins(cid,admins){ // a fresh admin secret, wrapped to the
 async function setAdmins(cid,admins){ // owner only: the sealed list and the admin keys change together
   const [c,shown]=await chatAnd(cid);
   if(c.visibility==='public')await S.db.doc('channels/'+cid).update({admins});
-  else await S.db.doc('channels/'+cid).update({meta:await sealMetaFor(c,Object.assign(metaOf(shown),{admins}))});
+  else{if(c.ometa&&!shown._ometa)throw new Error('nokey');await handOver(c,shown);await S.db.doc('channels/'+cid).update({ometa:await sealOMetaFor(c,Object.assign(metaOf(shown),{admins}))})} // an ometa this device can't open: writing one would wipe the rest
   await rotateAdmins(cid,admins);
 }
 async function unban(cid,h){const [c,shown]=await chatAnd(cid);if(c.visibility==='public')return;
-  await S.db.doc('channels/'+cid).update({meta:await sealMetaFor(c,Object.assign(metaOf(shown),{banned:(shown.banned||[]).filter(x=>x!==h)}))})}
+  await S.db.doc('channels/'+cid).update({meta:await sealMetaFor(c,Object.assign(metaOf(shown),{banned:(shown.banned||[]).filter(x=>x!==h)}))});
+  await S.db.banChat(cid,h,false)} // after the sealed list: a failure leaves them blocked everywhere, not listed as blocked yet let in
 const reconciled=new Set();
 async function reconcileSvc(c,posts){ // an admin keeps the sealed member list in step with "joined" and "left" notes
   if(!c||typeOf(c)==='dm'||c.visibility==='public'||!isAdmin(c))return;
   for(const p of posts||[]){if(!p||!p.svc||!['join','leave'].includes(p.svc)||!p.from||p.prev||reconciled.has(p._id))continue; // a note signed by a key its author has since replaced is shown, never acted on
     const members=c.members||[];
-    if(p.svc==='join'&&!members.includes(p.from)){reconciled.add(p._id);
+    const later=k=>posts.slice(posts.indexOf(p)+1).some(q=>q&&q.svc===k&&q.from===p.from);
+    if(p.svc==='join'&&!members.includes(p.from)&&!(c.banned||[]).includes(p.from)&&(p.e??0)>=epochOf(c)&&!later('leave')){reconciled.add(p._id); // never someone blocked, nor a note from before the last key change (it may predate a removal), nor one they left after
       try{const [cur]=await chatAnd(c.id);await S.db.doc('channels/'+c.id).update({meta:await sealMetaFor(cur,Object.assign(metaOf(c),{members:[...members,p.from]}))});c.members=[...members,p.from]}catch{reconciled.delete(p._id)}}
-    else if(p.svc==='leave'&&members.includes(p.from)&&p.from!==S.me.handle){reconciled.add(p._id);
-      try{await kickMember(c.id,p.from,{ban:false})}catch{reconciled.delete(p._id)}}
+    else if(p.svc==='leave'&&members.includes(p.from)&&p.from!==S.me.handle&&!later('join')){reconciled.add(p._id); // a later "joined" from them outweighs it
+      try{await kickMember(c.id,p.from,{ban:false,why:'leave'});c.members=members.filter(x=>x!==p.from)}catch{reconciled.delete(p._id)}}
   }
 }
 function noteAccepted(cid,posts){ // a reply, or an "accepted" note, from the person we asked: the request is over
@@ -1905,7 +1964,7 @@ function openNewChat(){
 }
 async function openDm(peer){
   await loadDir([peer]);const id=await dmIdFor(peer);
-  if(!id){toast('Couldn’t open that chat. Check your connection and try again.');return}
+  if(!id){toastErr('Couldn’t open that chat. Check your connection and try again.');return}
   if(!convById(id))S.previews.set(id,{id,type:'dm',members:[...new Set([S.me.handle,peer])],ts:0,last:null,epoch:0});
   openConv(id);
 }
@@ -1947,7 +2006,7 @@ function confirmJoin(c,j){
   const go=el('button','primary',grp?'Join group':'Join channel');const err=el('div','err');body.append(go,err);
   go.onclick=async()=>{go.disabled=true;err.textContent='';
     try{await joinPrivate(c.id,j);close()}
-    catch(e){err.textContent=e&&e.message==='banned'?'You were removed from this channel.':e&&e.message==='revoked'?'This invite link was revoked. Ask for a new one.':'Couldn\u2019t join. The link may be damaged. Ask for a new one.';go.disabled=false}};
+    catch(e){err.textContent=e&&e.code==='banned'?'You were removed from this '+(grp?'group.':'channel.'):e&&e.code==='notfound'?'This invite link was revoked. Ask for a new one.':'Couldn\u2019t join. The link may be damaged. Ask for a new one.';go.disabled=false}};
 }
 function segControl(opts,val,onChange){const s=el('div','seg');let cur=val;
   const draw=()=>{s.replaceChildren();opts.forEach(([v,label])=>{const b=el('button',null,label);b.type='button';b.setAttribute('aria-pressed',v===cur);b.onclick=()=>{cur=v;draw();onChange(v)};s.append(b)})};
@@ -1983,7 +2042,7 @@ async function createChatDoc(cid,type,vis,v){ // a new group or channel: chat ke
   const raw=crypto.getRandomValues(new Uint8Array(32)),secret=crypto.getRandomValues(new Uint8Array(32)),pub=vis==='public';
   const keys=await wrapAll(raw,v.members,cid,0),akeys=await wrapKey(secret,S.me.handle,cid+'#a');
   const doc=Object.assign({type,visibility:vis,epoch:0,keys:{0:keys},akeys,invites:{},ts:Date.now(),last:null},
-    pub?{openKeys:{0:b64(raw)},name:v.name,desc:v.desc,photo:v.photo||null,owner:S.me.handle,admins:[]}:{meta:await sealMeta(cid,0,raw,v)});
+    pub?{openKeys:{0:b64(raw)},name:v.name,desc:v.desc,photo:v.photo||null,owner:S.me.handle,admins:[]}:{meta:await sealMeta(cid,0,raw,v),ometa:await sealOMeta(cid,0,raw,v)});
   ksPut(cid,0,b64(raw));ksPut(cid,'a',b64(secret));
   await S.db.createChat(cid,doc,{m:await memberCapFrom(cid,0,raw),a:await adminCapFrom(cid,secret),o:await ownerCap(cid)});
   S.chatDocs.set(cid,Object.assign({id:cid},doc));noteTier('owner');return doc;
@@ -2002,6 +2061,7 @@ function openAddSubs(cid){
       const [cur,shown]=await chatAnd(cid);await loadDir([...sel],true);const raws=await allRaws(cur),keys={}; // fresh profiles, so the wraps reach their current devices
       for(const [e,r] of Object.entries(raws))keys[e]=await wrapAll(unb64(r),[...sel],cid,Number(e));
       const v=Object.assign(metaOf(shown),{members:[...new Set([...(shown.members||[]),...sel])],banned:(shown.banned||[]).filter(h=>!sel.has(h))});
+      if(cur.visibility!=='public')for(const h of sel)await S.db.banChat(cid,h,false); // added on purpose: the server lets their key in, whatever block it kept
       await S.db.doc('channels/'+cid).update(Object.assign({keys},cur.visibility==='public'?{}:{meta:await sealMetaFor(cur,v)}));
       for(const x of [convById(cid)])if(x){x.members=v.members;x.banned=v.banned}
       await ensureInbox({id:cid,type:cur.type,members:v.members},[...sel]);
@@ -2027,7 +2087,7 @@ function openInvite(cid,opt){ // opt.auto: an admin arriving from "Invite via li
     host.replaceChildren();
     if(!pub&&!inv){
       host.append(el('p',null,owner?`Create a link that lets people join this private ${noun}. The ${noun} key travels inside the link, so the server can\u2019t use it.`:`Only an admin can create an invite link for this ${noun}.`));
-      if(owner){const b=el('button','primary','Create invite link');b.onclick=async()=>{b.disabled=true;try{await make();draw(true)}catch{b.disabled=false;toast('Couldn\u2019t create the link. Check your connection and try again.')}};host.append(b)}
+      if(owner){const b=el('button','primary','Create invite link');b.onclick=async()=>{b.disabled=true;try{await make();draw(true)}catch{b.disabled=false;toastErr('Couldn\u2019t create the link. Check your connection and try again.')}};host.append(b)}
       return;
     }
     const link=linkFor(cid,inv);
@@ -2042,8 +2102,8 @@ function openInvite(cid,opt){ // opt.auto: an admin arriving from "Invite via li
       ?'Anyone with this link or QR code can join. Public channels also show up in search.'
       :`Anyone with this link or QR code can join and read every ${grp?'message':'post'}. Only share it with people you trust.`));
     if(!pub&&owner){const r=el('button','menu-item danger flush','Revoke link');
-      r.onclick=async()=>{if(!confirm('Revoke this link? It stops working for anyone who hasn\u2019t joined yet.'))return;
-        try{await revokeInvite(cid,inv.iid);toast('Link revoked');draw()}catch{toast('Couldn\u2019t revoke it. Check your connection and try again.')}};host.append(r)}
+      r.onclick=async()=>{if(!confirmDanger('Revoke this link? It stops working for anyone who hasn\u2019t joined yet.'))return;
+        try{await revokeInvite(cid,inv.iid);toast('Link revoked');draw()}catch{toastErr('Couldn\u2019t revoke it. Check your connection and try again.')}};host.append(r)}
   };
   draw();
 }
@@ -2071,10 +2131,10 @@ function openConvInfo(cid){
           :`Make \u201c${c.name}\u201d public?\n\nAnyone will be able to find it, join, and read every post, including past ones. Private invite links stop working.`;
         if(!confirm(msg))return;
         try{await setVisibility(cid,pub?'private':'public');close();toast(pub?'Channel is now private':'Channel is now public');if(S.chan===cid)setTimeout(()=>{if(convById(cid))openConv(cid)},300)}
-        catch{toast('That didn\u2019t go through. Check your connection and try again.')}};
+        catch{toastErr('That didn\u2019t go through. Check your connection and try again.')}};
       body.append(v);
       if(FEATURES.channelComments){const cm=html('button','menu-item flush',I.comment+'<span>Comments</span>');cm.append(el('span','role',c.comments===false?'Off':'On'));
-      cm.onclick=async()=>{try{await S.db.doc('channels/'+cid).update({comments:c.comments===false});close();toast(c.comments===false?'Comments turned on':'Comments turned off')}catch{toast('That didn\u2019t go through. Try again.')}};body.append(cm)}}
+      cm.onclick=async()=>{try{await S.db.doc('channels/'+cid).update({comments:c.comments===false});close();toast(c.comments===false?'Comments turned on':'Comments turned off')}catch{toastErr('That didn\u2019t go through. Try again.')}};body.append(cm)}}
     const cfg=reactCfg(c);item(I.smile,'Reactions',()=>openReactSettings(cid),cfg.mode==='all'?'All':cfg.mode==='off'?'Off':cfg.allowed.length+' allowed');
   }
   if(canPost(c))item(I.chart,'New poll',()=>openPollCreate(cid));
@@ -2092,25 +2152,25 @@ function openConvInfo(cid){
     if(owner&&h!==c.owner)r.append(act(isAdm?'Remove admin':'Make admin',async()=>{
       if(!isAdm&&!confirm(`Make ${displayName(h)} an admin? They\u2019ll be able to post, pin, delete messages and remove members.`))return;
       try{const ad=(c.admins||[]).filter(x=>x!==h);if(!isAdm)ad.push(h);await setAdmins(cid,ad);c.admins=ad;close();toast(isAdm?displayName(h)+' is no longer an admin':displayName(h)+' is now an admin');openConvInfo(cid)}
-      catch{toast('That didn\u2019t go through. Try again.')}},'adm'));
-    if(admin&&!pub&&h!==S.me.handle)r.append(act('Resend keys',async()=>{try{await resendKeys(cid,h);toast('Keys sent to '+displayName(h)+'\u2019s devices')}catch{toast('That didn\u2019t go through. Try again.')}},'adm'));
+      catch{toastErr('That didn\u2019t go through. Try again.')}},'adm'));
+    if(admin&&!pub&&h!==S.me.handle)r.append(act('Resend keys',async()=>{try{await resendKeys(cid,h);toast('Keys sent to '+displayName(h)+'\u2019s devices')}catch{toastErr('That didn\u2019t go through. Try again.')}},'adm'));
     if(admin&&!pub&&h!==c.owner&&h!==S.me.handle&&(owner||!isAdm))r.append(act(`Block from this ${noun}`,async()=>{
-      if(!confirm(`Block ${displayName(h)} from \u201c${c.name}\u201d?\n\nThey\u2019re removed and can\u2019t rejoin, even with an invite link. They can\u2019t read new ${grp?'messages':'posts'}. This only applies to this ${noun}.`))return;
-      try{await kickMember(cid,h,{ban:true});close();toast(`${displayName(h)} was blocked from this ${noun}`);openConvInfo(cid)}catch{toast('Couldn\u2019t block them. Check your connection and try again.')}}));
+      if(!confirmDanger(`Block ${displayName(h)} from \u201c${c.name}\u201d?\n\nThey\u2019re removed and can\u2019t rejoin, even with an invite link. They can\u2019t read new ${grp?'messages':'posts'}. This only applies to this ${noun}.`))return;
+      try{const r=await kickMember(cid,h,{ban:true});close();toast(r==='full'?`${displayName(h)} was removed, but this ${noun}\u2019s block list is full, so a link could bring them back. Ask the owner to block them.`:`${displayName(h)} was blocked from this ${noun}`);openConvInfo(cid)}catch{toastErr('Couldn\u2019t block them. Check your connection and try again.')}}));
     if(h!==S.me.handle)r.append(isBlocked(h)?act('Unblock person',async()=>{unblockPeer(h);toast(displayName(h)+' unblocked');close();openConvInfo(cid)})
       :act('Block person',async()=>{if(confirmBlockPerson(h)){close();openConvInfo(cid)}}));
     body.append(r)});
   if(admin&&(c.banned||[]).length){body.append(el('div','menu-label flush',`Blocked from this ${noun}`));
-    c.banned.forEach(h=>{const r=memberRow(h);r.append(act('Unblock',async()=>{try{await unban(cid,h);close();toast(displayName(h)+' can join again')}catch{toast('That didn\u2019t go through. Try again.')}}));body.append(r)})}
+    c.banned.forEach(h=>{const r=memberRow(h);r.append(act('Unblock',async()=>{try{await unban(cid,h);close();toast(displayName(h)+' can join again')}catch{toastErr('That didn\u2019t go through. Try again.')}}));body.append(r)})}
   if(!member)return;
   const danger=el('button','menu-item danger flush',owner?`Delete ${noun}`:`Leave ${noun}`);
   danger.onclick=async()=>{
-    if(!confirm(owner?`Delete \u201c${c.name}\u201d for everyone?`:`Leave \u201c${c.name}\u201d?`))return;
+    if(!confirmDanger(owner?`Delete \u201c${c.name}\u201d for everyone?`:`Leave \u201c${c.name}\u201d?`))return;
     try{
       if(owner)await S.db.doc('channels/'+cid).delete();
       else await leaveChat(cid);
       S.previews.delete(cid);close();closeConv();toast(owner?`${noun[0].toUpperCase()+noun.slice(1)} deleted`:`You left the ${noun}`);
-    }catch{toast('That didn\u2019t go through. Check your connection and try again.')}
+    }catch{toastErr('That didn\u2019t go through. Check your connection and try again.')}
   };
   body.append(danger);
 }
@@ -2119,7 +2179,7 @@ function pickPhoto(){
     fi.onchange=async()=>{const f=fi.files[0];fi.remove();if(!f)return res(null);
       try{const bmp=await createImageBitmap(f),s=Math.min(bmp.width,bmp.height),cv=document.createElement('canvas');cv.width=cv.height=320;
         cv.getContext('2d').drawImage(bmp,(bmp.width-s)/2,(bmp.height-s)/2,s,s,0,0,320,320);res(cv.toDataURL('image/jpeg',.85))}
-      catch{toast('That photo couldn\u2019t be read. Try a JPG or PNG.');res(null)}};
+      catch{toastErr('That photo couldn\u2019t be read. Try a JPG or PNG.');res(null)}};
     fi.click()});
 }
 function photoEditor(host,key,getName,photo,onChange){
@@ -2142,7 +2202,7 @@ function openEditConv(cid){
   const foot=el('div','sheet-foot');const go=el('button','primary','Save');const err=el('div','err');foot.append(go,err);sh.append(foot);
   go.onclick=async()=>{const name=n.value.trim();if(!name){err.textContent='The name can\u2019t be empty.';return}
     go.disabled=true;try{const v={name,desc:d.value.trim(),photo:photo||null};const [cur,shown]=await chatAnd(cid);
-      await S.db.doc('channels/'+cid).update(cur.visibility==='public'?v:{meta:await sealMetaFor(cur,Object.assign(metaOf(shown),v))});Object.assign(c,v);close();toast('Saved');if(S.chan===cid)setTimeout(()=>openConv(cid),300)}
+      if(cur.visibility!=='public'){if(cur.ometa&&!shown._ometa)throw new Error('nokey');await handOver(cur,shown)}await S.db.doc('channels/'+cid).update(cur.visibility==='public'?v:{ometa:await sealOMetaFor(cur,Object.assign(metaOf(shown),v))});Object.assign(c,v);close();toast('Saved');if(S.chan===cid)setTimeout(()=>openConv(cid),300)}
     catch{err.textContent='Couldn\u2019t save. The photo may be too large, or check your connection.';go.disabled=false}};
 }
 async function openProfile(h){
@@ -2231,12 +2291,12 @@ function settingsPrivacy(body,me){
   const findable=(S.dir[me.handle]||{}).findable!==false;
   body.append(el('div','set-label','Who can find me in search'),segControl([['yes','Anyone'],['no','Only with my link']],findable?'yes':'no',async v=>{
     try{await S.db.doc('directory/'+me.handle).update({findable:v==='yes'});if(S.dir[me.handle])S.dir[me.handle].findable=v==='yes';
-      syncSearch();toast(v==='yes'?'People can find you by your username':'Only people with your invite link or number can reach you')}catch{toast('That didn\u2019t save. Try again.')}}),
+      syncSearch();toast(v==='yes'?'People can find you by your username':'Only people with your invite link or number can reach you')}catch{toastErr('That didn\u2019t save. Try again.')}}),
     el('p','hint','Either way, nobody can read your messages. Your invite link and phone number (if you add one) always work.'));
   const reqOn=(S.dir[me.handle]||{}).requests===true;
   body.append(el('div','set-label','Who can message me'),segControl([['all','Everyone'],['req','Only my contacts']],reqOn?'req':'all',async v=>{
     try{await S.db.doc('directory/'+me.handle).update({requests:v==='req'});if(S.dir[me.handle])S.dir[me.handle].requests=v==='req';
-      toast(v==='req'?'People outside your contacts will send a request first':'Anyone can message you')}catch{toast('That didn\u2019t save. Try again.')}}),
+      toast(v==='req'?'People outside your contacts will send a request first':'Anyone can message you')}catch{toastErr('That didn\u2019t save. Try again.')}}),
     el('p','hint','With \u201cOnly my contacts,\u201d anyone else can send you one text message as a request. It shows at the top of your chats until you accept or delete it. Chats you already have aren\u2019t affected.'));
   const tg=el('label','toggle');const cb=el('input');cb.type='checkbox';cb.checked=!ls.get('hush:hideSeen:'+me.handle,false);
   cb.onchange=()=>{ls.set('hush:hideSeen:'+me.handle,!cb.checked);heartbeat(true)};
@@ -2248,7 +2308,7 @@ function settingsPrivacy(body,me){
   body.append(el('p','hint','Finding friends by phone number is off until Hush can confirm numbers by text message. Until then nobody can be found by a number, so nobody can pose as you with yours.'));
   const oldPhone=ls.get('hush:phone:'+me.handle,null);
   if(oldPhone){const prm=el('button','secondary','Remove my saved number');
-    prm.onclick=async()=>{try{if(S.db)await S.db.doc('phones/'+await phoneHash(oldPhone)).delete();ls.set('hush:phone:'+me.handle,null);prm.remove();toast('Number removed')}catch{toast('Couldn\u2019t remove it. Try again.')}};
+    prm.onclick=async()=>{try{if(S.db)await S.db.doc('phones/'+await phoneHash(oldPhone)).delete();ls.set('hush:phone:'+me.handle,null);prm.remove();toast('Number removed')}catch{toastErr('Couldn\u2019t remove it. Try again.')}};
     body.append(prm)}
   // Everything blocked, both kinds. People and chats are kept in my vault and never told; per-chat blocks live in the
   // chat's own sealed member list, so they are listed for the chats I run.
@@ -2263,7 +2323,7 @@ function settingsPrivacy(body,me){
   const inChats=el('div');body.append(inChats);
   (async()=>{for(const c of S.convs.filter(x=>typeOf(x)!=='dm'&&isAdmin(x)&&x.visibility!=='public')){let shown;try{shown=await showMeta(c)}catch{continue}
     for(const h of shown.banned||[])inChats.append(row(userAvatar(h,'sm'),displayName(h),`Blocked from ${shown.name||'a '+typeOf(c)}`,async()=>{
-      try{await unban(c.id,h);toast(displayName(h)+' can join again');setTab('profile')}catch{toast('That didn’t go through. Try again.')}},h))}
+      try{await unban(c.id,h);toast(displayName(h)+' can join again');setTab('profile')}catch{toastErr('That didn’t go through. Try again.')}},h))}
     if(!people.length&&!chats.length&&!inChats.children.length)body.append(el('p','hint','Nothing is blocked. You can block a person from their profile or a chat’s menu, or block someone from a group you run in its member list.'))})();
 }
 function settingsLogin(body,me){
@@ -2288,14 +2348,14 @@ function settingsAdvanced(body,me){
   const rs=html('button','menu-item flush',I.down+'<span>Restore an account</span>');rs.onclick=()=>openRestore();
   body.append(bk,rs);
   {const tg=el('label','toggle');const cb=el('input');cb.type='checkbox';cb.checked=backupOn();
-    cb.onchange=async()=>{if(!S.db){cb.checked=!cb.checked;toast('You need to be online for this.');return}const on=cb.checked;
+    cb.onchange=async()=>{if(!S.db){cb.checked=!cb.checked;toastErr('You need to be online for this.');return}const on=cb.checked;
       if(!on&&!(await confirmSheet('Turn off Message backup?','This deletes your Message backup from the server.',{danger:true,yes:'Turn off and delete',no:'Keep it on',
         note:'After that, a device that logs in with your password or recovery words won\u2019t be able to open older messages. Linking a new device from one you\u2019re logged in on still brings them over, and your devices keep what they have. You can turn it back on at any time.'}))){cb.checked=true;return}
       cb.disabled=true;
       try{P().backup=on;await saveContacts(); // the setting first, so a device saving at this moment sees it off before it could put a backup back
         if(on){if(await syncBackup())keysArrived()}else await S.db.doc(await backupPath(me)).delete(); // a delete that fails leaves it on: never say "off" while the backup is still there
         toast(on?'Message backup is on':'Message backup is off')}
-      catch{P().backup=!on;cb.checked=!on;saveContacts();toast('That didn\u2019t save. Try again.')}cb.disabled=false};
+      catch{P().backup=!on;cb.checked=!on;saveContacts();toastErr('That didn\u2019t save. Try again.')}cb.disabled=false};
     tg.append(cb,el('span',null,'Message backup'));
     body.append(tg,el('p','hint','On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.'))}
   body.append(el('div','menu-label flush','Security'));
@@ -2336,7 +2396,7 @@ const inviteText=()=>`Join me on Hush, a private messenger where only you and th
 function smsLink(to,text){const a=el('a','primary btnlink','Send invite by text');a.href=`sms:${to||''}?&body=${encodeURIComponent(text)}`;a.target='_blank';a.rel='noopener';return a}
 function shareRow(text,url){
   const row=el('div','row2');const copy=el('button','secondary','Copy invite');
-  copy.onclick=async()=>{try{await navigator.clipboard.writeText(text);toast('Invite copied')}catch{toast('Copying isn\u2019t allowed here. Use Share instead.')}};row.append(copy);
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(text);toast('Invite copied')}catch{toastErr('Copying isn\u2019t allowed here. Use Share instead.')}};row.append(copy);
   if(navigator.share){const sh=el('button','secondary','Share');sh.onclick=async()=>{try{await navigator.share({title:'Join me on Hush',text,url})}catch(e){if(!e||e.name!=='AbortError')copy.click()}};row.append(sh)}
   return row;
 }
@@ -2347,7 +2407,7 @@ function openPhoneInvite(){
   const go=el('button','primary','Continue');go.style.width='100%';const out=el('div');const err=el('div','err');
   body.append(f);
   if(navigator.contacts&&navigator.contacts.select){const pick=html('button','menu-item flush',I.user+'<span>Choose from contacts</span>');
-    pick.onclick=async()=>{try{const r=await navigator.contacts.select(['tel'],{multiple:false});const t=r&&r[0]&&r[0].tel&&r[0].tel[0];if(t){inp.value=t;go.click()}}catch{toast('Contacts aren\u2019t available here. Type the number instead.')}};body.append(pick)}
+    pick.onclick=async()=>{try{const r=await navigator.contacts.select(['tel'],{multiple:false});const t=r&&r[0]&&r[0].tel&&r[0].tel[0];if(t){inp.value=t;go.click()}}catch{toastErr('Contacts aren\u2019t available here. Type the number instead.')}};body.append(pick)}
   body.append(go,err,out,el('p','hint','Hush can\u2019t look people up by phone number until numbers can be confirmed by text message, so this sends them an invite.'));
   setTimeout(()=>inp.focus(),50);
   inp.onkeydown=e=>{if(e.key==='Enter')go.click()};
@@ -2409,7 +2469,7 @@ async function loadContacts(){
   if(S.me.handle!==me)return;
   if(!ok&&err&&typeof err.code==='string'){S.vaultOk=false;S.contactsReady=true;return} // the server refused or the connection dropped: nothing to show, and nothing is written over the vault (saveContacts)
   if(ok&&o)try{applyVault(o)}catch{ok=false}
-  if(!ok)toast('Your contacts couldn\u2019t be unlocked on this device.');
+  if(!ok)toastErr('Your contacts couldn\u2019t be unlocked on this device.');
   S.vaultOk=ok;S.contactsReady=true;
   const pending=o===null&&!!(ls.get('hush:rekey:'+me,null)||{}).stage&&!!(S.me.prev&&S.me.prev.ecdhPriv); // a device removal half done: finishRekey writes the new vault from the old one, so nothing is saved here yet
   if(ok&&!pending&&o===null&&S.freshSignup===me){S.freshSignup=null;S.prefs.backup=true;S.prefs.tier='';saveContacts()} // new account: Message backup on from the start, and no power tier yet
@@ -2433,7 +2493,7 @@ let vaultQ=Promise.resolve();
 const pwVerified=new Map(); // account -> {login, loc}: a box address just proven right by logging in here with the password
 function saveContacts(keepLogin){ // keepLogin: this save carries a password change made here, so its box addresses win
   if(!S.contactsReady||!S.db)return Promise.resolve();
-  if(S.vaultOk===false){if(!S.vaultWarned){S.vaultWarned=true;toast('Your settings can’t be saved on this device until your contacts can be unlocked. Reload to try again.')}return Promise.resolve()} // a device that could not read its vault never writes an empty one over it
+  if(S.vaultOk===false){if(!S.vaultWarned){S.vaultWarned=true;toastErr('Your settings can’t be saved on this device until your contacts can be unlocked. Reload to try again.')}return Promise.resolve()} // a device that could not read its vault never writes an empty one over it
   const me=S.me.handle,doc=JSON.parse(JSON.stringify({v:3,contacts:S.contacts,prefs:P(),pins:S.pins,verified:S.verified}));rebuildNames();renderContacts();renderList();
   vaultQ=vaultQ.then(async()=>{
     // saved whole, so a device still holding the addresses from before another device's password change would put them back
@@ -2441,7 +2501,7 @@ function saveContacts(keepLogin){ // keepLogin: this save carries a password cha
     const iv=crypto.getRandomValues(new Uint8Array(12));
     const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('vault|'+me)},await vaultKey(),enc.encode(JSON.stringify(doc)));
     await S.db.doc(await vaultPath(me)).set({iv:b64(iv),ct:b64(ct),ts:Date.now()}); // at a blind address with no username on it, so the server can't tie this box to you
-  }).catch(()=>toast('That didn\u2019t save. Check your connection and try again.'));
+  }).catch(()=>toastErr('That didn\u2019t save. Check your connection and try again.'));
   return vaultQ;
 }
 /* The account's password-box addresses as its settings hold them now. A password changed on another device moves every
@@ -2570,9 +2630,9 @@ function setupSwipeNav(){
     for(const n of [p.node,p.under,p.bd])if(n)n.style.transition=`transform ${ms}ms ${ease},opacity ${ms}ms ${ease},background-color ${ms}ms ${ease}`;
     if(go)paint(p,p.width);else if(p.kind==='menu')paint(p,0);else{p.node.style.transform='';if(p.under)p.under.style.transform='';p.node.style.opacity='';if(p.bd){p.bd.style.opacity='';p.bd.style.backgroundColor=''}}
     setTimeout(()=>{
-      if(p.kind==='menu'){if(go){if(navigator.vibrate)navigator.vibrate(6)}else p.bd._close();tidy(p);return} // stays open, or goes away again
+      if(p.kind==='menu'){if(go){haptic()}else p.bd._close();tidy(p);return} // stays open, or goes away again
       if(!go){tidy(p);return}
-      if(navigator.vibrate)navigator.vibrate(6);
+      haptic();
       if(p.kind==='chat'){app.classList.add('sw-quiet');tidy(p);closeConv();requestAnimationFrame(()=>requestAnimationFrame(()=>app.classList.remove('sw-quiet')))}
       else if(p.kind==='sheet'||p.kind==='drawer'){p.bd.style.visibility='hidden';(p.bd._close||(()=>p.bd.remove()))();tidy(p)}
       else if(p.kind==='tab'){tidy(p);setTab(p.to,-p.dir)}
@@ -2635,7 +2695,7 @@ function openContact(id){
     if(c.phone)body.append(smsLink(c.phone,inviteText()));body.append(shareRow(inviteText(),myInviteLink()))}
   const ed=html('button','menu-item flush',I.edit+'<span>Edit contact</span>');ed.onclick=()=>{close();openEditContact(c)};
   const del=el('button','menu-item danger flush','Delete contact');
-  del.onclick=async()=>{if(!confirm(`Delete ${c.name} from your contacts?`))return;S.contacts=S.contacts.filter(x=>x.id!==c.id);close();await saveContacts();toast('Contact deleted')};
+  del.onclick=async()=>{if(!confirmDanger(`Delete ${c.name} from your contacts?`))return;S.contacts=S.contacts.filter(x=>x.id!==c.id);close();await saveContacts();toast('Contact deleted')};
   body.append(ed,del);
 }
 function openEditContact(c,prefill){
@@ -2664,8 +2724,8 @@ function openEditContact(c,prefill){
   };
 }
 async function importContacts(){
-  if(!S.contactsReady){toast('Contacts are still loading.');return}
-  let picked;try{picked=await navigator.contacts.select(['name','tel'],{multiple:true})}catch{toast('Your phone\u2019s contacts aren\u2019t available here.');return}
+  if(!S.contactsReady){toastErr('Contacts are still loading.');return}
+  let picked;try{picked=await navigator.contacts.select(['name','tel'],{multiple:true})}catch{toastErr('Your phone\u2019s contacts aren\u2019t available here.');return}
   let n=0;for(const p of picked||[]){const e164=normPhone(p.tel&&p.tel[0]);if(!e164||S.contacts.some(x=>x.phone===e164))continue;
     S.contacts.push({id:rid(),name:String((p.name&&p.name[0])||e164).slice(0,60),phone:e164,handle:null,ts:Date.now()});n++}
   if(!n){toast('No new contacts to add.');return}
@@ -2693,9 +2753,9 @@ async function openMention(h){
   if(!S.me)return;
   if(h===S.me.handle){openSaved();return} // your own name: your Saved Messages, as Telegram does
   if(isBlocked(h)){toast('You blocked @'+h+'. Unblock them in Settings → Privacy to message them.');return}
-  if(!S.db||!S.db.online){toast('You’re offline. Try again once you’re connected.');return}
+  if(!S.db||!S.db.online){toastErr('You’re offline. Try again once you’re connected.');return}
   const d=S.dir[h]||await lookupHandle(h);
-  if(!d){toast('Couldn’t find @'+h+' on Hush.');return}
+  if(!d){toastErr('Couldn’t find @'+h+' on Hush.');return}
   openDm(h);
 }
 /* ===== HUSH MENTIONS END ===== */
@@ -2818,7 +2878,7 @@ function openBackup(forced){
   };
   const show=w=>{body.replaceChildren(el('p',null,'Write these six words down, in order. Paper is best.'));
     const g=el('ol','rwords');w.forEach(x=>g.append(el('li',null,x)));body.append(g);
-    const cp=el('button','secondary','Copy words');cp.onclick=async()=>{try{await navigator.clipboard.writeText(w.join(' '));toast('Copied. Paste them somewhere private.')}catch{toast('Couldn\u2019t copy. Write them down instead.')}};
+    const cp=el('button','secondary','Copy words');cp.onclick=async()=>{try{await navigator.clipboard.writeText(w.join(' '));toast('Copied. Paste them somewhere private.')}catch{toastErr('Couldn\u2019t copy. Write them down instead.')}};
     const row=el('div','row2');row.append(cp);body.append(row);
     const next=el('button','primary','I wrote them down');next.style.width='100%';body.append(next);next.onclick=()=>check(w);
   };
@@ -2944,7 +3004,7 @@ function openSetupLogin(reset,power){ // reset: true after a recovery with the w
       for(const e of old){const i=e.lastIndexOf('|'),l=e.slice(0,i),loc=e.slice(i+1);if(all[l]!==loc)dropLoginBox(l,loc)}
       rememberLogin(me.handle,{login,loc:all[login],all},true);ls.set('hush:backedUp:'+me.handle,Date.now());ls.set('hush:recovered:'+me.handle,null);renderBanner();
       if(pwStrongEnough(p1.value)&&await markSecure())secured=true;
-      close();toast(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
+      close();(power&&!secured?toastErr:toast)(power?(secured?'Your account is secured':'Password changed, but it couldn\u2019t be marked as secured. Try again.'):cur?'Password changed':'Password added');if(S.tab==='profile')setTab('profile');
     }catch(e){go.disabled=false;go.textContent=cur?'Change password':'Save password';
       err.textContent=e&&e.message==='oldpw'?'Your current password isn\u2019t right.':e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.'):'Couldn\u2019t save. Check your connection and try again.'}};
 }
@@ -3166,14 +3226,14 @@ function rekeyPassword(h,li){ // the new password a removal asks for when the ac
       if(same){err.textContent='That’s your current password. The lost device may know it: choose a new one.';p1.focus();return}
       close();res(pw)}})}
 async function removeDevice(devId,name,key){ // Settings → Login and devices → Your devices → Remove
-  if(!S.db||!S.db.online){toast('You need to be online for this.');return}
+  if(!S.db||!S.db.online){toastErr('You need to be online for this.');return}
   if(!S.me||!S.me.dev||devId===S.me.dev.id||S.rekeying)return;const h=S.me.handle;
-  if(!S.contactsReady||S.vaultOk===false){toast('Your settings haven’t loaded yet. Try again in a moment.');return}
+  if(!S.contactsReady||S.vaultOk===false){toastErr('Your settings haven’t loaded yet. Try again in a moment.');return}
   if(!(await confirmSheet('Remove this device?',`${name} (key ${key}) will be locked out of your account at once.`,{danger:true,yes:'Remove device',no:'Keep it',
     note:'Your account gets new keys. Every other device of yours is logged out too and links again with a code from this one. If you use a password you will choose a new one. Your recovery words stop working and must be made again, and your contacts will see that your security code changed.'})))return;
   let pw=null;const li=loginInfo(h);if(li&&li.loc){pw=await rekeyPassword(h,li);if(!pw)return}
   if(!S.me||S.me.handle!==h||S.rekeying)return;
-  await withLock('hush:rekey:'+h,{ifAvailable:true},lock=>lock?rekeyRun({stage:'read',devId,name,key,pw},rekeySheet('Removing device')):toast('A device removal is already running in another tab.'));
+  await withLock('hush:rekey:'+h,{ifAvailable:true},lock=>lock?rekeyRun({stage:'read',devId,name,key,pw},rekeySheet('Removing device')):toastErr('A device removal is already running in another tab.'));
 }
 async function rekeyRun(rec,ui){ // the stages in order; the record is kept from 'write' on, and a resumed run starts at its stage
   const h=S.me.handle,key='hush:rekey:'+h,save=()=>{rec.at=Date.now();ls.set(key,rec)}; // the whole record, the new password included, in the sealed store (as safe there as the keys): a reload goes on from it
@@ -3380,7 +3440,7 @@ function confirmSheet(title,text,opt={}){ // a question with two answers; resolv
     const end=v=>{document.removeEventListener('keydown',esc);close();res(v)},esc=e=>{if(e.key==='Escape')end(false)};
     body.append(el('p',null,text));if(opt.note)body.append(el('p','hint',opt.note));
     const row=el('div','reqbtns'),no=el('button','secondary',opt.no||'No'),yes=el('button',opt.danger?'btn-danger':'primary',opt.yes||'Yes');
-    row.append(no,yes);body.append(row);no.onclick=()=>end(false);yes.onclick=()=>end(true);document.addEventListener('keydown',esc);setTimeout(()=>no.focus(),50)})}
+    row.append(no,yes);body.append(row);no.onclick=()=>end(false);yes.onclick=()=>{if(opt.danger)haptic(true);end(true)};document.addEventListener('keydown',esc);setTimeout(()=>no.focus(),50)})}
 async function logOutAccount(h,opt={}){
   const id=S.ids.find(x=>x.handle===h);if(!id)return;
   const li=loginInfo(h),ways=[li&&li.loc?'your username and password':null,hasRecovery(h)?'your six recovery words':null].filter(Boolean);
@@ -3489,7 +3549,7 @@ function awaitingAccept(c){ // I'm the one waiting for them to accept
 async function answerRequest(c,ok){
   try{if(ok){setDmInfo(c.id,{req:'ok'});try{await S.db.collection('channels/'+c.id+'/posts').add(await sealSvc(c,'accept',0))}catch{}toast('Request accepted. You can chat now.');openConv(c.id)}
     else{setDmInfo(c.id,{req:'no'});closeConv();toast('Request deleted. '+displayName(dmPeer(c))+' won\u2019t be told.')}
-    renderList();updateTitle()}catch{toast('That didn\u2019t go through. Try again.')}
+    renderList();updateTitle()}catch{toastErr('That didn\u2019t go through. Try again.')}
 }
 function requestBar(c){
   const peer=dmPeer(c),f=el('div','composer readonly reqbar');
@@ -3518,7 +3578,7 @@ function showRequestAlert(){
   const x=el('button','icon-btn');x.innerHTML=I.close||'\u2715';x.setAttribute('aria-label','Dismiss');
   const seen=()=>{rs.forEach(c=>ls.set(`hush:reqseen:${S.me.handle}:${c.id}:${c.last.ts}`,1));b.remove()};
   m.onclick=()=>{seen();rs.length===1?openConv(rs[0].id):openRequests()};x.onclick=seen;
-  b.append(html('span','reqic','\u2709\ufe0f'),m,x);document.body.append(b);try{navigator.vibrate&&navigator.vibrate([30,60,30])}catch{}
+  b.append(html('span','reqic','\u2709\ufe0f'),m,x);document.body.append(b);haptic(true)
 }
 /* ---------- drawer ---------- */
 function openDrawer(){
@@ -3620,7 +3680,7 @@ function showOnboard(adding,notice){
         if(all[handle])rememberLogin(handle,{login:handle,loc:all[handle],all},true);else rememberLogin(handle,{login:handle});
         S.freshSignup=handle; // a brand-new account starts with Message backup on (loadContacts); accounts from before keep their choice
         await enterAccount(id);if(pwStrongEnough(pw))markSecure();
-        if(!all[handle])toast('Your password didn’t save. Add it again in Profile → Settings.')}
+        if(!all[handle])toastErr('Your password didn’t save. Add it again in Profile → Settings.')}
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };
   // Forgot password: two ways back in, and neither asks for the password. A device where you're still logged in lets this
@@ -3677,7 +3737,7 @@ function showPwLock(){ // asked when Hush opens; nothing about your accounts is 
     if(ok){ls.set('hush:lockFails',null);i.value='';o.remove();lockShown=false;awayAt=0;done();return}
     f.n++;if(f.n>=5)f.until=Date.now()+Math.min(30e3*2**(f.n-5),3600e3);ls.set('hush:lockFails',f);
     i.value='';err.textContent=f.n>=5?'Wrong password. Wait a bit before trying again.':'Wrong password. Try again.'};
-  forgot.onclick=()=>{if(!confirm('Forgot your lock password?\n\nYou can clear this device and log back in with your username and your Hush password (or your recovery words). Your chats come back when you log in.\n\nClear this device?'))return;wipeDevice()};
+  forgot.onclick=()=>{if(!confirmDanger('Forgot your lock password?\n\nYou can clear this device and log back in with your username and your Hush password (or your recovery words). Your chats come back when you log in.\n\nClear this device?'))return;wipeDevice()};
   });
 }
 // The lock gate at start: resolves once the PIN or the lock password is right. Until then nothing is unsealed.
@@ -3698,7 +3758,7 @@ function showLock(){
     if(ok){ls.set('hush:lockFails',null);o.remove();lockShown=false;awayAt=0;done();return}
     f.n++;if(f.n>=5)f.until=Date.now()+Math.min(30e3*2**(f.n-5),3600e3);ls.set('hush:lockFails',f);
     i.value='';err.textContent=f.n>=5?'Wrong PIN. Wait a bit before trying again.':'Wrong PIN. Try again.'};
-  forgot.onclick=()=>{if(!confirm('Forgot your PIN?\n\nYou can log out every account on this device and log back in with your username and password. Your chats come back when you log in.\n\nLog out of this device?'))return;
+  forgot.onclick=()=>{if(!confirmDanger('Forgot your PIN?\n\nYou can log out every account on this device and log back in with your username and password. Your chats come back when you log in.\n\nLog out of this device?'))return;
     wipeDevice()};
   });
 }
@@ -3778,7 +3838,7 @@ const isBlocked=h=>!!(h&&S.prefs&&Array.isArray(S.prefs.blocked)&&S.prefs.blocke
 const isChatBlocked=cid=>!!(S.prefs&&Array.isArray(S.prefs.blockedChats)&&S.prefs.blockedChats.includes(cid));
 const hiddenConv=c=>!!c&&(isChatBlocked(c.id)||(typeOf(c)==='dm'&&!isSelf(c)&&isBlocked(dmPeer(c))));
 function afterBlockChange(){if(S.chan&&hiddenConv(curConv()))closeConv();else if(S.chan){S.rendered=null;applyExpiry();renderConv()}renderList();updateTitle();if(S.tab==='profile')setTab('profile')}
-function blockPeer(h){const b=P().blocked||(P().blocked=[]);if(!b.includes(h))b.push(h);saveContacts();afterBlockChange()}
+function blockPeer(h){haptic(true);const b=P().blocked||(P().blocked=[]);if(!b.includes(h))b.push(h);saveContacts();afterBlockChange()}
 function unblockPeer(h){const b=P().blocked||[];P().blocked=b.filter(x=>x!==h);saveContacts();afterBlockChange();restoreDm(h).catch(()=>{})}
 /* ===== HUSH UNBLOCK BEGIN ===== */
 /* Unblocking brings our DM back. My note for it may have been tidied away while they were blocked (blocking used to
@@ -3791,7 +3851,7 @@ async function restoreDm(h){
   await ensureInbox({id:cid,type:'dm',members:[S.me.handle,h]},[S.me.handle],true);return true;
 }
 /* ===== HUSH UNBLOCK END ===== */
-function blockChat(cid){const b=P().blockedChats||(P().blockedChats=[]);if(!b.includes(cid))b.push(cid);saveContacts();afterBlockChange()}
+function blockChat(cid){haptic(true);const b=P().blockedChats||(P().blockedChats=[]);if(!b.includes(cid))b.push(cid);saveContacts();afterBlockChange()}
 function unblockChat(cid){const b=P().blockedChats||[];P().blockedChats=b.filter(x=>x!==cid);saveContacts();afterBlockChange()}
 function confirmBlockPerson(h){
   if(!confirm(`Block ${displayName(h)}?\n\nTheir messages and requests will be dropped quietly, their messages in groups and channels you share will be hidden, and they won’t be able to add you to groups. They won’t be told. You can unblock them in Settings → Privacy.`))return false;
@@ -3860,14 +3920,14 @@ function watchInbox(id,cb){
     for(const cid of [...subs.keys()])if(!seen.has(cid))drop(cid);
     for(const [cid,p] of seen){notePointer(cid,p);if(!subs.has(cid))start(cid)}
     ready=true;emit();
-  },()=>toast('Your chats stopped updating. Reload to reconnect.'));
+  },()=>toastErr('Your chats stopped updating. Reload to reconnect.'));
   // Watch one chat a pointer names. The watch may end in refusal (our level was revoked, or we never had one yet):
   // for a fresh pointer, or one we never held a key for, that is a reason to look again later, not to forget.
   function start(cid){pend++;let first=true,seq=0;const done=()=>{if(first){first=false;pend--}};
     subs.set(cid,watchDoc(S.db.doc('channels/'+cid),async d=>{const my=++seq;
       const c=d.exists?Object.assign({id:cid},d.data()):null;if(c)noteChatDoc(c);
-      const shown=c?Object.assign({},await showMeta(c)):null;
-      const mine=!!shown&&(typeOf(c)==='dm'||c.visibility==='public'||!!(await convKey(c,epochOf(c))));
+      const shown=c?Object.assign({},await showMeta(c)):null;adoptOMeta(c,shown);
+      const mine=!!shown&&(typeOf(c)==='dm'||c.visibility==='public'||!!(await convKey(c,epochOf(c)))||['owner','admin'].includes(S.db.chatLevel(cid)));
       if(shown&&shown.last)shown.last=await unsealPost(c,shown.last);done();
       if(dead||my!==seq||!subs.has(cid)){if(!dead)emit();return} // a newer copy arrived while unlocking this one
       settle(cid,pointerVerdict({exists:!!c,mine,held:heldKey(cid),fresh:fresh(cid)}),shown)},
@@ -3928,7 +3988,7 @@ async function republishSelf(){
   if(!S.db||!S.me||!S.dirReady||S.rekeying)return;const m=S.me,d=S.dir[m.handle];if(d&&(d.kv||1)>(m.kv||1))return;
   try{if(!d)await S.db.doc('directory/'+m.handle).set(Object.assign({handle:m.handle,name:m.name,ecdh:m.ecdh,sig:m.sig,ts:Date.now()},dispOk(m.disp,m.handle)?{disp:m.disp}:{},m.dev&&m.dev.s?{devs:{[m.dev.id]:devEntry(m.dev)}}:{}));
     else if(dispOk(m.disp,m.handle)&&d.disp!==m.disp){await S.db.doc('directory/'+m.handle).update({disp:m.disp});d.disp=m.disp}
-    else if(!sameKeys(keysOf(d),{ecdh:m.ecdh,sig:m.sig})){toast('Your security code on the server doesn\u2019t match this device. Restore from your backup, or contact the app owner.')}}catch{}
+    else if(!sameKeys(keysOf(d),{ecdh:m.ecdh,sig:m.sig})){toastErr('Your security code on the server doesn\u2019t match this device. Restore from your backup, or contact the app owner.')}}catch{}
 }
 (async()=>{
   if(lockCfg())await showLock();   // the PIN or password gate first: nothing is unsealed while it stands

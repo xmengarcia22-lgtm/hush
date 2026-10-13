@@ -137,7 +137,7 @@ function linkreqs(ctx, d) {
 
 // ---- chats --------------------------------------------------------------------
 
-const CHANNEL_KEYS = new Set(['type', 'visibility', 'epoch', 'keys', 'akeys', 'openKeys', 'meta', 'invites', 'ts', 'last',
+const CHANNEL_KEYS = new Set(['type', 'visibility', 'epoch', 'keys', 'akeys', 'openKeys', 'meta', 'ometa', 'invites', 'ts', 'last',
   'pins', 'ttl', 'closed', 'reactions', 'comments', 'name', 'desc', 'photo', 'owner', 'admins']);
 const NAMES_NEVER = ['members', 'banned', 'from', 'by', 'to', 'req'];
 const NAMES_PUBLIC_ONLY = ['owner', 'admins', 'name', 'desc', 'photo'];
@@ -156,8 +156,8 @@ function wrapMap(v, what, nested) {
     labelMap(x, what);
   }
 }
-export function sealedMeta(m, what) {
-  if (!isPlain(m) || !int(m.e, 0, 31) || !str(m.iv, 1, 64) || !str(m.ct, 1)) bad(what, 'meta');
+export function sealedMeta(m, what, f = 'meta') {
+  if (!isPlain(m) || !int(m.e, 0, 31) || !str(m.iv, 1, 64) || !str(m.ct, 1, 262144)) bad(what, f);   // a photo of 320 px is far less
 }
 
 function channels(ctx, d) {
@@ -181,10 +181,11 @@ function channels(ctx, d) {
     for (const [k, v] of Object.entries(d.openKeys)) if (!int(Number(k), 0, 31) || !str(v, 40, 48)) bad(w, 'openKeys');
   }
   if (d.meta !== undefined) sealedMeta(d.meta, w);
+  if (d.ometa !== undefined) sealedMeta(d.ometa, w, 'ometa');   // the owner's part of the description (SPEC.md 5.3)
   if (d.invites !== undefined) {
     if (!isPlain(d.invites)) bad(w, 'invites');
     for (const [iid, inv] of Object.entries(d.invites)) {
-      if (!ID.ITEM_ID.test(iid) || !isPlain(inv) || !str(inv.iv, 1, 64) || !str(inv.ct, 1) || !HEX64.test(inv.ph || '') || !num(inv.ts)) bad(w, 'invites');
+      if (!ID.ITEM_ID.test(iid) || !isPlain(inv) || !str(inv.iv, 1, 64) || !str(inv.ct, 1, 8192) || !HEX64.test(inv.ph || '') || !num(inv.ts)) bad(w, 'invites');   // 32 keys need about 2 KB
     }
   }
   if (d.pins !== undefined && !(Array.isArray(d.pins) && d.pins.length <= 20 && d.pins.every((p) => ID.ITEM_ID.test(p)))) bad(w, 'pins');
