@@ -3,11 +3,31 @@
 Private messaging with end-to-end encryption: a web app and the small Node.js server behind it.
 
 The server stores encrypted messages it cannot read, public profiles, and the minimum needed to deliver
-data to the right people. It does not store IP addresses, access logs, chat membership, who sent which
-message, or who talks to whom. Group names and member lists are encrypted with the group's own key. People
-find their chats through an encrypted list only their own devices can open. Invitations arrive in a sealed
-mailbox that records only the recipient and the hour. A copy of the database reveals who has an account and
-how busy each chat is, and nothing else. `SPEC.md` is the full design and threat model.
+data to the right people. It does not store IP addresses or access logs, and its database does not record
+chat membership, who sent which message, or who talks to whom. Group names and member lists are encrypted
+with the group's own key. People find their chats through an encrypted list only their own devices can
+open. Invitations arrive in a sealed mailbox that records only the recipient and the hour. Searching by
+name or part of a username lists only people who turned that on; typing an exact username finds anyone,
+since that is how chats start. `SPEC.md` is the full design and threat model.
+
+## What the server can see
+
+**A copy of the database** cannot read messages, group names or member lists. It does show:
+
+- who has an account, and each profile as published: username, name, bio and photo, all in plaintext
+- the username search index, for people who turned search on
+- how many devices each account has, and when each was added
+- when each chat's key last changed, and how many times
+- the size of every message (messages are not padded), how often each was edited, and the size of every
+  photo or file
+- how many mailbox notes each person has, with the hour each arrived, which roughly shows how many chats
+  they are in
+- which accounts have set a strong password (the mark that lets an account run a group or channel), and when
+- the readable contents of public channels, whose key is kept on the server by design so anyone can read them
+
+**A live server**, or anyone running it, sees more than the database does. It sees which account sends each
+message, which chats each connection opens, and each person's contact list, which their app refreshes about
+once a minute. The claims above about who sends what and who talks to whom are true of the stored data only.
 
 ## What is here
 
@@ -20,6 +40,7 @@ how busy each chat is, and nothing else. `SPEC.md` is the full design and threat
 | `server/scripts/` | The pin tool, the local dev setup, and deployment examples: a systemd unit and a Caddyfile. |
 | `SPEC.md` | The design: identity plane, room keys, mailboxes, the frame protocol, storage, validation, the threat model, hardening, the stage plan. |
 | `RELEASES.md` | The hash of every released `index.html`, for anyone to check what they are served. |
+| `SECURITY.md` | What Hush protects and what it doesn't yet, the plan to close the gaps, and how to report a vulnerability. |
 
 ## Running it locally
 

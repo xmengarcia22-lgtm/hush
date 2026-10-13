@@ -210,7 +210,7 @@ export function createServer(cfg) {
     if (t.unref) t.unref();
     timers.push(t);
   };
-  every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); tickets.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
+  every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); store.sweepLinkreqs(); tickets.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
   every(Math.max(250, Math.min(5000, limits.typingTtlMs)), () => store.prune(), 'prune');
   every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); pwMisses.prune(); pwRepeats.prune(); invites.prune(); drops.prune(); }, 'rotate');
   every(86400_000, () => { tagger.rotateDay(); signups.prune(); }, 'rotateDay');
@@ -220,6 +220,7 @@ export function createServer(cfg) {
     store, subs, conns, limits, tagger, authz, staticRoot, drops, tickets,
     sweepInbox: (t) => store.sweepInbox(t),
     sweepMedia: (t) => store.sweepMedia(t),
+    sweepLinkreqs: (t) => store.sweepLinkreqs(t),
     tlsPort: () => (https && https.listening ? https.address().port : null),
     async listen() {
       const one = (s, port, host) => new Promise((resolve, reject) => {

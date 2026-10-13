@@ -50,6 +50,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   dropBodyBytes: 8192,          // largest POST /drop body read
   inboxMax: 500,                // notes kept per mailbox; the oldest give way
   inboxTtlMs: 30 * 86400_000,   // notes older than this are swept (SPEC.md 6)
+  linkreqTtlMs: 10 * 60_000,    // link requests untouched this long are swept (SPEC.md 8.6); the page gives one 5 minutes
   queriesPerMin: 120,           // query + mget, per connection
   blindReadsPerMinPerAddr: 20,  // reads of accounts, logins, linkreqs and phones per address tag (SPEC.md 9.4)
   blindReadsPerHourPerPath: 60, // and per blind address, whoever asks

@@ -32,10 +32,12 @@ async function aesKeyFrom(bits,salt){ // the shared ECDH secret, stretched for t
   return crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt:enc.encode(salt),info:enc.encode('hush-msg-v1')},ikm,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
 }
 async function aesKey(priv,pub,salt){return aesKeyFrom(await crypto.subtle.deriveBits({name:'ECDH',public:pub},priv,256),salt)}
-/* ---------- device keys (forward secrecy, stage 1) ----------
+/* ---------- device keys ----------
    Each device has its own key pair that never leaves it and is never backed up. Chat keys are wrapped to a
-   person's DEVICES, not to their account key, so the account keys plus recovery words alone can no longer
-   open old chats. Only a device that was in the chat (or was handed the keys by one) can.
+   person's DEVICES, not to their account key. This is not forward secrecy: message backup, on by default for
+   new accounts, keeps every chat key on the server sealed under a key derived from the account key alone, so the account
+   keys (which the password box and the recovery words both hold) plus the server's data open all backed-up
+   history. Only with backup off does a chat need a device that was in it (or was handed the keys by one).
    A device's entry on your profile is signed by your account key (your first device) or by one of your
    existing devices (one added with the QR handoff), so others know which devices are really yours. */
 const devMsg=(h,d)=>enc.encode(['hush-dev-v1',h,d.id,d.ecdh.x,d.ecdh.y,d.sig.x,d.sig.y,d.by||''].join('|'));
@@ -384,26 +386,34 @@ const keysOf=d=>d?{ecdh:{x:d.ecdh.x,y:d.ecdh.y},sig:{x:d.sig.x,y:d.sig.y}}:null;
 const sameKeys=(a,b)=>!!a&&!!b&&a.ecdh.x===b.ecdh.x&&a.ecdh.y===b.ecdh.y&&a.sig.x===b.sig.x&&a.sig.y===b.sig.y;
 function peerKeys(h){if(S.me&&h===S.me.handle)return {ecdh:S.me.ecdh,sig:S.me.sig};return (S.pins&&S.pins[h])||S.dir[h]||null}
 /* ===== HUSH RECOVERY BEGIN ===== */
-/* ---------- recovery words: six everyday words that bring your account back ----------
+/* ---------- recovery words: twelve everyday words that, with your username, bring your account back ----------
    The words are made on this device and never sent anywhere. They're stretched (PBKDF2, 600k rounds) into
    a secret address and a key, exactly like your password, and your account keys are locked into a box there.
-   1,024 words, 6 picks = about 1 in a billion billion. No server checks them, so no carrier, email provider
+   1,024 words, 12 picks = 120 bits. The salt is the username (v2), so a stolen copy of the server's data has to be
+   attacked one account at a time. Sets made before (v1: 6 words, 60 bits, one salt shared by everyone) still open
+   their box until new words replace it. No server checks them, so no carrier, email provider
    or court order can reset your account. Typing just the first 4 letters of each word is enough.
    This block and the login block below have no page dependencies beyond S, ls and a few helpers, so the
    server's tests lift them out and run them against a real server (test/login.test.js). */
 const RWORDS='acorn adult agent alarm album alley amber anchor angel ankle antler anvil apple apricot apron arch arena arm armor army arrow art ash aspen atlas attic aunt autumn avocado award axe axis baby back bacon badge bag bagel bake bald ball bamboo banana band banjo bank barber barn barrel base basil basket bat bath battery bay beach beam bean bear beast beaver bed bee beef beet bell belt bench berry bicycle bike bill bird biscuit bison blade blank blaze blender blimp blizzard block blond bloom blouse blue bluff board boat body boil bolt bone bonus book boot border boss bottle boulder bounce bowl box boy bracelet brain bramble branch brass brave bread breeze brick bride brief bright bronze broom brown brush bubble bucket buddy budget buffalo bugle build bulb bull bunch bunny burger burrow bus bush butler butter buyer cabbage cabin cable cactus caddy cage cake calf call calm camel camp canal candy cane cannon canoe canvas canyon cap cape captain car caramel card cargo carpet carrot cart cash castle cat catfish cattle cave cedar cell cement chain chalk champ chapel charm cheek chef cherry chess chick chief child chimney chin chip choir chop chrome cider cigar cinema cinnamon circle city clam clay clerk cliff climb clock cloth cloud clover clown club coach coal coast coat cobra cobweb cocoa code coffee coin cold collar colt comb comet comic compass condor cookie copper coral cord cork corn cotton couch cougar county court cousin cow cowboy coyote crab craft crane crate crayon cream creek crew cricket crisp crop cross crow crumb crust cube cup cupcake curtain curve cushion cycle daffodil dagger dairy daisy dance dart date dawn deck deer delta denim dentist desert desk dial diamond diary dice diesel dingo dinner dish diver dock doctor dog doll dolphin dome domino donkey donut door dough dove dragon drama drawer dream dress drift drill drink drone drum duck dumpling dune dust eagle earth easel echo eclipse edge eel egg eggplant elbow elder elephant elk elm ember emerald empire engine entry envy equal error essay event exam exit fabric face fact fair falcon family fan farm fawn feast feather fence fern ferry fever fiddle field fig film finch finger fire fish flag flame flash fleet flint float flock floor flour flower flute foam focus fog folk food foot forest fork fort fossil fountain fox frame frog frost fruit fudge fuel fund funnel fur gadget galaxy game garage garden garlic garnet gate gazelle gear gecko gem genius geyser ghost giant gift ginger giraffe glacier glass glove glow glue goat goblet gold golf goose gopher gorilla gown grain granite grape grass gravy green griddle grill grin grove guard guest guitar gulf gum gumbo habit hall ham hammer hamster hand harbor harness harp hat hatchet hawk hay hazel head heart heat hedge helmet hen herb hermit hero hiker hill hinge hippo hobby hockey honey hood hook hope horn horse host hotel hound house hug human hummus humor husky hut ice iceberg icon idea igloo inch index ink inkwell inn iris iron island ivory ivy jackal jaguar jam jar jasmine javelin jaw jazz jeans jeep jelly jet jewel jigsaw job jockey joke judge juice jukebox jungle kangaroo kayak kernel ketchup kettle key kid king kitchen kite kitten kiwi knee knife knight knot koala label lace ladder ladle lady lagoon lake lamb lamp lane lantern laptop lasso latch lava lawn layer leaf ledge lemon lens leopard lettuce lever lid lilac lily limb lime lion lip list lizard llama loaf lobby lobster lock lodge log loop lotus lunch lynx magnet maid mail mammoth mango manor mantle maple marble market marsh mascot mask mast match maze meadow medal melon menu mesa metal meter microwave mill minnow mint mirror mitten model mohawk mole monkey monsoon moon moose mop mosaic moth motor mouse mouth mud muffin mug mule muscle museum music mustang nail name napkin navy neck nectar needle nest net nickel night noble noodle north nose note novel nugget nurse nut nutmeg oak oar oasis oatmeal ocean octopus olive omelet onion opera orange orbit orchid ostrich otter outlet oven owl oyster paddle page pail paint palace palm pan panda panel paper paprika parade park parrot parsley party pasta patch path peach peak pear pebble pecan pedal pelican pen pencil penguin penny pepper pheasant piano piccolo pickle picnic pie pier pig pigeon pillow pilot pine pink pipe pirate pistol pitch pizza plane plate plaza plum pluto pocket poem polar pole pond pony pool popcorn poppy porch port possum poster pot potato pouch powder prairie pretzel prince prism puffin pug pulse pump pupil puppy purple puzzle quail quartz queen quest quilt quiver rabbit raccoon radar radio raft rain raisin rake ranch rapids raven razor recipe reef reindeer relay rhino ribbon rice riddle ridge ring river road robin robot rock rodeo roof room rooster root rope rose rover ruby rug ruler saddle safari saffron sail salad salmon salt sand sapphire sardine sauce sauna scale scarf school scooter scout screw sea seagull seal season seed sequoia shade shark sheep shelf sherbet shield ship shirt shoe shore shovel shrimp sign silk silver singer sink siren skate ski skillet skull skunk sky sled sleeve slice slope sloth smile smoke snail snake snorkel snow soap sock sofa soil soldier sombrero song soup spark spear spider spike spinach spoon spring sprocket spruce square squid stable stage stamp star steam steel stem stick stingray stone stool storm stove straw stream string strudel sugar suit summer sun sundae swamp swan sweater swing sword syrup table taco tadpole tail tank tape target taxi tea teacup teapot temple tennis tent thimble thread throne thumb thunder ticket tide tiger timber toast toe tomato tongue tool tooth torch toucan tower town toy track trail tree tribe trombone trophy truck trumpet trunk tuba tugboat tulip tuna tundra tunnel turkey turnip turtle tusk tuxedo twig umbrella uncle unicorn valley van vanilla vase velvet vest violin visor volcano vulture waffle wagon waiter wall walnut walrus wand warthog wasabi water wave wax weasel weevil well whale wheat wheel whip whisker wig wildcat willow window wing winter wire wizard wolf wombat wood wool worm wren yacht yard yarn yodel yogurt zebra zeppelin zero zipper zoo zucchini'.split(' ');
-const RW_COUNT=6;
+const RW_COUNT=12,RW_OLD=6; // new sets are 12 words (v2); 6-word sets (v1) are still read, never made
 function newRecoveryWords(){const r=crypto.getRandomValues(new Uint16Array(RW_COUNT));return Array.from(r,v=>RWORDS[v&1023])}
-function readWords(text){ // forgiving: any case, any spacing or punctuation, first 4 letters are enough
+function readWords(text){ // forgiving: any case, any spacing or punctuation, first 4 letters are enough. Exactly 12 or 6 words.
   const toks=String(text||'').toLowerCase().match(/[a-z]+/g)||[];const out=[];
   for(let k=0;k<toks.length;k++){const t=toks[k];let w=RWORDS.includes(t)?t:null;
     if(!w&&t.length>=4){const m=RWORDS.filter(x=>x.startsWith(t.slice(0,4)));if(m.length===1)w=m[0]}
     if(!w)throw Object.assign(new Error('word'),{n:k+1,t});out.push(w)}
-  if(out.length!==RW_COUNT)throw Object.assign(new Error('count'),{n:out.length});
+  if(out.length!==RW_COUNT&&out.length!==RW_OLD)throw Object.assign(new Error('count'),{n:out.length});
   return out;
 }
-async function recSecrets(words){
-  const salt=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-recovery-salt-v1')));
+const recVer=words=>words.length===RW_COUNT?2:words.length===RW_OLD?1:0;
+const recLabel=v=>'hush-recovery-v'+v; // AES-GCM additional data: a v1 box never opens as v2 or the other way round
+// The salt's username, by the handle rule and not the login one (normLogin), which refuses the all-digit handles older accounts may have.
+const recUser=u=>{u=String(u||'').trim().replace(/^@/,'').toLowerCase();return /^[a-z0-9_]{3,20}$/.test(u)?u:null};
+async function recSecrets(words,user){ // v2 salts with the username (per account, nothing stored); v1 had one salt for everyone
+  const v=recVer(words);if(!v)throw Object.assign(new Error('count'),{n:words.length});
+  if(v===2&&!(user=recUser(user)))throw new Error('user');
+  const salt=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(v===2?'hush-recovery-salt-v2:'+user:'hush-recovery-salt-v1')));
   const base=await crypto.subtle.importKey('raw',enc.encode(words.join(' ')),'PBKDF2',false,['deriveBits']);
   const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:600000},base,512));
   const loc=b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',bits.slice(0,32))));
@@ -411,26 +421,29 @@ async function recSecrets(words){
   return {loc,key};
 }
 async function saveRecovery(id,words){
-  const {loc,key}=await recSecrets(words),iv=crypto.getRandomValues(new Uint8Array(12));
-  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('hush-recovery-v1')},key,enc.encode(JSON.stringify(bundleOf(id)))));
+  if(recVer(words)!==2)throw new Error('count'); // only the strong kind is ever made
+  const {loc,key}=await recSecrets(words,id.handle),iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(recLabel(2))},key,enc.encode(JSON.stringify(bundleOf(id)))));
   await S.db.doc('accounts/'+loc).set({iv:b64u(iv),ct:b64u(ct)});
   const mine=S.me&&S.me.handle===id.handle,v=mine&&S.prefs&&S.prefs.rec;
-  [...new Set([recLocal(id.handle),v].filter(o=>o&&o.loc&&o.loc!==loc).map(o=>o.loc))]
-    .forEach(l=>S.db.doc('accounts/'+l).delete().catch(()=>{})); // old words stop working, whichever device made them
-  ls.set('hush:recovery:'+id.handle,{loc,ts:Date.now(),conf:false});ls.set('hush:backedUp:'+id.handle,Date.now());
+  const r=recLocal(id.handle),old=[...new Set([...(r&&Array.isArray(r.old)?r.old:[]),r&&r.loc,v&&v.loc].filter(l=>typeof l==='string'&&l!==loc))];
+  // the old words keep working until the quick check passes (confirmRecovery), so new words never written down lock nobody out
+  ls.set('hush:recovery:'+id.handle,{loc,ts:Date.now(),conf:false,v:2,old});ls.set('hush:backedUp:'+id.handle,Date.now());
   if(v){delete S.prefs.rec;saveContacts()} // not counted as set up again until the quick check is passed
 }
 function confirmRecovery(id){ // the quick check passed: now the words count, on every device
   const r=recLocal(id.handle);if(!r||!r.loc)return;const ts=Date.now();
-  ls.set('hush:recovery:'+id.handle,{loc:r.loc,ts,conf:true});
-  if(S.me&&S.me.handle===id.handle&&S.contactsReady){P().rec={loc:r.loc,ts};saveContacts()}
+  (Array.isArray(r.old)?r.old:[]).forEach(l=>S.db.doc('accounts/'+l).delete().catch(()=>{})); // old words stop working now, whichever device made them
+  ls.set('hush:recovery:'+id.handle,{loc:r.loc,ts,conf:true,v:r.v});
+  if(S.me&&S.me.handle===id.handle&&S.contactsReady){P().rec={loc:r.loc,ts,v:r.v};saveContacts()}
   renderBanner();
 }
 let lastRecLoc=null;
-async function openRecovery(words){
-  const {loc,key}=await recSecrets(words);lastRecLoc=loc;const s=await S.db.doc('accounts/'+loc).get();if(!s.exists)throw new Error('nomatch');
-  const d=s.data();let pt;try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(d.iv),additionalData:enc.encode('hush-recovery-v1')},key,unb64u(d.ct))}catch{throw new Error('nomatch')}
-  return idFromBundle(JSON.parse(dec.decode(pt)));
+async function openRecovery(words,user){ // user: the username, needed for 12 words only
+  const v=recVer(words),{loc,key}=await recSecrets(words,user);lastRecLoc=loc;const s=await S.db.doc('accounts/'+loc).get();if(!s.exists)throw new Error('nomatch');
+  const d=s.data();let pt;try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(d.iv),additionalData:enc.encode(recLabel(v))},key,unb64u(d.ct))}catch{throw new Error('nomatch')}
+  const id=idFromBundle(JSON.parse(dec.decode(pt)));if(v===2&&id.handle!==recUser(user))throw new Error('nomatch');
+  return id;
 }
 const recLocal=h=>ls.get('hush:recovery:'+h,null);
 // Set up = the quick check was passed, on this device or another one (the encrypted vault carries it).
@@ -439,6 +452,9 @@ const hasRecovery=h=>{const r=recLocal(h),v=S.me&&S.me.handle===h&&S.contactsRea
   const vOk=!!(v&&typeof v.loc==='string');
   if(r&&r.conf===false)return vOk&&(v.ts||0)>(r.ts||0);
   return !!r||vOk};
+// Set up, but with the older 6-word kind (records without v:2): asked, never forced, to make new ones.
+const recOld=h=>{if(!hasRecovery(h))return false;const r=recLocal(h),v=S.me&&S.me.handle===h&&S.contactsReady&&S.prefs&&S.prefs.rec;
+  const c=[r&&r.conf!==false&&r,v&&typeof v.loc==='string'&&v].filter(Boolean).sort((a,b)=>(b.ts||0)-(a.ts||0))[0];return !!c&&c.v!==2};
 /* ===== HUSH RECOVERY END ===== */
 /* ===== HUSH AUTH BEGIN ===== */
 /* ---------- log in with username + password ----------
@@ -699,12 +715,13 @@ function parseLinkCode(text,ver=3){ // {secret, fp} (16 bytes each; version 4: {
 const devkStr=dk=>dk&&typeof dk==='object'?[dk.id,dk.x,dk.y,dk.sx,dk.sy].map(v=>String(v)).join('|'):'-';
 // What the QR code and the typed code commit to: the one-time key and the device's own key, together.
 const linkFp=async(pub,devk)=>b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-link-fp-v3|'+String(pub&&pub.x)+'.'+String(pub&&pub.y)+'|'+devkStr(devk)))));
-// The start of a device key's fingerprint, 40 bits as 8 symbols ("7K2M-9QX4"), shown on both devices to compare by eye.
+// The start of a device key's fingerprint, 80 bits as 16 symbols ("7K2M-9QX4-…"), shown on both devices to compare by eye.
+// Release 23 showed only the first 8, so those stay the same for the same key.
 async function devShort(dk){
   const h=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-dev-short-v1|'+devkStr(dk))));
   const v=[];let acc=0,bits=0;
-  for(const b of h.slice(0,5)){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
-  const s=v.map(x=>LC_ABC[x]).join('');return s.slice(0,4)+'-'+s.slice(4,8);
+  for(const b of h.slice(0,10)){acc=(acc<<8)|b;bits+=8;while(bits>=5){v.push((acc>>(bits-5))&31);bits-=5}acc&=(1<<bits)-1}
+  return v.map(x=>LC_ABC[x]).join('').match(/.{4}/g).join('-');
 }
 // The reverse direction (the approving device shows the code, the new device scans it): the new device's proof that it
 // read the code and that the code named its own keys. An HMAC under the shown secret, bound to this one request (its tag

@@ -83,9 +83,13 @@ test('codes from before the device key was covered are told apart and refused as
   assert.equal(parseLinkCode(v3, 2), null);
 });
 
-test('the device key is shown as eight symbols, the same on both devices, different for another key', async () => {
+test('the device key is shown as sixteen symbols (80 bits), the same on both devices, different for another key', async () => {
   const k = await devShort(DEVK);
-  assert.match(k, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+  assert.match(k, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+  // the first eight symbols are what release 23 showed for the same key: the 40-bit prefix of the same hash
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('hush-dev-short-v1|' + [DEVK.id, DEVK.x, DEVK.y, DEVK.sx, DEVK.sy].join('|'))));
+  const bits = [...h.slice(0, 10)].map(b => b.toString(2).padStart(8, '0')).join('');
+  assert.equal(k.replace(/-/g, ''), bits.match(/.{5}/g).map(x => '0123456789ABCDEFGHJKMNPQRSTVWXYZ'[parseInt(x, 2)]).join(''));
   assert.equal(await devShort({ ...DEVK }), k);
   assert.notEqual(await devShort({ ...DEVK, sx: 'e'.repeat(43) }), k);
 });

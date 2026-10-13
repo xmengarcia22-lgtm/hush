@@ -27,7 +27,7 @@ const SRC = [
   lift('/* ===== HUSH RECOVERY BEGIN ===== */', '/* ===== HUSH RECOVERY END ===== */'),
   lift('/* ===== HUSH AUTH BEGIN ===== */', '/* ===== HUSH AUTH END ===== */'),
 ].join('\n');
-const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,isHandleLogin,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery';
+const EXPORTS = 'RWORDS,newIdentity,proofFor,bundleOf,idFromBundle,normLogin,isHandleLogin,saveLoginBoxes,loginsOf,pwProblem,pwStrength,pwStrongEnough,loginSecrets,loginTag,saveLoginBox,openLoginBox,tryLogin,boxLoc,findBox,dropLoginBox,rememberLogin,reconcileLoginHint,loginInfo,healLogin,newRecoveryWords,readWords,recSecrets,saveRecovery,confirmRecovery,openRecovery,hasRecovery,recOld';
 const build = new Function('S', 'ls', 'enc', 'dec', 'saveContacts', 'renderBanner', 'P', 'openSetupLogin', `${SRC}\nreturn {${EXPORTS}};`);
 
 const BEGIN = '/* ===== HUSH ADAPTER BEGIN ===== */';

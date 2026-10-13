@@ -85,7 +85,7 @@ test('sign-up: username, display name, password, in that order and with no code;
   assert.ok(!login.includes('sendLoginCode'), 'logging in sends no code');
   assert.match(login, /forgot\.onclick=\(\)=>\{[^\n]*stepForgot\(\)\}/);
   const forgot = between('const stepForgot=', 'const stepLinkScan=');
-  assert.match(forgot, /stepLinkScan\(\)[\s\S]*openRestore\(\)/, 'forgot password offers another device, then the recovery words');
+  assert.match(forgot, /stepLinkScan\(\)[\s\S]*openRestore\(null,login\)/, 'forgot password offers another device, then the recovery words, with the username already typed');
   assert.ok(!/pwField|password'\)/.test(forgot), 'and asks for no password');
   assert.ok(!/Recovery email|openRecoveryEmail/.test(between('function settingsAdvanced(', 'function ')), 'no recovery email: nothing uses one now');
   assert.ok(!/openAddLogin/.test(ui));

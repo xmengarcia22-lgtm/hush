@@ -6,6 +6,7 @@
 //   - a wrong password and an unknown username are told apart
 //   - a lost password box is dropped quietly: nothing asks for the password, no wrong-password try is spent
 //   - recovery words bring the account back (first four letters are enough); wrong words do not
+//   - twelve words are salted with the username; older six-word sets still work until new words replace (and delete) them
 //   - signing up with a username that exists is refused by the server
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -187,15 +188,17 @@ test('recovery words bring the account back; the first four letters are enough; 
     await pg.db.ready;
     const { id } = await signUp(pg, 'jordan', PW);
     const words = pg.auth.newRecoveryWords();
-    assert.equal(words.length, 6);
+    assert.equal(words.length, 12, 'new sets are twelve words (120 bits)');
     await pg.auth.saveRecovery(id, words);
     pg.auth.confirmRecovery(id);
     assert.equal(pg.auth.hasRecovery('jordan'), true);
+    assert.equal(pg.auth.recOld('jordan'), false, 'a new set is not the older kind');
     await logOut(pg);
     assert.equal(pg.auth.hasRecovery('jordan'), false, 'the device forgot the words were set up; the server still has the box');
 
     const typed = words.map((w, k) => (k % 2 ? w.toUpperCase() : w)).join(',  ');
-    const back = await pg.auth.openRecovery(pg.auth.readWords(typed));
+    await assert.rejects(pg.auth.openRecovery(pg.auth.readWords(typed)), (e) => e.message === 'user', 'twelve words need the username');
+    const back = await pg.auth.openRecovery(pg.auth.readWords(typed), '@Jordan');
     assert.equal(back.handle, 'jordan');
     assert.ok(sameKeys(back, id));
     await pg.db.prove(await pg.auth.proofFor(back));
@@ -205,11 +208,90 @@ test('recovery words bring the account back; the first four letters are enough; 
     const { RWORDS } = pg.auth;
     const unique = RWORDS.filter((w) => w.length > 4 && RWORDS.filter((x) => x.startsWith(w.slice(0, 4))).length === 1).slice(0, 6);
     assert.deepEqual(pg.auth.readWords(unique.map((w) => w.slice(0, 4)).join(' ')), unique);
-    assert.throws(() => pg.auth.readWords(words.slice(0, 5).join(' ')), (e) => e.message === 'count' && e.n === 5);
+    for (const n of [0, 1, 5, 7, 11, 13, 24]) {
+      const ws = Array.from({ length: n }, (_, k) => words[k % 12]).join(' ');
+      assert.throws(() => pg.auth.readWords(ws), (e) => e.message === 'count' && e.n === n, `${n} words are refused: only 12 (or the older 6)`);
+    }
+    assert.equal(pg.auth.readWords(words.slice(0, 6).join(' ')).length, 6, 'six words are still read, for older sets');
     assert.throws(() => pg.auth.readWords(words.join(' ') + ' zzzz'), (e) => e.message === 'count' || e.message === 'word');
 
     const other = pg.auth.newRecoveryWords();
-    await assert.rejects(pg.auth.openRecovery(other), (e) => e.message === 'nomatch');
+    await assert.rejects(pg.auth.openRecovery(other, 'jordan'), (e) => e.message === 'nomatch');
+  } finally { pg.close(); await T.stop(); }
+});
+
+// An older (v1) box, as release 23 and before made it: six words, one salt for everyone, the v1 label.
+async function saveOldBox(pg, id, words) {
+  const { loc, key } = await pg.auth.recSecrets(words);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode('hush-recovery-v1') }, key, new TextEncoder().encode(JSON.stringify(pg.auth.bundleOf(id)))));
+  await pg.db.doc('accounts/' + loc).set({ iv: Buffer.from(iv).toString('base64url'), ct: Buffer.from(ct).toString('base64url') });
+  return loc;
+}
+const sixOf = (pg) => pg.auth.newRecoveryWords().slice(0, 6);
+
+test('twelve words: the username is the salt, so the same words make different boxes for different accounts', async () => {
+  const T = await startServer({ authz: 'standard' });
+  const a = page(T.url), b = page(T.url);
+  try {
+    await a.db.ready; await b.db.ready;
+    const { id: ida } = await signUp(a, 'jordan', PW);
+    const { id: idb } = await signUp(b, 'casey', PW);
+    const words = a.auth.newRecoveryWords();
+    await a.auth.saveRecovery(ida, words);
+    await b.auth.saveRecovery(idb, words);   // the same twelve words, by (a very unlikely) chance
+    const la = a.ls.get('hush:recovery:jordan').loc, lb = b.ls.get('hush:recovery:casey').loc;
+    assert.notEqual(la, lb, 'two accounts with identical words get different box addresses');
+    assert.equal(la, (await a.auth.recSecrets(words, 'jordan')).loc);
+    assert.equal(a.ls.get('hush:recovery:jordan').v, 2, 'new saves carry the version marker');
+    await logOut(a);
+    assert.equal((await a.auth.openRecovery(words, 'jordan')).handle, 'jordan');
+    assert.equal((await a.auth.openRecovery(words, 'casey')).handle, 'casey', 'each username opens its own box');
+    await assert.rejects(a.auth.openRecovery(words, 'morgan'), (e) => e.message === 'nomatch', 'the same words with another username do not');
+    await assert.rejects(a.auth.saveRecovery(ida, words.slice(0, 6)), (e) => e.message === 'count', 'the older, shorter kind is never made again');
+  } finally { a.close(); b.close(); await T.stop(); }
+});
+
+test('older six-word sets still open their box; making new words removes it', async () => {
+  const T = await startServer({ authz: 'standard' });
+  const pg = page(T.url);
+  try {
+    await pg.db.ready;
+    const { id } = await signUp(pg, 'jordan', PW);
+    const old = sixOf(pg), oldLoc = await saveOldBox(pg, id, old);
+    await logOut(pg);
+    const back = await pg.auth.openRecovery(pg.auth.readWords(old.join(' ')));
+    assert.ok(sameKeys(back, id), 'six words, no username: the v1 box opens as before');
+    assert.equal((await pg.auth.openRecovery(old, 'somebodyelse')).handle, 'jordan', 'a username typed alongside six words changes nothing');
+    await pg.db.prove(await pg.auth.proofFor(back));
+    pg.S.ids = [back]; pg.S.me = back; pg.S.contactsReady = true; pg.S.prefs = {};
+    pg.ls.set('hush:recovery:jordan', { loc: oldLoc, ts: Date.now(), conf: true });   // what the restore screen writes after six words
+    assert.equal(pg.auth.hasRecovery('jordan'), true, 'older words still count as set up: no red banner');
+    assert.equal(pg.auth.recOld('jordan'), true, 'but they are the older kind, so the page offers new ones');
+
+    const fresh = pg.auth.newRecoveryWords();
+    await pg.auth.saveRecovery(back, fresh);
+    await sleep(200);
+    assert.equal((await pg.auth.openRecovery(old)).handle, 'jordan', 'until the quick check passes, the old words still work: new ones never written down lock nobody out');
+    pg.auth.confirmRecovery(back);
+    assert.equal(pg.auth.recOld('jordan'), false);
+    assert.equal(pg.S.prefs.rec.v, 2, 'the vault copy carries the marker to other devices');
+    for (let k = 0; k < 20 && (await pg.db.doc('accounts/' + oldLoc).get()).exists; k++) await sleep(50);
+    assert.equal((await pg.db.doc('accounts/' + oldLoc).get()).exists, false, 'the weak shared-salt box is gone');
+    await assert.rejects(pg.auth.openRecovery(old), (e) => e.message === 'nomatch', 'so the old words stop working');
+    assert.equal((await pg.auth.openRecovery(fresh, 'jordan')).handle, 'jordan');
+  } finally { pg.close(); await T.stop(); }
+});
+
+test('an all-digit username, allowed for older accounts, makes and uses twelve words', async () => {
+  const T = await startServer({ authz: 'standard' });
+  const pg = page(T.url);
+  try {
+    await pg.db.ready;
+    const { id } = await signUp(pg, '12345', PW);
+    const words = pg.auth.newRecoveryWords();
+    await pg.auth.saveRecovery(id, words);
+    assert.equal((await pg.auth.openRecovery(words, '@12345')).handle, '12345');
   } finally { pg.close(); await T.stop(); }
 });
 

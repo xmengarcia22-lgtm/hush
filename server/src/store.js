@@ -220,6 +220,7 @@ export class Store extends EventEmitter {
       // A full mailbox gives way with other people's notes first; the owner's own notes (their chat list) go last and
       // are never swept.
       oldestUnder: this.db.prepare("SELECT id FROM docs WHERE parent = ? ORDER BY json_extract(d, '$.own') IS NOT NULL, ts ASC, id ASC LIMIT ?"),
+      staleLinkreqs: this.db.prepare("DELETE FROM docs WHERE parent = 'linkreqs' AND (ts IS NULL OR ts < ?)"),
       staleNotes: this.db.prepare("SELECT path, parent, id FROM docs WHERE parent LIKE 'inbox/%/c' AND ts IS NOT NULL AND ts < ? AND json_extract(d, '$.own') IS NULL LIMIT 500"),
       chatGet: this.db.prepare('SELECT type, epoch, cap_m, cap_a, cap_o, cap_b FROM chats WHERE cid = ?'),
       chatPut: this.db.prepare('INSERT INTO chats(cid, type, epoch, cap_m, cap_a, cap_o, cap_b) VALUES (?, ?, ?, ?, ?, ?, ?)'),
@@ -254,6 +255,8 @@ export class Store extends EventEmitter {
     if (!this.media.prepare('SELECT 1 FROM media_ids LIMIT 1').get() && this.media.prepare('SELECT 1 FROM chunks LIMIT 1').get()) {
       this.media.exec('INSERT INTO media_ids(cid, mid, bytes, exp) SELECT cid, mid, SUM(length(d)), 0 FROM chunks GROUP BY cid, mid');
     }
+    // Search is opt-in (SPEC.md 7.6): an entry whose owner never turned it on, as with every account before release 24, comes off.
+    this.db.exec("DELETE FROM docs WHERE parent = 'search' AND NOT EXISTS (SELECT 1 FROM docs u WHERE u.path = 'directory/' || docs.id AND json_extract(u.d, '$.findable') = 1)");
     return this;
   }
 
@@ -310,7 +313,7 @@ export class Store extends EventEmitter {
       }
       default: {
         const sp = this._storagePath(p);
-        const ts = typeof d.ts === 'number' ? d.ts : null;
+        const ts = p.kind === 'linkreqs' ? now : typeof d.ts === 'number' ? d.ts : null;   // the server's clock, not the client's: the sweep ages link requests by it
         const exp = EXP_KINDS.has(p.kind) && typeof d.exp === 'number' && d.exp > 0 ? d.exp : 0;
         this.q.put.run(sp.path, p.parent, sp.id, JSON.stringify(d), ts, exp);
       }
@@ -838,6 +841,8 @@ export class Store extends EventEmitter {
     return !!r && now - r.ts < this.limits.boxGoneMs;
   }
   sweepGone(now = this.now()) { return Number(this.q.goneSweep.run(now - this.limits.boxGoneMs).changes); }
+  // Link requests last written over linkreqTtlMs ago (SPEC.md 8.6). Nothing to announce: keyed rows cannot be watched.
+  sweepLinkreqs(now = this.now()) { return Number(this.q.staleLinkreqs.run(now - this.limits.linkreqTtlMs).changes); }
 
   // Deletes documents whose `exp` has passed. Returns how many were removed.
   sweep(now = this.now()) {

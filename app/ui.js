@@ -610,6 +610,10 @@ function renderBanner(){
     const n=html('button','setup-bar','<span class="sb-ic">'+I.key+'</span>');
     const t=el('span','sb-txt');t.append(el('span','sb-t','Finish setting up your account'),el('span','sb-s','Save your recovery words so you can always get back in.'));
     n.append(t);n.insertAdjacentHTML('beforeend','<span class="chev">\u203a</span>');n.onclick=()=>openBackup();b.append(n)}
+  else if(S.me&&recOld(S.me.handle)&&!ls.get('hush:recOldOff:'+S.me.handle,false)){ // older 6-word set: a gentle, dismissable nudge (Settings keeps offering it)
+    const n=el('div','banner nudge');n.append(el('span',null,'Your recovery words are an older, shorter kind. Make new, stronger ones.'));
+    const go=el('button','link sm','Make new');go.onclick=()=>openBackup();const x=html('button','icon-btn sm-x',I.xs);x.setAttribute('aria-label','Dismiss');
+    x.onclick=()=>{ls.set('hush:recOldOff:'+S.me.handle,true);renderBanner()};n.append(go,x);b.append(n)}
   else if(S.me&&!loginInfo(S.me.handle)&&!ls.get('hush:backedUp:'+S.me.handle,0)&&!ls.get('hush:nudgeOff:'+S.me.handle,false)){
     const n=el('div','banner nudge');n.append(el('span',null,'Add a password so you can log in on other devices.'));
     const go=el('button','link sm','Add');go.onclick=()=>openSetupLogin();const x=html('button','icon-btn sm-x',I.xs);x.setAttribute('aria-label','Dismiss');
@@ -2288,10 +2292,10 @@ function buildSettingsPage(body){
     el('p','hint','Recovery words, message backup, app lock and encryption tools.'));
 }
 function settingsPrivacy(body,me){
-  const findable=(S.dir[me.handle]||{}).findable!==false;
-  body.append(el('div','set-label','Who can find me in search'),segControl([['yes','Anyone'],['no','Only with my link']],findable?'yes':'no',async v=>{
+  const findable=(S.dir[me.handle]||{}).findable===true; // opt-in: off until the person turns it on
+  body.append(el('div','set-label','Who can find me in search'),segControl([['yes','Anyone'],['no','Exact username only']],findable?'yes':'no',async v=>{
     try{await S.db.doc('directory/'+me.handle).update({findable:v==='yes'});if(S.dir[me.handle])S.dir[me.handle].findable=v==='yes';
-      syncSearch();toast(v==='yes'?'People can find you by your username':'Only people with your invite link or number can reach you')}catch{toastErr('That didn\u2019t save. Try again.')}}),
+      syncSearch();toast(v==='yes'?'People can find you by your name or part of your username':'You’re out of name search. Anyone who types your exact username can still find you')}catch{toastErr('That didn\u2019t save. Try again.')}}),
     el('p','hint','Either way, nobody can read your messages. Your invite link and phone number (if you add one) always work.'));
   const reqOn=(S.dir[me.handle]||{}).requests===true;
   body.append(el('div','set-label','Who can message me'),segControl([['all','Everyone'],['req','Only my contacts']],reqOn?'req':'all',async v=>{
@@ -2344,7 +2348,7 @@ function settingsLogin(body,me){
 }
 function settingsAdvanced(body,me){
   body.append(el('div','menu-label flush','Account recovery'));
-  const bk=html('button','menu-item flush',I.key+'<span>Recovery words</span>');bk.append(el('span','role'+(hasRecovery(me.handle)?'':' warn'),hasRecovery(me.handle)?'On':'Not set up'));bk.onclick=()=>openBackup();
+  const bk=html('button','menu-item flush',I.key+'<span>Recovery words</span>');bk.append(el('span','role'+(hasRecovery(me.handle)?'':' warn'),hasRecovery(me.handle)?(recOld(me.handle)?'Older kind: make new':'On'):'Not set up'));bk.onclick=()=>openBackup();
   const rs=html('button','menu-item flush',I.down+'<span>Restore an account</span>');rs.onclick=()=>openRestore();
   body.append(bk,rs);
   {const tg=el('label','toggle');const cb=el('input');cb.type='checkbox';cb.checked=backupOn();
@@ -2376,7 +2380,7 @@ function openHow(){
    ['Messages are signed. ','Your signing key proves a message really came from you, so a fake one shows a warning.'],
    ['Your contacts are private. ','Your contact list is encrypted with a key only your device can work out, so the server can\u2019t see who you\u2019ve saved or what you call them.'],
    ['Security code warnings. ','Hush remembers each person\u2019s key the first time you talk. If it ever changes, you\u2019re warned and the chat pauses until you check, so a swapped key can\u2019t quietly intercept you.'],
-   ['Recovery words. ','Six words made on your device unlock a locked box holding your keys. Nobody else has them, not even us, so nobody can reset your account.'],
+   ['Recovery words. ','Twelve words made on your device, together with your username, unlock a locked box holding your keys. Nobody else has them, not even us, so nobody can reset your account.'],
    ['Search without snooping. ','You can search for people by name or username, but you can only ever read messages in chats you\u2019re part of. People can hide from search, and can make strangers send a request first.'],
    ['What the server can see. ','Who is in which chat and when messages are sent, plus names, photos, bios, typing and online status, and a scrambled fingerprint of your phone number if you add one. Not what anyone says. Turn on \u201cShow what the server sees\u201d in Settings to check.'],
    ['Public channels are open. ','Anyone can read them, so they can\u2019t be secret.'],
@@ -2454,7 +2458,7 @@ function applyVault(o){ // what the vault holds, into the page: contacts, pinned
   if(!Array.isArray(o)&&o.pins&&typeof o.pins==='object')Object.entries(o.pins).forEach(([h,k])=>{if(okK(k))S.pins[h]=Object.assign(keysOf(k),Array.isArray(k.prev)?{prev:k.prev.filter(okP).slice(-8).map(p=>({sig:{x:p.sig.x,y:p.sig.y},until:p.until}))}:{})});
   if(!Array.isArray(o)&&o.verified&&typeof o.verified==='object')Object.entries(o.verified).forEach(([h,v])=>{if(typeof v==='string')S.verified[h]=v});
   S.prefs={pinned:Array.isArray(pr.pinned)?pr.pinned.filter(x=>typeof x==='string'):[],muted:pr.muted&&typeof pr.muted==='object'?pr.muted:{},archived:Array.isArray(pr.archived)?pr.archived.filter(x=>typeof x==='string'):[],backup:pr.backup===true,
-    rec:pr.rec&&typeof pr.rec.loc==='string'?{loc:pr.rec.loc,ts:+pr.rec.ts||0}:undefined,
+    rec:pr.rec&&typeof pr.rec.loc==='string'?Object.assign({loc:pr.rec.loc,ts:+pr.rec.ts||0},pr.rec.v===2?{v:2}:{}):undefined,
     login:loginPref(pr.login),
     blocked:Array.isArray(pr.blocked)?pr.blocked.filter(h=>typeof h==='string'&&validHandle(h)):[],
     blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[],
@@ -2476,7 +2480,7 @@ async function loadContacts(){
   if(ok&&!pending&&S.me.handle===me&&backupOn())S.keySync=syncBackup().then(n=>{if(n&&S.me&&S.me.handle===me)keysArrived()}).catch(()=>{}); // every app open: take the keys the backup has, add the ones it lacks
   if(tierQueued&&tierQueued.h===me){const t=tierQueued.t;tierQueued=null;noteTier(t)}
   if(ok&&!pending&&S.me.handle===me){const r=recLocal(me),v=S.prefs.rec; // tell your other devices about words set up here (and words set up before this update)
-    if(r&&r.loc&&r.conf!==false&&(!v||(v.loc!==r.loc&&(r.ts||0)>(v.ts||0)))){S.prefs.rec={loc:r.loc,ts:r.ts||Date.now()};saveContacts()}
+    if(r&&r.loc&&r.conf!==false&&(!v||(v.loc!==r.loc&&(r.ts||0)>(v.ts||0))||(v.loc===r.loc&&r.v===2&&v.v!==2))){ /* the last: an older page saved the vault without v */S.prefs.rec=Object.assign({loc:r.loc,ts:r.ts||Date.now()},r.v===2?{v:2}:{});saveContacts()}
     // Keep the login note and its vault copy in step, so a login saved on the server survives a cleared browser.
     const hint=reconcileLoginHint(loginInfo(me),S.prefs.login);
     if(hint.toLocal)ls.set('hush:login:'+me,hint.toLocal);
@@ -2868,15 +2872,15 @@ function openBackup(forced){
   const me=S.me,had=hasRecovery(me.handle);
   const {body,close}=sheet('Your recovery words',{locked:forced===true});
   const intro=()=>{body.replaceChildren(
-    el('p',null,forced===true?'One last thing. Hush gives you six words that bring your account back if you lose this phone or forget your password.':'Six words that bring your account back if you lose this phone or forget your password.'),
+    el('p',null,forced===true?'One last thing. Hush gives you twelve words that, with your username, bring your account back if you lose this phone or forget your password.':'Twelve words that, with your username, bring your account back if you lose this phone or forget your password.'),
     el('p','warnbox','Nobody can reset your account for you \u2014 not Hush, not your phone company, not a court order. That\u2019s what keeps you safe. It also means these words are your only way back in, so write them on paper and keep them somewhere safe.'));
     body.append(el('p','hint','The words bring back your account, contacts and groups. Past messages come back only if \u201cMessage backup\u201d in Settings is on.'));
-    if(had&&forced!==true)body.append(el('p','hint','Making new words turns your old ones off.'));
+    if(had&&forced!==true)body.append(el('p','hint',recOld(me.handle)?'Your words are an older, shorter kind (6 words). New ones are 12 words and far harder to guess. Making new words turns your old ones off.':'Making new words turns your old ones off.'));
     const go=el('button','primary',had&&forced!==true?'Make new words':'Show my words');go.style.width='100%';const err=el('div','err');body.append(go,err);
     go.onclick=async()=>{if(!S.db){err.textContent='You need to be online for this.';return}go.disabled=true;go.textContent='Locking your account\u2026';
       const w=newRecoveryWords();try{await saveRecovery(me,w);renderBanner();show(w)}catch{go.disabled=false;go.textContent='Try again';err.textContent='Couldn\u2019t save. Check your connection and try again.'}};
   };
-  const show=w=>{body.replaceChildren(el('p',null,'Write these six words down, in order. Paper is best.'));
+  const show=w=>{body.replaceChildren(el('p',null,'Write these twelve words down, in order, with your username ('+atOf(me.handle)+'). Paper is best.'));
     const g=el('ol','rwords');w.forEach(x=>g.append(el('li',null,x)));body.append(g);
     const cp=el('button','secondary','Copy words');cp.onclick=async()=>{try{await navigator.clipboard.writeText(w.join(' '));toast('Copied. Paste them somewhere private.')}catch{toastErr('Couldn\u2019t copy. Write them down instead.')}};
     const row=el('div','row2');row.append(cp);body.append(row);
@@ -2893,24 +2897,29 @@ function openBackup(forced){
   };
   intro();
 }
-function openRestore(prefill){
+function openRestore(prefill,user){ // user: a username already typed on the login screen
   const {body,sh,close}=sheet('Restore an account');sh.parentNode.style.zIndex='60';
-  body.append(el('p',null,'Type your six recovery words, in order. The first 4 letters of each word are enough.'),el('p','hint','Your account, contacts and groups come back. Past messages come back only if \u201cMessage backup\u201d was turned on.'));
+  body.append(el('p',null,'Type your username and your recovery words, in order. The first 4 letters of each word are enough.'),el('p','hint','Your account, contacts and groups come back. Past messages come back only if \u201cMessage backup\u201d was turned on.'));
+  const f0=el('label','field');const un=el('input');un.type='text';un.placeholder='Username';un.autocomplete='username';un.autocapitalize='none';un.spellcheck=false;un.value=user||'';f0.append(el('span',null,'Username'),un);body.append(f0);
   const f1=el('label','field');const code=el('textarea','linkbox');code.rows=3;code.placeholder='e.g. maple river anchor\u2026';code.value=prefill||'';code.spellcheck=false;code.autocapitalize='none';code.autocomplete='off';f1.append(el('span',null,'Recovery words'),code);
   const go=el('button','primary','Restore account');go.style.width='100%';const err=el('div','err');
-  body.append(f1,go,err);setTimeout(()=>code.focus(),50);
+  body.append(f1,go,err);setTimeout(()=>(un.value?code:un).focus(),50);
+  un.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();code.focus()}};
   code.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();go.click()}};
   go.onclick=async()=>{err.textContent='';
-    let words;try{words=readWords(code.value)}catch(e){err.textContent=e.message==='count'?`That\u2019s ${e.n} word${e.n===1?'':'s'}. You need all six.`:`Word ${e.n} (\u201c${e.t}\u201d) isn\u2019t one of the recovery words. Check the spelling.`;return}
+    let words;try{words=readWords(code.value)}catch(e){err.textContent=e.message==='count'?`That\u2019s ${e.n} word${e.n===1?'':'s'}. You need all ${RW_COUNT} (or all ${RW_OLD}, if your words are the older, shorter kind).`:`Word ${e.n} (\u201c${e.t}\u201d) isn\u2019t one of the recovery words. Check the spelling.`;return}
+    const u=recUser(un.value),old=words.length===RW_OLD; // the username is the salt of 12-word sets; 6-word sets never needed it
+    if(!old&&!u){err.textContent=un.value.trim()?'That isn\u2019t a username: 3 to 20 letters, numbers or _.':'Enter your username too: your recovery words only work together with it.';un.focus();return}
     go.disabled=true;go.textContent='Unlocking\u2026';
-    try{if(!S.db)throw new Error('offline');const id=await openRecovery(words).catch(x=>{throw new Error(x.message==='nomatch'?'nomatch':'net')});
+    try{if(!S.db)throw new Error('offline');const id=await openRecovery(words,u).catch(x=>{throw new Error(x.message==='nomatch'?'nomatch':'net')});
       if(!S.db)throw new Error('offline');
       ls.set('hush:backedUp:'+id.handle,Date.now());
-      if(lastRecLoc)ls.set('hush:recovery:'+id.handle,{loc:lastRecLoc,ts:Date.now(),conf:true}); // these words work, so they count as set up
+      if(lastRecLoc)ls.set('hush:recovery:'+id.handle,Object.assign({loc:lastRecLoc,ts:Date.now(),conf:true},old?{}:{v:2})); // these words work, so they count as set up (old ones get the nudge to replace them)
       ls.set('hush:recovered:'+id.handle,Date.now());S.resetFor={handle:id.handle}; // path three: the password was forgotten, so a new one is set next
       if(!(await enterAccount(id))){go.disabled=false;go.textContent='Restore account';return}
       close();toast(S.backupRestored?'Welcome back, '+id.name+'. Your past messages are back too.':'Welcome back, '+id.name);
-    }catch(e){err.textContent=e&&e.message==='nomatch'?'Those words don\u2019t match an account. Check the order and spelling.'
+      if(old)setTimeout(()=>toast('Your recovery words are an older, shorter kind. Make new ones in Settings \u2192 Advanced \u2192 Recovery words.'),4000); // asked, not forced; the banner offers it too
+    }catch(e){err.textContent=e&&e.message==='nomatch'?(old?'Those words don\u2019t match an account. Check the order and spelling.':'Those words don\u2019t match that username. Check the username, the order and the spelling.')
         :e&&e.message==='stale'?'These recovery words are from before your account\u2019s keys were replaced. Use a device you\u2019re still logged in on, then make new words. If you aren\u2019t logged in anywhere, these words can\u2019t bring the account back: whoever replaced the keys has it.':'Couldn\u2019t restore. Check your connection and try again.';
       go.disabled=false;go.textContent='Restore account'}};
 }
@@ -3254,7 +3263,7 @@ async function rekeyRun(rec,ui){ // the stages in order; the record is kept from
       const q=await S.db.collection('inbox/'+h+'/c').limit(500).get();
       for(const d of q.docs){try{const p=await openPointer(d.data());rec.notes.push({id:d.id,p:{t:p.t,cid:p.cid,type:p.type,peer:p.peer}})}catch{}} // a note this device can't open is left as it is
       rec.oldBackupPath=await backupPath(S.me);
-      rec.oldRecs=[...new Set([recLocal(h)&&recLocal(h).loc,S.prefs&&S.prefs.rec&&S.prefs.rec.loc].filter(Boolean))];
+      rec.oldRecs=[...new Set([...[].concat((recLocal(h)||{}).old||[]),recLocal(h)&&recLocal(h).loc,S.prefs&&S.prefs.rec&&S.prefs.rec.loc].filter(l=>typeof l==='string'))]; // old: boxes new, unchecked words haven't replaced yet
       rec.myName=(await openDevName(S.me.dev.id,S.me.dev.nm))||deviceName();
       for(const [cid,i] of Object.entries(P().dms||{}))if(i&&i.peer&&!S.dmPeers[cid])S.dmPeers[cid]=i.peer;
       for(const n of rec.notes)if(n.p.peer&&!S.dmPeers[n.p.cid])S.dmPeers[n.p.cid]=n.p.peer;
@@ -3443,7 +3452,7 @@ function confirmSheet(title,text,opt={}){ // a question with two answers; resolv
     row.append(no,yes);body.append(row);no.onclick=()=>end(false);yes.onclick=()=>{if(opt.danger)haptic(true);end(true)};document.addEventListener('keydown',esc);setTimeout(()=>no.focus(),50)})}
 async function logOutAccount(h,opt={}){
   const id=S.ids.find(x=>x.handle===h);if(!id)return;
-  const li=loginInfo(h),ways=[li&&li.loc?'your username and password':null,hasRecovery(h)?'your six recovery words':null].filter(Boolean);
+  const li=loginInfo(h),ways=[li&&li.loc?'your username and password':null,hasRecovery(h)?'your recovery words':null].filter(Boolean);
   const words=ways.length?`To get back in you’ll need ${ways.join(', or ')}. A device where you’re still logged in can also let you back in.`
     :'You haven’t saved a password or recovery words for this account. Without one of those, there is no way back in: this username would be lost for good.';
   if(!opt.confirmed&&!(await confirmSheet('Log out?','Are you sure you want to log out?',{note:`${words} This device’s copy of your keys and chats will be erased.`,danger:true})))return;
@@ -3498,10 +3507,9 @@ async function refreshDir(force){
   if(S.chan){const c=curConv();const warn=!!(c&&typeOf(c)==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c)));
     if(warn!==S.warnShown)openConv(S.chan);else{S.rendered=null;renderConv();refreshHeader()}}
 }
-async function lookupHandle(h){ // finds someone by their exact username, unless they chose to be reachable only by link
+async function lookupHandle(h){ // finds anyone by their exact username, as starting a chat needs; name search is the opt-in part (syncSearch)
   h=String(h||'').trim().toLowerCase().replace(/^@/,'');if(!validHandle(h)||!S.db||(S.me&&h===S.me.handle))return null;
   try{const s=await S.db.doc('directory/'+h).get();if(!s.exists)return null;const v=s.data();if(!v.ecdh||!v.sig)return null;
-    if(v.findable===false&&!contactFor(h)&&!S.convs.some(c=>(c.members||[]).includes(h)))return null;
     S.dir[h]=v;return v}catch{return null}
 }
 async function refreshPresence(){
@@ -3515,7 +3523,7 @@ async function refreshPresence(){
 async function syncSearch(){
   if(!S.db||!S.me||!S.dirReady)return;const d=S.dir[S.me.handle];if(!d)return;
   const name=String(d.name||S.me.name||'').toLowerCase().trim(),parts=name.split(/\s+/);
-  const want=d.findable===false?null:{h:S.me.handle,n:name,n2:parts[1]||parts[0]||''};
+  const want=d.findable!==true?null:{h:S.me.handle,n:name,n2:parts[1]||parts[0]||''};
   const k='hush:search:'+S.me.handle,was=ls.get(k,'');if(JSON.stringify(want)===was)return;
   try{if(want)await S.db.doc('search/'+S.me.handle).set(want);else await S.db.doc('search/'+S.me.handle).delete();ls.set(k,JSON.stringify(want))}catch{}
 }
@@ -3632,7 +3640,7 @@ function showOnboard(adding,notice){
     p.name='password';const form=el('form');form.method='post';form.action='#';form.append(f,pf,go);form.onsubmit=e=>e.preventDefault();go.type='submit';
     w.append(form,err,forgot,rec,su);foot(()=>stepChoose());
     i.onkeydown=e=>{if(e.key==='Enter'&&!p.value){e.preventDefault();p.focus()}};setTimeout(()=>(i.value?p:i).focus(),50);
-    forgot.onclick=()=>{err.textContent='';stepForgot()};
+    forgot.onclick=()=>{err.textContent='';login=normLogin(i.value)||login;stepForgot()}; // the username typed here fills the recovery screen
     go.onclick=async()=>{err.textContent='';const l=read();if(!l)return;
       if(!p.value){err.textContent='Enter your password.';p.focus();return}
       if(offline(err))return;login=l;
@@ -3684,11 +3692,11 @@ function showOnboard(adding,notice){
       catch(e){busy(go);err.textContent=e&&e.message==='claimed'?'That username was just taken. Try another.':'Couldn’t create the account. Check your connection and try again.'}};
   };
   // Forgot password: two ways back in, and neither asks for the password. A device where you're still logged in lets this
-  // one in (path one). With none, the six recovery words bring the account back, and then a new password is set (path three).
+  // one in (path one). With none, the recovery words (and the username) bring the account back, and then a new password is set (path three).
   const stepForgot=()=>{
     head('Forgot your password?','You don\u2019t need it to get back in.');
     const ln=el('button','primary','Use a device where I\u2019m still logged in'),rw=el('button','secondary','Use my recovery words');
-    ln.style.width=rw.style.width='100%';rw.style.marginTop='10px';ln.onclick=()=>stepLinkScan();rw.onclick=()=>openRestore();
+    ln.style.width=rw.style.width='100%';rw.style.marginTop='10px';ln.onclick=()=>stepLinkScan();rw.onclick=()=>openRestore(null,login);
     w.append(ln,rw,el('p','warnbox','No other device and no recovery words? Then nobody can open this account again, including you: Hush can\u2019t reset it, and that\u2019s what keeps anyone else from taking it.'));
     foot(()=>stepLogin());
   };
@@ -3698,7 +3706,7 @@ function showOnboard(adding,notice){
   const stepLinkScan=()=>{
     head('Log in with your other device','On a device where you\u2019re logged in, open Settings \u2192 Login and devices \u2192 Link a new device. Then scan the code it shows.');
     const go=el('button','primary','Scan the code');go.style.width='100%';const box=el('div','link-wait'),err=el('div','err');box.hidden=true;
-    const bk=el('button','link','No other device? Use my recovery words');bk.onclick=()=>openRestore();
+    const bk=el('button','link','No other device? Use my recovery words');bk.onclick=()=>openRestore(null,login);
     w.append(go,box,err,bk);foot(()=>stepLogin());
     go.onclick=()=>scanOtherCode(async t=>{link=await claimLink(t)},async()=>{
       const c=link;if(!c)return;go.hidden=true;err.textContent='';box.hidden=false;
