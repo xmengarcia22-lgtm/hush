@@ -111,7 +111,13 @@ html.kb-up,html.kb-up body{overflow:hidden;overscroll-behavior:none}
 .pair{display:flex;justify-content:center;gap:10px;margin:6px 0 14px}
 
 .drawer{position:fixed;top:0;bottom:0;left:0;width:min(300px,85vw);background:var(--bg);border-right:1px solid var(--line);z-index:21;display:flex;flex-direction:column;
-  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);overflow-y:auto}
+html.drawer-open #threads{overflow:hidden}
+.ptr{position:relative;height:0;z-index:2;pointer-events:none}
+.ptr i{position:absolute;left:50%;top:-44px;margin-left:-19px;width:38px;height:38px;border-radius:50%;background:var(--surface);box-shadow:var(--shadow);display:grid;place-items:center;opacity:0}
+.ptr .spin{width:22px;height:22px;border-width:2.5px;border-color:var(--line);border-top-color:var(--accent);animation:none}
+.ptr .spin.go{animation:spin .45s linear infinite}
+@media (prefers-reduced-motion:reduce){.ptr .spin.go{animation:none}}
 .drawer-top{padding:24px 16px 16px;border-bottom:1px solid var(--line)}
 .drawer-top .avatar{margin-bottom:12px}
 .drawer-top .h{font-size:14px;color:var(--muted)}
@@ -203,7 +209,7 @@ html.kb-up,html.kb-up body{overflow:hidden;overscroll-behavior:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 .lightbox{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.92);display:grid;place-items:center;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
 .lightbox img{max-width:100%;max-height:100%;object-fit:contain}
-.viewer{touch-action:pinch-zoom;user-select:none;-webkit-user-select:none}
+.viewer{touch-action:none;user-select:none;-webkit-user-select:none}
 .lb-stage{width:100%;height:100%;display:grid;place-items:center;position:relative}
 .lb-stage img,.lb-stage video{max-width:100%;max-height:100%;object-fit:contain}
 .lb-nav{position:absolute;top:50%;transform:translateY(-50%);color:#fff;background:rgba(255,255,255,.12)}
@@ -341,7 +347,8 @@ button.po:hover{background:color-mix(in srgb,var(--text) 6%,transparent)}
 .c-actions .thread{padding:10px 16px 10px 18px;gap:18px}
 .pill{margin-left:auto;font-size:13px;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:5px 12px;border-radius:8px;flex:none}
 /* ---- v9: app feel, voice, organization ---- */
-body{overscroll-behavior:none;touch-action:manipulation}
+*{overscroll-behavior:none}
+body{touch-action:manipulation}
 .bar,.thread,.tab,.fab,.chat-head,.menu-item,.icon-btn,.tabs,.chip,.c-actions,.searchrow,.cbar,.recbar,.arch-head{-webkit-user-select:none;user-select:none}
 .msg .bubble,.thread{-webkit-touch-callout:none}
 /* press and hold a message: it dips under the finger, then the menu opens; on touch screens nothing in it is selected or dragged */

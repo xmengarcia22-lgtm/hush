@@ -205,9 +205,11 @@ function lastSeen(h){
 const fmtTime=ts=>new Date(ts).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
 function fmtListTime(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return fmtTime(ts);if(n-d<6*864e5)return d.toLocaleDateString([], {weekday:'short'});return d.toLocaleDateString([], {month:'short',day:'numeric'})}
 function fmtDay(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return 'Today';const y=new Date(n);y.setDate(n.getDate()-1);if(d.toDateString()===y.toDateString())return 'Yesterday';return d.toLocaleDateString([], {month:'long',day:'numeric'})}
-// A short tap where the browser can vibrate (Android and others); iPhone browsers have no Vibration API, so nothing
-// happens there. Never with reduced motion. firm: destructive actions and errors.
-const haptic=firm=>{try{if(navigator.vibrate&&!matchMedia('(prefers-reduced-motion: reduce)').matches)navigator.vibrate(firm?20:10)}catch{}};
+// A short tap: the iPhone app's native Haptics plugin, else the Vibration API (Android and others; iPhone browsers have
+// none, so nothing happens there). Never with reduced motion. firm: destructive actions and errors.
+const haptic=firm=>{try{if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;const C=window.Capacitor;
+  if(C&&C.isNativePlatform&&C.isNativePlatform())C.nativePromise('Haptics','impact',{style:firm?'MEDIUM':'LIGHT'}).catch(()=>{}); // an app build without the plugin refuses: no buzz
+  else if(navigator.vibrate)navigator.vibrate(firm?20:10)}catch{}};
 const toastErr=(msg,action,fn)=>{haptic(true);toast(msg,action,fn)}; // a toast that says something failed
 const confirmDanger=msg=>{const ok=confirm(msg);if(ok)haptic(true);return ok}; // a destructive action, confirmed
 let toastT;function toast(msg,action,fn){
@@ -308,6 +310,9 @@ const isAdminH=(c,h)=>!!c&&(c.owner===h||(c.admins||[]).includes(h));
 const isAdmin=c=>!!(c&&S.me)&&(isAdminH(c,S.me.handle)||['owner','admin'].includes(levelHere(c)));
 const canPost=c=>isMember(c)&&(typeOf(c)!=='channel'||isAdmin(c));
 const canPin=c=>isMember(c)&&(typeOf(c)==='dm'||isAdmin(c));
+// Who may delete a message for everyone: its author; outside DMs an admin, but never the owner's, which only the owner may.
+// shortcut: the page's rule only; the server lets any admin delete any message, since it never learns who wrote what.
+const mayDeleteForAll=({t,mine,admin,owner,byOwner})=>mine||(admin&&t!=='dm'&&(owner||!byOwner));
 const mentionsMe=t=>!!(t&&S.me&&new RegExp('(^|[^\\p{L}\\p{N}_@])@'+S.me.handle+'(?![\\p{L}\\p{N}_])','iu').test(t));
 const draftKey=cid=>`hush:draft:${S.me.handle}:${cid}`;
 function fmtWhen(ts){const d=new Date(ts),n=new Date(),tm=fmtTime(ts);if(d.toDateString()===n.toDateString())return 'today at '+tm;
@@ -427,6 +432,13 @@ function updateTitle(){let n=0;S.unread.forEach((v,k)=>{const c=convById(k);if(k
 /* ---------- chat organization: pins, mutes and archive live in your encrypted vault ---------- */
 const P=()=>S.prefs||(S.prefs={pinned:[],muted:{},archived:[]});
 const isPinned=id=>P().pinned.includes(id),isMuted=id=>!!P().muted[id],isArchived=id=>P().archived.includes(id);
+// Deleted for me, in the vault so it holds on all my devices: single messages by id, and a whole chat up to when it was cleared.
+// shortcut: message times are the sender's clock, so a reply from a clock minutes behind can land before the clear and stay hidden.
+const clearedAt=id=>(P().cleared||{})[id]||0,goneForMe=(cid,p)=>p.ts<=clearedAt(cid)||((P().hid||{})[cid]||[]).includes(p._id);
+const clearedConv=c=>!!clearedAt(c.id)&&!(c.last&&c.last.ts>clearedAt(c.id)); // back in the list when a newer message arrives
+function hideMsg(cid,id){if(!prefsOk())return;const h=P().hid||(P().hid={});h[cid]=[...(h[cid]||[]).filter(x=>x!==id),id].slice(-300);saveContacts();applyExpiry();renderConv()}
+function clearForMe(c){if(!prefsOk())return;const p=P();(p.cleared||(p.cleared={}))[c.id]=Math.max(Date.now(),(c.last&&c.last.ts)||0);delete (p.hid||{})[c.id];
+  p.pinned=p.pinned.filter(x=>x!==c.id);p.archived=p.archived.filter(x=>x!==c.id);saveContacts();if(S.chan===c.id)closeConv();renderList();updateTitle()}
 function prefsOk(){if(!S.contactsReady){toastErr('Still loading your settings. Try again in a moment.');return false}return true}
 function togglePin(id){if(!prefsOk())return;const p=P();p.pinned=isPinned(id)?p.pinned.filter(x=>x!==id):[id,...p.pinned];if(isPinned(id))p.archived=p.archived.filter(x=>x!==id);saveContacts()}
 function toggleMute(id){if(!prefsOk())return;const p=P();if(p.muted[id])delete p.muted[id];else p.muted[id]=true;saveContacts();updateTitle();toast(isMuted(id)?'Muted. You won\u2019t get alerts from this chat.':'Unmuted')}
@@ -448,8 +460,46 @@ function chatMenu(anchor,c){
     [isMuted(id)?I.bell:I.bellOff,isMuted(id)?'Unmute':'Mute',()=>toggleMute(id)],
     [I.archive,isArchived(id)?'Unarchive':'Archive',()=>toggleArchive(id,!isArchived(id))]];
   if(S.unread.get(id))items.push([I.tick,'Mark as read',()=>markConvRead(c)]);
-  items.forEach(([ic,label,fn])=>{const b=html('button','menu-item',ic);b.append(el('span',null,label));b.onclick=()=>{m.remove();fn()};m.append(b)});
+  items.push([I.trash,'Delete',()=>deleteMenu(anchor,chatDeletes(c)),'danger']);
+  items.forEach(([ic,label,fn,cls])=>{const b=html('button','menu-item'+(cls?' '+cls:''),ic);b.append(el('span',null,label));b.onclick=()=>{m.remove();fn()};m.append(b)});
   placeMenu(m,anchor);
+}
+function deleteMenu(anchor,opts){ // "Delete for me" / "Delete for everyone": picking one is the confirmation
+  closeMenus();const m=el('div','popmenu msgmenu');
+  opts.forEach(([label,fn])=>{const b=html('button','menu-item danger',I.trash);b.append(el('span',null,label));b.onclick=()=>{m.remove();haptic(true);fn()};m.append(b)});
+  placeMenu(m,anchor);
+}
+// Deleting a whole chat. A DM: for me hides it; for everyone takes my messages from both sides (each person deletes only
+// their own). A group or channel: for me leaves it (the owner, who can't leave, hides it); for everyone the owner deletes it
+// and an admin deletes every message but the owner's, keeping the chat and its members.
+function chatDeletes(c){
+  const t=typeOf(c),noun=t==='channel'?'channel':'group',fail=()=>toastErr('That didn’t go through. Check your connection and try again.');
+  const done=msg=>{S.previews.delete(c.id);if(S.chan===c.id)closeConv();toast(msg)};
+  if(t==='dm')return [['Delete for me',()=>clearForMe(c)],['Delete for everyone',async()=>{
+    if(!confirmDanger(isSelf(c)?'Delete all your saved messages?':'Delete all your messages in this chat for both of you? Their own messages stay with them.'))return;
+    try{const bad=await wipeChat(c);clearForMe(c);if(bad)toastErr(`${bad} older message${bad===1?'':'s'} couldn’t be deleted.`)}catch{fail()}}]];
+  const owner=isOwner(c),r=[['Delete for me',owner?()=>clearForMe(c):async()=>{
+    if(!confirmDanger(`Leave “${c.name}”?`))return;try{await leaveChat(c.id);done(`You left the ${noun}`)}catch{fail()}}]];
+  if(owner)r.push(['Delete for everyone',async()=>{if(!confirmDanger(`Delete “${c.name}” for everyone?`))return;
+    try{await S.db.doc('channels/'+c.id).delete();done(`${noun[0].toUpperCase()+noun.slice(1)} deleted`)}catch{fail()}}]);
+  else if(isAdmin(c))r.push(['Delete for everyone',async()=>{if(!confirmDanger(`Delete every message in “${c.name}” for everyone, except the owner’s? The ${noun} and its members stay.`))return;
+    try{const bad=await wipeChat(c);if(bad)toastErr(`${bad} message${bad===1?'':'s'} couldn’t be deleted.`);else toast('Messages deleted')}catch{fail()}}]);
+  return r;
+}
+// Deletes for everyone each message of a chat that I may (mayDeleteForAll): in a DM mine, in a group an admin's every one
+// but the owner's. Service notes stay: they carry joins and leaves. Returns how many the server refused.
+// shortcut: pages by time, so messages sharing a page's oldest millisecond can be skipped; run it again to catch them.
+async function wipeChat(c){
+  const t=typeOf(c),admin=isAdmin(c),owner=isOwner(c),col=S.db.collection(`channels/${c.id}/posts`),gone=new Set();let before=null,keep=null,bad=0;
+  for(;;){const s=await (before==null?col:col.where('ts','<',before)).orderBy('ts','desc').limit(200).get();if(!s.docs.length)break;
+    const ps=await unsealAll(c,s.docs.map(d=>Object.assign({_id:d.id},d.data())));before=Math.min(...ps.map(p=>p.ts));
+    for(const p of ps){
+      if(p.sv===1||p.svc||!mayDeleteForAll({t,mine:p.from===S.me.handle,admin,owner,byOwner:!!c.owner&&p.from===c.owner})){if(!p.sv&&!p.svc&&!p.del&&!keep)keep=p;continue} // sv: the server's mark, so a note this device can't read stays too
+      openPost(c,p).then(o=>{for(const m of o.media||[])S.db.deleteMedia(c.id,m.id).catch(()=>{})}).catch(()=>{}); // its files go too
+      try{await S.db.doc(`channels/${c.id}/posts/${p._id}`).delete(p.sl===1&&p.from===S.me.handle?{ot:await ownTokFor(c.id,p)}:undefined);gone.add(p._id)}catch{bad++}}
+    if(s.docs.length<200)break}
+  await S.db.doc('channels/'+c.id).update(lastUpd(c,{last:keep?lastOf(keep):null,pins:(c.pins||[]).filter(id=>!gone.has(id))}));
+  return bad;
 }
 // grab: an element that dips under the finger when the hold completes (messages), with the haptic tap; then fn.
 function addLongPress(node,fn,grab){
@@ -525,7 +575,7 @@ function openTtl(cid){
 function allPosts(){const m=new Map();(S.older||[]).forEach(p=>m.set(p._id,p));(S.rawPosts||[]).forEach(p=>m.set(p._id,p));return [...m.values()].filter(p=>!p.del).sort((a,b)=>a.ts-b.ts)}
 function applyExpiry(){
   const now=Date.now(),c=curConv(),live=[],dead=[],sched=[],future=[];
-  allPosts().forEach(p=>{if(p._hide||(p.from&&p.from!==S.me.handle&&isBlocked(p.from)))return;/* someone I blocked: not shown */if(p.exp&&p.exp<=now)dead.push(p);else if(p.ts>now+3000){future.push(p);if(p.from===S.me.handle&&!p.svc)sched.push(p)}else live.push(p)});
+  allPosts().forEach(p=>{if(p._hide||(c&&goneForMe(c.id,p))||(p.from&&p.from!==S.me.handle&&isBlocked(p.from)))return;/* someone I blocked: not shown */if(p.exp&&p.exp<=now)dead.push(p);else if(p.ts>now+3000){future.push(p);if(p.from===S.me.handle&&!p.svc)sched.push(p)}else live.push(p)});
   S.posts=live;S.scheduled=sched;S.future=future;if(S.setSchedCount)S.setSchedCount(sched.length);
   if(c&&isMember(c)){dead.forEach(p=>{if(S.purged.has(p._id))return;S.purged.add(p._id);purgePost(c,p)});promoteLast(c,live)}
 }
@@ -1054,6 +1104,7 @@ function fitKeyboard(){
   const msgs=document.getElementById('msgs');if(msgs&&S.stick)msgs.scrollTop=msgs.scrollHeight;
 }
 function onViewport(){clearTimeout(kbT);kbT=setTimeout(fitKeyboard,16)}
+document.addEventListener('gesturestart',e=>{if(!e.target.closest?.('.viewer'))e.preventDefault()},{passive:false}); // Safari ignores maximum-scale; only the media viewer may pinch
 if(window.visualViewport){visualViewport.addEventListener('resize',onViewport);visualViewport.addEventListener('scroll',onViewport)}
 addEventListener('orientationchange',()=>setTimeout(fitKeyboard,250));
 let typingAt=0;
@@ -1573,12 +1624,13 @@ function waveBars(levels,n){if(!levels.length)return Array(n).fill(4);const out=
    album, swipe down or press Escape to close. Videos play here with sound and controls. Neighbours are fetched
    ahead, except videos over the auto-load size. */
 function viewer(c,items,start){
-  const n=items.length;let i=Math.max(0,Math.min(n-1,start)),seq=0,sx=null,sy=0,swiped=false;
+  const n=items.length;let i=Math.max(0,Math.min(n-1,start)),seq=0,sx=null,sy=0,swiped=false,z=1,tx=0,ty=0;const pts=new Map();
   const o=el('div','lightbox viewer'),stage=el('div','lb-stage'),count=el('div','lb-count');
   const x=html('button','icon-btn lb-x',I.x),prev=html('button','icon-btn lb-nav lb-prev',I.back),next=html('button','icon-btn lb-nav lb-next',I.back);
   x.setAttribute('aria-label','Close');prev.setAttribute('aria-label','Previous');next.setAttribute('aria-label','Next');
   const stopAll=()=>stage.querySelectorAll('video').forEach(v=>v.pause());
-  const show=()=>{const my=++seq,{m,e}=items[i];stopAll();
+  const tf=()=>{const m=stage.querySelector('img,video');if(m)m.style.transform=`translate(${tx}px,${ty}px) scale(${z})`};
+  const show=()=>{const my=++seq,{m,e}=items[i];stopAll();z=1;tx=ty=0;
     count.textContent=(i+1)+' / '+n;count.hidden=n<2;prev.hidden=i===0;next.hidden=i===n-1;o.dataset.i=String(i);
     const pct=el('div','lb-pct');stage.replaceChildren(el('span','spin'),pct);
     loadMedia(c,m,e,f=>{if(my===seq)pct.textContent=Math.floor(f*100)+'%'}).then(url=>{if(my!==seq)return;let node;
@@ -1593,8 +1645,14 @@ function viewer(c,items,start){
   const layer={kind:'viewer',alive:()=>o.isConnected,close:()=>close()};
   const close=()=>{seq++;stopAll();o.remove();document.removeEventListener('keydown',key);NAV.closed(layer)};NAV.open(layer);
   o.addEventListener('pointerdown',ev=>{const v=ev.target.tagName==='VIDEO'?ev.target:null; // not a drag along a video's controls
-    sx=v&&ev.offsetY>v.clientHeight-70?null:ev.clientX;sy=ev.clientY});
-  o.addEventListener('pointerup',ev=>{if(sx==null)return;const dx=ev.clientX-sx,dy=ev.clientY-sy;sx=null;
+    sx=v&&ev.offsetY>v.clientHeight-70?null:ev.clientX;sy=ev.clientY;pts.set(ev.pointerId,{x:ev.clientX,y:ev.clientY});if(pts.size>1||z>1)sx=null});
+  // pinch (1x-4x about the fingers' midpoint) and one-finger pan while zoomed
+  const mid=()=>{const a=[...pts.values()];return a.length<2?{...a[0],d:0}:{x:(a[0].x+a[1].x)/2,y:(a[0].y+a[1].y)/2,d:Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)}};
+  o.addEventListener('pointermove',ev=>{if(!pts.has(ev.pointerId))return;const b=mid();pts.set(ev.pointerId,{x:ev.clientX,y:ev.clientY});if(pts.size>2||(pts.size<2&&z===1))return;
+    const a=mid(),k=pts.size>1?Math.max(1,Math.min(4,z*a.d/b.d))/z:1,W=innerWidth,H=innerHeight;z*=k;
+    tx=z===1?0:Math.max(-W*z/2,Math.min(W*z/2,a.x-W/2-k*(b.x-W/2-tx)));ty=z===1?0:Math.max(-H*z/2,Math.min(H*z/2,a.y-H/2-k*(b.y-H/2-ty)));tf()});
+  o.addEventListener('pointercancel',ev=>pts.delete(ev.pointerId));
+  o.addEventListener('pointerup',ev=>{pts.delete(ev.pointerId);if(sx==null)return;const dx=ev.clientX-sx,dy=ev.clientY-sy;sx=null;
     if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5){swiped=true;go(dx<0?1:-1)}
     else if(dy>110&&dy>Math.abs(dx)*1.5){swiped=true;close()}});
   o.onclick=ev=>{if(swiped){swiped=false;return}if(ev.target===o||ev.target===stage)close()};
@@ -1735,9 +1793,8 @@ function msgMenu(anchor,p,o,quiet){ // quiet: a press-and-hold already gave the 
   if(o.text)items.push([I.copy,'Copy text',async()=>{try{await navigator.clipboard.writeText(plainText(o.text));haptic();toast('Copied')}catch{toastErr('Copying isn\u2019t allowed here. Press and hold the text to select it.')}}]);
   if(mine&&o.text!=null&&!o.poll&&S.comp)items.push([I.edit,'Edit',()=>setEdit(p,o)]);
   if(o.poll&&!(c.closed&&c.closed[p._id])&&(mine||admin))items.push([I.chart,'Stop poll',async()=>{try{await S.db.doc('channels/'+c.id).update({closed:{[p._id]:true}})}catch{toastErr('Couldn\u2019t stop the poll. Try again.')}}]);
-  if(mine||(admin&&t!=='dm'))items.push([I.trash,'Delete',async()=>{
-    if(!confirmDanger(isSelf(c)?'Delete this note?':t==='dm'?'Delete this message for both of you?':'Delete this message for everyone?'))return;
-    try{await deletePost(c.id,p)}catch{toastErr('Couldn\u2019t delete it. Try again.')}},'danger']);
+  const forAll=['Delete for everyone',async()=>{try{await deletePost(c.id,p)}catch{toastErr('Couldn\u2019t delete it. Try again.')}}];
+  items.push([I.trash,'Delete',()=>deleteMenu(anchor,isSelf(c)?[['Delete',forAll[1]]]:[['Delete for me',()=>hideMsg(c.id,p._id)],...(mayDeleteForAll({t,mine,admin,owner:isOwner(c),byOwner:!!c.owner&&p.from===c.owner})?[forAll]:[])]),'danger']);
   items.forEach(([ic,label,fn,cls])=>{const b=html('button','menu-item'+(cls?' '+cls:''),ic);b.append(el('span',null,label));b.onclick=()=>{m.remove();fn()};m.append(b)});
   if(!m.children.length)return;
   if(!quiet)haptic(); // the message menu opened by a tap
@@ -2462,6 +2519,8 @@ function applyVault(o){ // what the vault holds, into the page: contacts, pinned
     login:loginPref(pr.login),
     blocked:Array.isArray(pr.blocked)?pr.blocked.filter(h=>typeof h==='string'&&validHandle(h)):[],
     blockedChats:Array.isArray(pr.blockedChats)?pr.blockedChats.filter(x=>typeof x==='string'&&/^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/.test(x)):[],
+    hid:Object.fromEntries(Object.entries(pr.hid&&typeof pr.hid==='object'?pr.hid:{}).filter(([,a])=>Array.isArray(a)).map(([cid,a])=>[cid,a.filter(x=>typeof x==='string').slice(-300)])),
+    cleared:Object.fromEntries(Object.entries(pr.cleared&&typeof pr.cleared==='object'?pr.cleared:{}).filter(([,t])=>Number.isFinite(t))),
     secure:pr.secure===true||undefined,tier:TIERS.includes(pr.tier)?pr.tier:undefined,
     dms:Object.fromEntries(Object.entries(pr.dms&&typeof pr.dms==='object'?pr.dms:{}).filter(([cid,i])=>/^d[A-Za-z0-9_-]{22}$/.test(cid)&&i&&typeof i==='object'&&!Array.isArray(i)&&validHandle(i.peer)&&(i.req===undefined||['in','out','ok','no'].includes(i.req))).map(([cid,i])=>[cid,Object.assign({peer:i.peer},i.req?{req:i.req}:{})])), // each one-on-one chat under its person (SPEC.md 5.6): the alias a key change relies on
     pub:Array.isArray(pr.pub)?pr.pub.filter(x=>typeof x==='string'&&/^[gc][A-Za-z0-9]{12}$/.test(x)):[]}}
@@ -2596,6 +2655,22 @@ function swipeBack(){ // the back step a sub-page takes, the same as its Back bu
   if(S.tab==='profile'&&isSettingsPage()){S.profilePage=S.profilePage==='settings'?'main':'settings';setTab('profile',-1);return}
   if(S.tab==='chats'&&S.showArchived){S.showArchived=false;setListTitle();renderList();const v=$('#threads');v.classList.remove('tab-in-l','tab-in-r');void v.offsetWidth;v.classList.add('tab-in-l')}
 }
+// Pull to refresh on the chat list: the circle follows the finger, spins briefly and springs back. Messages already arrive
+// live, so the refresh only redraws the list and re-reads profiles; the spin shows even when nothing is new.
+function setupPullRefresh(){
+  const box=$('#threads'),ptr=el('div','ptr'),dot=el('span','spin');ptr.append(el('i'));ptr.firstChild.append(dot);box.before(ptr);
+  const GO=60,put=(v,ease)=>{const w=ptr.firstChild;w.style.transition=ease?'transform .25s ease-out,opacity .25s':'none';
+    w.style.transform=`translateY(${v}px)`;w.style.opacity=Math.min(1,v/GO);dot.style.transform=`rotate(${v*5}deg)`};
+  let x0=0,y0=null,d=0,busy=false;
+  box.addEventListener('touchstart',e=>{d=0;y0=!busy&&box.scrollTop<=0&&e.touches.length===1?e.touches[0].clientY:null;if(y0!=null)x0=e.touches[0].clientX},{passive:true});
+  box.addEventListener('touchmove',e=>{if(y0==null)return;const t=e.touches[0],dy=t.clientY-y0;
+    if(box.scrollTop>0||Math.abs(t.clientX-x0)>Math.abs(dy)){y0=null;put(0,1);return} // the list scrolled, or it's a sideways swipe
+    d=Math.max(0,Math.min(90,dy*.5));put(d)},{passive:true});
+  box.addEventListener('touchend',async()=>{if(y0==null)return;y0=null;if(d<GO){put(0,1);return}
+    busy=true;haptic();put(GO,1);dot.classList.add('go');
+    await Promise.all([Promise.all([renderList(),refreshDir()]).catch(()=>{}),new Promise(r=>setTimeout(r,450))]);
+    dot.classList.remove('go');put(0,1);busy=false});
+}
 function setupSwipeNav(){
   const app=$('#app'),list=document.querySelector('.pane-list'),chat=$('#chatPane');let g=null,quietUntil=0;
   const narrow=()=>matchMedia('(max-width:759px)').matches;
@@ -2620,7 +2695,7 @@ function setupSwipeNav(){
     return plan};
   const paint=(p,d)=>{ // d: how far the finger has carried the screen, in the swipe's own direction (never negative)
     const f=Math.min(1,d/p.width);
-    if(p.kind==='drawer'){p.node.style.transform=`translateX(${-d}px)`;p.bd.style.backgroundColor=`rgba(10,8,25,${.45*(1-f)})`;return}
+    if(p.kind==='drawer'){p.node.style.transform=`translateX(${-Math.min(d,p.width)}px)`;p.bd.style.backgroundColor=`rgba(10,8,25,${.45*(1-f)})`;return}
     if(p.kind==='menu'){p.node.style.transform=`translateX(${Math.min(0,d-p.width)}px)`;p.bd.style.backgroundColor=`rgba(10,8,25,${.45*f})`;return}
     if(p.kind==='end'){p.node.style.transform=`translateX(${p.dir*Math.min(56,d*.25)}px)`;return}
     p.node.style.transform=`translateX(${p.kind==='tab'?p.dir*d:d}px)`;
@@ -3593,7 +3668,8 @@ function openDrawer(){
   if(!S.me)return;
   const bd=el('div','backdrop');bd.style.alignItems='stretch';const d=el('nav','drawer');
   const layer={kind:'drawer',alive:()=>bd.isConnected,close:()=>close()};
-  const close=()=>{bd.remove();NAV.closed(layer)};bd.onclick=e=>{if(e.target===bd)close()};bd._close=close;NAV.open(layer);
+  const close=()=>{bd.remove();document.documentElement.classList.remove('drawer-open');NAV.closed(layer)};bd.onclick=e=>{if(e.target===bd)close()};bd._close=close;NAV.open(layer);
+  document.documentElement.classList.add('drawer-open'); // freezes the inbox behind the drawer
   const top=el('button','drawer-top');top.append(userAvatar(S.me.handle),withBadge(el('div','t-name',displayName(S.me.handle)),S.me.handle),el('div','h',atOf(S.me.handle)));
   top.onclick=()=>{close();openSettings()};
   d.append(top,el('div','menu-label','Accounts on this device'));
@@ -3844,7 +3920,7 @@ async function noteOk(p){
    A blocked chat: one conversation closed and kept out of the list, new messages included. */
 const isBlocked=h=>!!(h&&S.prefs&&Array.isArray(S.prefs.blocked)&&S.prefs.blocked.includes(h));
 const isChatBlocked=cid=>!!(S.prefs&&Array.isArray(S.prefs.blockedChats)&&S.prefs.blockedChats.includes(cid));
-const hiddenConv=c=>!!c&&(isChatBlocked(c.id)||(typeOf(c)==='dm'&&!isSelf(c)&&isBlocked(dmPeer(c))));
+const hiddenConv=c=>!!c&&(isChatBlocked(c.id)||clearedConv(c)||(typeOf(c)==='dm'&&!isSelf(c)&&isBlocked(dmPeer(c))));
 function afterBlockChange(){if(S.chan&&hiddenConv(curConv()))closeConv();else if(S.chan){S.rendered=null;applyExpiry();renderConv()}renderList();updateTitle();if(S.tab==='profile')setTab('profile')}
 function blockPeer(h){haptic(true);const b=P().blocked||(P().blocked=[]);if(!b.includes(h))b.push(h);saveContacts();afterBlockChange()}
 function unblockPeer(h){const b=P().blocked||[];P().blocked=b.filter(x=>x!==h);saveContacts();afterBlockChange();restoreDm(h).catch(()=>{})}
@@ -4014,7 +4090,7 @@ async function republishSelf(){
   addEventListener('hashchange',()=>{if(S.me&&/join=|add=/.test(location.hash))handleJoin(location.hash)});
   setInterval(()=>{refreshHeader();drawTyping()},1500);
   setInterval(()=>{const now=Date.now();if(S.chan&&(S.posts.some(p=>p.exp&&p.exp<=now)||(S.future||[]).some(p=>p.ts<=now+3000))){applyExpiry();renderConv();renderList()}},2000);
-  updateStatus();setupSwipeNav();
+  updateStatus();setupSwipeNav();setupPullRefresh();
   document.addEventListener('selectionchange',()=>{if(S.comp&&S.comp.syncFmt)S.comp.syncFmt()});setInterval(()=>heartbeat(),45000);
   fitKeyboard();
   document.addEventListener('visibilitychange',()=>{heartbeat();if(!document.hidden)markRead()});

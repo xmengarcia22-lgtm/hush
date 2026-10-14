@@ -200,3 +200,16 @@ test('the legacy shapes are gone for good', async () => {
   }
   assert.equal((await A.call('query', { p: 'channels', w: [['members', 'array-contains', 'alice']], l: 10 })).e, 'invalid');
 });
+
+test('in a DM each side deletes only its own messages, in one step with the token (Delete for everyone)', async () => {
+  const D = 'd' + 'Del'.repeat(7) + 'x', m = cap();
+  await createChat(A, D, dmDoc(), { m });
+  assert.equal((await B.ok('chat.open', { cid: D, cap: m })).level, 'member');
+  await A.ok('set', { p: `channels/${D}/posts/aLiceMsg0001`, d: post({ oh: sha('a1') }) });
+  await B.ok('set', { p: `channels/${D}/posts/bObMsg000001`, d: post({ oh: sha('b1') }) });
+  assert.equal((await B.call('delete', { p: `channels/${D}/posts/aLiceMsg0001` })).e, 'denied', 'a DM has no admin to delete the other side');
+  assert.equal((await B.call('delete', { p: `channels/${D}/posts/aLiceMsg0001`, ot: 'b1' })).e, 'denied', 'their own token opens only their own message');
+  await B.ok('delete', { p: `channels/${D}/posts/bObMsg000001`, ot: 'b1' });
+  await A.ok('delete', { p: `channels/${D}/posts/aLiceMsg0001`, ot: 'a1' });
+  assert.equal((await A.ok('query', { p: `channels/${D}/posts`, l: 10 })).docs.length, 0);
+});

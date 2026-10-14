@@ -247,9 +247,9 @@ function createHushAdapter(url,opts){
     notePending(parent,id,d);return (parent==='directory'?setWithWork({p:path,d}):chatCall('set',was===undefined?{p:path,d}:{p:path,d,was})).then(()=>clearPending(parent,id),e=>{clearPending(parent,id);throw e})}
   function updateDoc(path,v){const {parent,id}=splitPath(path),patch=clone(v),base=knownDoc(parent,id);
     if(base)notePending(parent,id,mergePatch(base,patch));return chatCall('update',{p:path,d:patch}).then(()=>clearPending(parent,id),e=>{clearPending(parent,id);throw e})}
-  function deleteDoc(path){return chatCall('delete',{p:path}).then(()=>{})}
+  function deleteDoc(path,ot){return chatCall('delete',ot?{p:path,ot}:{p:path}).then(()=>{})} // ot: the author's token, so a message of mine goes in one step
   // ---- the public shape ----
-  function docRef(path){const {parent,id}=splitPath(path);return {id,path,get:()=>getDoc(path),set:(v,o)=>setDoc(path,v,o&&o.was),update:v=>updateDoc(path,v),delete:()=>deleteDoc(path),
+  function docRef(path){const {parent,id}=splitPath(path);return {id,path,get:()=>getDoc(path),set:(v,o)=>setDoc(path,v,o&&o.was),update:v=>updateDoc(path,v),delete:o=>deleteDoc(path,o&&o.ot),
     onSnapshot:(cb,err)=>addSub({p:parent,ids:[id],single:true},cb,err),collection:p=>colRef(path+'/'+p)}}
   function mkQuery(q){return {where:(f,op,v)=>mkQuery(Object.assign({},q,{w:q.w.concat([[f,op,v]])})),orderBy:(f,dir)=>mkQuery(Object.assign({},q,{o:[f,dir==='desc'?'desc':'asc']})),
     limit:n=>mkQuery(Object.assign({},q,{l:n})),

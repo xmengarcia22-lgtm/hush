@@ -154,7 +154,7 @@ test('the wiring: every layer is registered and unregistered, and the address is
   assert.match(src, /if\(navChat\)\{const l=navChat;navChat=null;NAV\.closed\(l\)\}/, 'closing it, however it closes');
   assert.match(src, /const layer=\{kind:'sheet',alive:\(\)=>bd\.isConnected,close:\(\)=>close\(\),stay:!!opt\.locked\}/);
   assert.match(src, /const close=\(\)=>\{bd\.remove\(\);document\.removeEventListener\('keydown',esc\);NAV\.closed\(layer\)\}/);
-  assert.match(src, /const close=\(\)=>\{bd\.remove\(\);NAV\.closed\(layer\)\};bd\.onclick=/, 'the side menu');
+  assert.match(src, /const close=\(\)=>\{bd\.remove\(\);document\.documentElement\.classList\.remove\('drawer-open'\);NAV\.closed\(layer\)\};bd\.onclick=/, 'the side menu');
   assert.match(src, /document\.removeEventListener\('keydown',key\);NAV\.closed\(layer\)\};NAV\.open\(layer\);/, 'the photo viewer');
   assert.match(src, /S\.showArchived\?'Archived':'Chats';navSyncList\(\)\}/, 'tabs, settings pages and the archive, through the list title');
   assert.match(src, /const want=!!S\.me&&\(S\.tab!=='chats'\|\|!!S\.showArchived\);/);
