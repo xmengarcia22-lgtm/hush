@@ -193,10 +193,11 @@ function avatar(key,name,cls='',photo){const a=el('div','avatar '+cls);const ph=
   if(ph){const i=el('img');i.src=ph;i.alt='';a.append(i)}
   else{a.textContent=(name||key||'?').trim().charAt(0).toUpperCase();const [h,s,l]=avColor(key||'?');a.style.background=`hsl(${h} ${s}% ${l}%)`}
   return a}
-const userAvatar=(h,cls='')=>avatar(h,displayName(h),cls,S.dir[h]&&S.dir[h].photo);
+const userAvatar=(h,cls='')=>isGone(h)?avatar('?','?',cls):avatar(h,displayName(h),cls,S.dir[h]&&S.dir[h].photo);
 const convAvatar=(c,cls='')=>isSelf(c)?html('div','avatar saved '+cls,I.bookmark):typeOf(c)==='dm'?userAvatar(dmPeer(c),cls):avatar(c.id,c.name,cls,c.photo);
 const isOnline=h=>{const p=S.presence[h];return !!p&&!p.hidden&&Date.now()-p.ts<75000};
 function lastSeen(h){
+  if(isGone(h))return ''; // a deleted account is never seen again
   const p=S.presence[h];if(!p||p.hidden||!p.ts)return 'last seen recently';
   const d=Date.now()-p.ts;if(d<75000)return 'online';
   if(d<3600e3)return `last seen ${Math.max(1,Math.round(d/60000))} min ago`;
@@ -217,7 +218,8 @@ let toastT;function toast(msg,action,fn){
   document.querySelectorAll('.toast').forEach(x=>x.remove());const t=el('div','toast');t.setAttribute('role','status');t.append(el('span',null,msg));
   if(action){const b=el('button','toast-act',action);b.onclick=()=>{t.remove();fn()};t.append(b)}
   document.body.append(t);clearTimeout(toastT);toastT=setTimeout(()=>t.remove(),action?5000:3200)}
-const displayName=h=>(S.cnames&&S.cnames.get(h))||(S.dir[h]&&S.dir[h].name)||h;
+const isGone=h=>!!(S.dir[h]&&S.dir[h].gone); // a deleted account: the server keeps its public keys, so its old messages still verify
+const displayName=h=>isGone(h)?'Deleted account':(S.cnames&&S.cnames.get(h))||(S.dir[h]&&S.dir[h].name)||h;
 // Usernames: the real one is lowercase (that's what's stored and searched, so XtremeGamer and xtremegamer are the same account).
 // "disp" is how the owner chose to capitalize it. It's only ever shown if it's the same letters, so nobody can fake a different name.
 const dispOk=(d,h)=>typeof d==='string'&&d.toLowerCase()===h;
@@ -953,10 +955,11 @@ function openConv(cid){
     if(t==='channel'&&c.visibility==='public'){const f=el('div','composer readonly');const j=el('button','primary join','Join channel');
       j.onclick=async()=>{j.disabled=true;try{await joinPublic(cid)}catch(e){j.disabled=false;if(!e||e.message!=='banned')toastErr('Couldn\u2019t join. Check your connection and try again.')}};f.append(j);p.append(f)}
   }else if(!canPost(c))p.append(el('div','composer readonly','Only the channel owner and admins can post here'));
+  else if(t==='dm'&&!isSelf(c)&&isGone(dmPeer(c)))p.append(el('div','composer readonly','This account was deleted. You can read this chat, but not reply.'));
   else if(t==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c))){const kw=el('div','composer readonly kwbar');kw.append(keyWarnBox(dmPeer(c)));p.append(kw)}
   else if(isRequest(c))p.append(requestBar(c));
   else{if(awaitingAccept(c))p.append(el('div','reqnote',displayName(dmPeer(c))+' only takes messages from their contacts. You can send one text message as a request. Once they accept, you can chat normally.'));buildComposer(p,c)}
-  S.warnShown=!!(t==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c)));pinAll();drawTyping();
+  S.warnShown=!!(t==='dm'&&!isSelf(c)&&(keyChanged(dmPeer(c))||isGone(dmPeer(c))));pinAll();drawTyping(); // either swaps the composer out: refreshDir opens the chat again when it changes
   refreshHeader();renderConv();renderList();updateTitle();drawPinBar();loadDir(c.members||[]).then(ch=>syncWraps(convById(cid)||c)).then(ch=>healKeys(convById(cid)||c).then(()=>ch)).then(async ch=>{if(ch&&S.chan===cid){const cc=convById(cid)||c;S.rawPosts=await unsealAll(cc,S.rawPosts);S.older=await unsealAll(cc,S.older);if(S.chan!==cid)return;applyExpiry();pinAll();S.rendered=null;renderConv();refreshHeader()}});refreshPresence();
   if(!S.db)return;
   const base='channels/'+cid;
@@ -2004,7 +2007,7 @@ function emptyPeople(q){const e=el('div','empty');
   if(q)e.append(el('strong',null,'No one found'),el('span',null,'Try their name or username. Some people choose to be reachable only through their invite link.'));
   else e.append(el('strong',null,'No contacts yet'),el('span',null,'Search for someone by name or username, or add them by phone number in Contacts.'));
   return e}
-function peopleIn(q,exclude){return Object.values(S.dir).filter(d=>!exclude.includes(d.handle)&&!isBlocked(d.handle)&&(!q||(d.handle+' '+d.name).toLowerCase().includes(q))).sort((a,b)=>a.name.localeCompare(b.name))}
+function peopleIn(q,exclude){return Object.values(S.dir).filter(d=>!d.gone&&!exclude.includes(d.handle)&&!isBlocked(d.handle)&&(!q||(d.handle+' '+d.name).toLowerCase().includes(q))).sort((a,b)=>a.name.localeCompare(b.name))}
 function personRow(d){const b=el('button','thread');const m=el('div','t-main');m.append(withBadge(el('div','t-name',d.name),d.handle),el('div','t-sub',atOf(d.handle)));b.append(userAvatar(d.handle,'sm'),m);return b}
 function searchBox(ph){const s=el('label','search');s.innerHTML=I.search;const inp=el('input');inp.placeholder=ph;s.append(inp);s.style.margin='4px 0 8px';return {s,inp}}
 function picker(host,exclude,onChange){
@@ -2047,6 +2050,7 @@ function openNewChat(){
 }
 async function openDm(peer){
   await loadDir([peer]);const id=await dmIdFor(peer);
+  if(isGone(peer)&&!(id&&convById(id))){toastErr('This account was deleted.');return} // an old chat with them still opens, read-only; a new one never starts
   if(!id){toastErr('Couldn’t open that chat. Check your connection and try again.');return}
   if(!convById(id))S.previews.set(id,{id,type:'dm',members:[...new Set([S.me.handle,peer])],ts:0,last:null,epoch:0});
   openConv(id);
@@ -2290,6 +2294,8 @@ function openEditConv(cid){
 }
 async function openProfile(h){
   if(h===S.me.handle){openSettings();return}
+  if(isGone(h)){const {body}=sheet('Profile'),top=el('div','info-top');top.append(userAvatar(h,'xl'),el('div','info-name','Deleted account')); // no badge: the account is gone
+    body.append(top,el('p','hint','This account was deleted. Its messages stay where they were sent, but it can’t be messaged any more.'));return}
   const d=S.dir[h];const {body,close}=sheet('Profile');
   const top=el('div','info-top');const st=lastSeen(h);
   top.append(userAvatar(h,'xl'),withBadge(el('div','info-name',displayName(h)),h),el('div','t-sub'+(st==='online'?' online':''),atOf(h)+', '+st));body.append(top);
@@ -2449,6 +2455,7 @@ function settingsAdvanced(body,me){
   sv.append(svc,el('span',null,'Show what the server sees'));
   body.append(sv,el('p','hint','Shows messages the way they\u2019re stored on the server: scrambled text that only the people in the chat can unlock. Useful for checking that encryption is working.'));
   const how=html('button','menu-item flush',I.info+'<span>How encryption works</span>');how.onclick=openHow;body.append(how);
+  const del=html('button','menu-item danger flush',I.trash+'<span>Delete account</span>');del.onclick=openDeleteAccount;body.append(el('div','menu-label flush','Account'),del); // the very last row
 }
 function openHow(){
   const {body}=sheet('How encryption works');
@@ -3502,6 +3509,18 @@ async function signedOutHere(){
     if(S.ids.length){start(S.ids[0]);toast(atOf(h)+' was moved to a new device and logged out here.')}
     else{S.me=null;dropUnsealed();if(S.db&&S.db.prove)S.db.prove(null);showOnboard(false,'Your account was set up fresh on another device, so it was logged out here.')}});
 }
+/* The account was deleted: here (sure), or on another device, when the server closes this connection with 4410 or
+   refuses its sign-in as 'gone'. Then only once its profile says so too. This device forgets it as a log-out does, and
+   from then on nothing republishes it. One at a time, so the deleting run and the server's close can't race. */
+const goneSeen=new Set();let goneQ=Promise.resolve();
+const accountGone=(h,sure)=>goneQ=goneQ.then(async()=>{
+  if(!h||goneSeen.has(h)||!S.ids.some(x=>x.handle===h))return;
+  if(!sure&&!(await S.db.doc('directory/'+h).get().then(s=>!!(s.exists&&s.data().gone),()=>false)))return; // a dropped connection alone wipes nothing
+  goneSeen.add(h);const current=!!S.me&&S.me.handle===h,msg=sure||S.deleting===h?'Your account was deleted.':'This account was deleted.';
+  if(current){if(S.unsubConvs){S.unsubConvs();S.unsubConvs=null}closeConv();S.me=null;if(S.db&&S.db.prove)S.db.prove(null);dropUnsealed();renderList()}
+  S.ids=S.ids.filter(x=>x.handle!==h);ls.set('hush:ids',S.ids);if(ls.get('hush:active',null)===h)ls.set('hush:active',null);
+  await forgetAccountData(h);S.deleting=null;if(!current)return;
+  S.profilePage='main';if(S.ids.length){start(S.ids[0]);toast(msg)}else{renderList();updateTitle();showOnboard(false,msg)}}).catch(()=>{});
 /* ---------- log out: this device forgets one account ----------
    Its private keys, chat keys, drafts and settings are erased here; other accounts on the device stay. The server
    keeps nothing about this device, so the only other step is taking the device off the profile's device list. */
@@ -3571,6 +3590,79 @@ async function logOutAccount(h,opt={}){
     showOnboard(false,`You’re logged out of ${atOf(h)} on this device.`);
   }else{toast(atOf(h)+' was logged out on this device');if(S.tab==='profile')setTab('profile')}
 }
+/* ---------- delete my account, for good (release 31) ----------
+   The server keeps a tombstone of the profile with its public keys, so the account's old messages still verify and show
+   as "Deleted account", and nobody can take the username again. Groups and channels it owns go for everyone first. Its
+   password and recovery boxes, Message backup, search entry and saved number sit at addresses the server can't tie to
+   it, so this device erases them before the account itself. The password or words are checked here only (the server
+   never sees either): an accepted limit. */
+async function chatsOf(h){ // every group and channel the account is in (once each), [{cid, name, own}]: owned ones are deleted with it, the rest it leaves
+  const out=[];for(const c of S.convs.filter((x,i,a)=>typeOf(x)!=='dm'&&a.findIndex(y=>y.id===x.id)===i)){let shown=c;try{shown=await showMeta(c)}catch{}
+    out.push({cid:c.id,name:shown.name||c.name||'A '+typeOf(c),own:isOwner(c)||shown.owner===h&&(c.visibility==='public'||!!shown._ometa)})} // an old group's meta is sealed by admins too: it can't make me the owner
+  return out}
+/* ===== HUSH DELETE ACCOUNT BEGIN ===== */
+const sameAcct=(a,b)=>!!(a&&b&&a.handle===b.handle&&a.sig&&b.sig&&a.sig.x===b.sig.x&&a.sig.y===b.sig.y);
+async function deleteProof(h,mode,v){ // {pw} or {recLoc} once what was typed opens this account as it is now; throws 'nomatch', 'stale' (keys from before a change), 'net', or the ratelimit error
+  const why=e=>e&&e.code==='ratelimit'?e:new Error(e&&e.message==='nomatch'?'nomatch':'net');
+  if(mode==='pw'){let r;try{r=await openLoginBox((loginInfo(h)||{}).login||h,v)}catch(e){throw why(e)}if(!sameAcct(r.id,S.me))throw new Error('stale');return {pw:v}}
+  if(mode==='words'){let w,id;try{w=readWords(v)}catch{throw new Error('nomatch')}try{id=await openRecovery(w,h)}catch(e){throw why(e)}if(!sameAcct(id,S.me))throw new Error('stale');return {recLoc:lastRecLoc}}
+  if(normLogin(v)!==h)throw new Error('nomatch');return {}}
+async function deleteAccountRun(h,proof,step){ // the steps in order. One that must work and doesn't throws with nothing on this device wiped, so the run can simply start again
+  const chats=await chatsOf(h);
+  for(const c of chats.filter(x=>x.own)){step('Deleting “'+c.name+'”');
+    try{await S.db.doc('channels/'+c.cid).delete()}
+    catch{if((await S.db.preview(c.cid).catch(x=>({exists:!(x&&x.code==='notfound')}))).exists)throw Object.assign(new Error('chat'),{chat:c.name})} // already gone (an earlier try): skipped
+    S.previews.delete(c.cid);await pause(250)}
+  step('Leaving your other groups and channels');
+  for(const c of chats.filter(x=>!x.own)){await leaveChat(c.cid).catch(()=>{});await pause(250)}
+  step('Erasing your password, recovery words and Message backup');
+  ls.set('hush:delacct:'+h,Date.now()); // from here a retry is let through on the username alone: the password's boxes may be gone
+  const li=loginInfo(h)||{},boxes=new Set(Object.entries(Object.assign({},li.all||{},li.login&&li.loc?{[li.login]:li.loc}:{})).map(([l,x])=>l+'|'+x));
+  if(proof.pw)for(const l of loginsOf(h))boxes.add(l+'|'+(await loginSecrets(l,proof.pw)).loc); // the password's own boxes too: an out-of-date note may not name them
+  for(const b of boxes){const i=b.lastIndexOf('|');await dropLoginBox(b.slice(0,i),b.slice(i+1)).catch(()=>{})}
+  const r=recLocal(h)||{};
+  for(const l of new Set([r.loc,...(Array.isArray(r.old)?r.old:[]),S.prefs&&S.prefs.rec&&S.prefs.rec.loc,proof.recLoc].filter(x=>typeof x==='string')))await S.db.doc('accounts/'+l).delete().catch(()=>{});
+  await S.db.doc(await backupPath(S.me)).delete().catch(()=>{});await S.db.doc('search/'+h).delete().catch(()=>{});
+  const ph=ls.get('hush:phone:'+h,null);if(ph)await S.db.doc('phones/'+await phoneHash(ph)).delete().catch(()=>{});
+  step('Deleting your account');const vault=(await vaultPath(h)).split('/')[1];S.deleting=h;
+  const timed=p=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(Object.assign(new Error('timeout'),{code:'timeout'})),30000))]);
+  try{await timed(S.db.prove(null).then(async()=>S.db.prove(Object.assign(await proofFor(S.me),{dev:'',signDev:null})))); // a fresh sign-in with the account key: only it may delete the account
+    await S.db.deleteAccount({vault})}
+  catch(e){if(!(e&&e.code==='gone')&&!(await S.db.doc('directory/'+h).get().then(s=>!!(s.exists&&s.data().gone),()=>false))){ // 'gone', or the profile says so: it went through and only the answer was lost
+    S.deleting=null;if(S.me&&S.me.handle===h)start(S.me);throw e}}
+  await accountGone(h,true)}
+/* ===== HUSH DELETE ACCOUNT END ===== */
+async function openDeleteAccount(){
+  const h=S.me&&S.me.handle;if(!h)return;
+  if(!S.db||!S.db.online){toastErr('You need to be online for this.');return}
+  if(!S.contactsReady||S.vaultOk===false||!S.convsLoaded){toastErr('Your chats and settings haven’t loaded yet. Try again in a moment.');return}
+  const li=loginInfo(h),mode=ls.get('hush:delacct:'+h,null)?'name':li&&li.loc?'pw':hasRecovery(h)?'words':'name';
+  const {body,close}=sheet('Delete account'),own=el('p',null,'Checking which groups and channels you own…');
+  body.append(el('p','warnbox','This permanently deletes your account '+atOf(h)+'. It can’t be undone.'),
+    el('p',null,'Your profile, username, keys, settings, Message backup and saved phone number are erased. Your username can never be used again, by you or anyone else.'),
+    el('p',null,'Messages you sent in other people’s chats stay, shown as from “Deleted account”.'),own,
+    el('p',null,'Every device you’re logged in on will be logged out.'),
+    el('p','hint','Copies in the server’s encrypted nightly backups are gone within 7 days.'));
+  let f,i;if(mode==='pw')({f,i}=pwField('Your password','current-password'));
+  else{f=el('label','field');i=el(mode==='words'?'textarea':'input',mode==='words'?'linkbox':null);if(mode==='words')i.rows=3;else i.type='text';
+    i.autocapitalize='none';i.spellcheck=false;i.autocomplete='off';f.append(el('span',null,mode==='words'?'Your recovery words':'Your username'),i)}
+  const go=el('button','btn-danger','Delete my account');go.style.width='100%';go.disabled=true;const prog=el('p','hint'),err=el('div','err');
+  body.append(el('p',null,mode==='pw'?'To confirm, enter your password.':mode==='words'?'To confirm, enter your recovery words.':'To confirm, type your username: '+h),f,go,prog,err);
+  let listed=false;const ready=()=>{go.disabled=!listed||!i.value.trim()};i.oninput=ready; // only once the owned list is shown
+  chatsOf(h).then(cs=>{const o=cs.filter(c=>c.own);listed=true;ready();
+    own.textContent=o.length?'These groups and channels you own will be deleted for everyone: '+o.map(c=>c.name).join(', ')+'.':'You don’t own any groups or channels, so none will be deleted.'},()=>{own.textContent='Couldn’t check which groups and channels you own. Close this and try again.'});
+  go.onclick=async()=>{if(go.disabled)return;err.textContent='';go.disabled=i.disabled=true;prog.textContent='Checking…';
+    const back=()=>{go.disabled=i.disabled=false;prog.textContent=''};let proof;
+    try{proof=await deleteProof(h,mode,i.value)}catch(e){back();
+      err.textContent=e&&e.code==='ratelimit'?(/wrong passwords/.test(e.message||'')?'Too many wrong passwords for this login. Try again later.':'Too many tries from this network just now. Wait a minute, then try again.')
+        :e&&e.message==='stale'?'That’s from before your account’s keys were replaced. Use your current '+(mode==='pw'?'password.':'recovery words.')
+        :e&&e.message==='nomatch'?(mode==='pw'?'That isn’t your password.':mode==='words'?'Those words don’t match this account. Check the order and spelling.':'That isn’t your username. Type '+h+' exactly.')
+        :'Couldn’t check that. Check your connection and try again.';return}
+    haptic(true);
+    try{await deleteAccountRun(h,proof,t=>{prog.textContent=t});close()}
+    catch(e){if(goneSeen.has(h)){close();return}back();
+      toastErr(e&&e.chat?'Couldn’t delete “'+e.chat+'”, so your account wasn’t deleted. Check your connection and try again.':'Couldn’t delete your account. Check your connection and try again.')}};
+}
 /* ---------- privacy: no list of users; profiles and online status load only for people you deal with ---------- */
 const validHandle=h=>/^[a-z0-9_]{3,20}$/.test(h);
 function relevantHandles(){const hs=new Set();if(S.me)hs.add(S.me.handle);(S.contacts||[]).forEach(c=>c.handle&&hs.add(c.handle));
@@ -3600,11 +3692,12 @@ async function noticeNewDevices(){
 async function refreshDir(force){
   if(dirBusy||!S.db||!S.me||S.rekeying)return;dirBusy=true;let changed=false;try{changed=await loadDir(relevantHandles(),force)}finally{dirBusy=false}
   if(S.dir[S.me.handle]&&(S.dir[S.me.handle].kv||1)>(S.me.kv||1)){signedOutHere();return}
+  if(isGone(S.me.handle)){accountGone(S.me.handle);return} // deleted on another device: nothing below may publish the profile again
   const first=!S.dirReady;if(first){S.dirReady=true}if(first||force){republishSelf().then(publishDev).catch(()=>{});syncSearch()}
   noticeNewDevices();
   if(!changed&&!first)return;
   pinAll();renderList();renderContacts();
-  if(S.chan){const c=curConv();const warn=!!(c&&typeOf(c)==='dm'&&!isSelf(c)&&keyChanged(dmPeer(c)));
+  if(S.chan){const c=curConv();const warn=!!(c&&typeOf(c)==='dm'&&!isSelf(c)&&(keyChanged(dmPeer(c))||isGone(dmPeer(c))));
     if(warn!==S.warnShown)openConv(S.chan);else{S.rendered=null;renderConv();refreshHeader()}}
 }
 async function lookupHandle(h){ // finds anyone by their exact username, as starting a chat needs; name search is the opt-in part (syncSearch)
@@ -4095,7 +4188,7 @@ function start(id){
 }
 async function republishSelf(){
   // Puts your public keys in the directory if they're missing, and puts them back if someone replaced them.
-  if(!S.db||!S.me||!S.dirReady||S.rekeying)return;const m=S.me,d=S.dir[m.handle];if(d&&(d.kv||1)>(m.kv||1))return;
+  if(!S.db||!S.me||!S.dirReady||S.rekeying||goneSeen.has(S.me.handle))return;const m=S.me,d=S.dir[m.handle];if(d&&(d.gone||(d.kv||1)>(m.kv||1)))return; // never brings a deleted account back
   try{if(!d)await S.db.doc('directory/'+m.handle).set(Object.assign({handle:m.handle,name:m.name,ecdh:m.ecdh,sig:m.sig,ts:Date.now()},dispOk(m.disp,m.handle)?{disp:m.disp}:{},m.dev&&m.dev.s?{devs:{[m.dev.id]:devEntry(m.dev)}}:{}));
     else if(dispOk(m.disp,m.handle)&&d.disp!==m.disp){await S.db.doc('directory/'+m.handle).update({disp:m.disp});d.disp=m.disp}
     else if(!sameKeys(keysOf(d),{ecdh:m.ecdh,sig:m.sig})){toastErr('Your security code on the server doesn\u2019t match this device. Restore from your backup, or contact the app owner.')}}catch{}

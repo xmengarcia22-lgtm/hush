@@ -110,7 +110,7 @@ export function createServer(cfg) {
   // New account keys (release 21): every other connection proven for that account holds the old ones. It is closed
   // with 4401 so the page signs out at once; the writer's own connection is marked up to date.
   store.on('change', (e) => {
-    if (e.kind !== 'directory' || !e.d) return;
+    if (e.kind !== 'directory' || !e.d || e.d.gone !== undefined) return;   // a deleted account's connections close with 4410 (onAccountGone)
     const kv = e.d.kv === undefined ? 1 : e.d.kv;
     for (const c of conns) {
       if (c.proven !== e.id) continue;
@@ -139,6 +139,9 @@ export function createServer(cfg) {
   const drops = new Drops({ store, limits, now });
   const tickets = new Tickets({ now, ttlMs: limits.media.ticketTtlMs });
   const media = createMediaHttp({ store, limits, tickets, tagger, trustProxy, originOk, now, diskFree: cfg.diskFree || null, dataDir: cfg.dataDir });
+  // An account was deleted (SPEC.md 4.7): its mailbox's drop allowance is forgotten and every connection proven for it,
+  // the one that asked included, is closed with 4410 once the reply is out.
+  const onAccountGone = (h) => { drops.forget(h); for (const c of [...conns]) if (c.proven === h) c.close('account deleted', 4410); };
 
   const onRequest = (req, res) => {
     const url = (req.url || '').split('?')[0];
@@ -191,7 +194,7 @@ export function createServer(cfg) {
     const address = clientAddress(req, trustProxy);
     const addrTag = tagger.tag(address), dayTag = tagger.tagDay(address);   // the address itself goes no further
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, owners: cfg.owners || [], onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
+      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, owners: cfg.owners || [], onAccountGone, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
       conns.add(conn);
     });
   };

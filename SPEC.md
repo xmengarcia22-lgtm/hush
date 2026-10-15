@@ -99,7 +99,7 @@ The client tries its device key first and falls back to the account key when the
 
 | Path | get | set / create | update | delete |
 |---|---|---|---|---|
-| `directory/<h>` | anyone, rate-limited (the sign-up screen checks availability before an account exists) | only `h`, doc.handle == h, doc.sig == proving key | only `h`; `ecdh`/`sig`/`kv` may change only if `kv` increases and the connection proved with the account key (not a device key); `prev` never, the server writes it (below) | never |
+| `directory/<h>` | anyone, rate-limited (the sign-up screen checks availability before an account exists) | only `h`, doc.handle == h, doc.sig == proving key | only `h`; `ecdh`/`sig`/`kv` may change only if `kv` increases and the connection proved with the account key (not a device key); `prev` never, the server writes it (below); a tombstone (4.7) never | never; `account.delete` turns it into a tombstone (4.7) |
 | `search/<h>` | query only, see 7.6 | only `h`, doc.h == h | only `h` | only `h` |
 | `presence/<h>` | anyone proven, batched | only `h` | only `h` | only `h` |
 | `phones/<hash>` | nobody: matching is off, 12.4 | nobody | nobody | only stored doc.handle |
@@ -118,7 +118,7 @@ Five collections are addressed by secrets the client derives itself, so knowing 
 | `accounts/<loc>` | anyone | anyone, if absent | never | anyone |
 | `logins/<tag>` | anyone | anyone, if absent (from release 20 pages reserve nothing: the rows are the email and phone logins of accounts from before) | never | never |
 | `linkreqs/<tag>` | anyone | a signed-in account: its own link offer, only at the address the offer's name makes (14.14) | the device that read the code claims an offer once; only the account that opened it answers (9.3); at a login's tag, nobody from release 16 | the account that opened the offer, or the new device once answered; at a login's tag, nobody |
-| `vault/<id>` | anyone | anyone | anyone | never |
+| `vault/<id>` | anyone | anyone | anyone | never, except by `account.delete` (4.7) |
 | `backup/<id>` | anyone | anyone, naming the version it merged (9.3, release 19) | never (from release 19) | anyone |
 
 ### 4.4 Removed from the old model
@@ -152,6 +152,18 @@ The server enforces it in the only two places a connection gains a power level: 
 The page asks at that moment, only when the account isn't secured: "Secure your account", naming the role and the chat ("You're now an admin of …. Admins hold the keys to this channel, so your password needs to be stronger"), with a suggestion to turn on the app lock. The prompt asks for the current password first ("Already strong? Just re-enter your current password."): if it is 12 characters or more, not all lowercase letters and not on the built-in list of common passwords, the account is marked secured and the password stays as it is. Only a current password that is too weak opens the fields for a new one, which must also pass the usual rules for choosing a password. Skipping (Not now, the close button, or Back) means: a new group or channel is not created; a role already held stays paused, read and post as a member, asked about again on the next load. Once secured, the page opens the paused chats again and gets the level its keys give.
 
 The highest tier a person has held (none, admin, owner) is kept in their encrypted vault (`prefs.tier`), so the server never sees it. When it climbs past the best so far, the page fires `hush:tier-up` on `window` with `{tier}`, the hook for an upgrade card. A device of an account from before release 9 records the current tier silently the first time.
+
+### 4.7 Deleting an account
+
+Deletion is instant and can't be undone. The page asks for the password or the recovery words first; that check is the page's, not the server's (SECURITY.md).
+
+**What the page erases first**, because only it can find these (their addresses come from secrets the server never sees): the password and recovery boxes, the message backup, the search entry, phone entries, the chats it owns; and it leaves its groups and channels. Then, as the last step, it sends `account.delete {vault}` (7.1) over a connection proven with the account key (4.1), naming its vault's id, which it alone can derive. A device-key proof or a sign-up proof is refused with `denied`, as is a connection proven against keys that have since changed, an account that doesn't exist or is already deleted; `unauth` before any proof; `invalid` for a malformed vault id, and then nothing is erased.
+
+**What the server erases**, in one transaction: `vault/<vault>` (the only way a vault is ever deleted: a client `delete` is still refused, 4.3); every note in `inbox/<h>/c`; `secure/<h>` and `search/<h>`; every `phones` entry whose `handle` is `h`, and every retired `recovery` record and link offer (`linkreqs`) whose `h` is `h`; the block tags of `h` in every chat (5.6) and the reports `h` sent (8.7), found by working their keyed tags out again; and, from memory, the presence row and the mailbox's drop allowance. `directory/<h>` becomes a tombstone. The reply `{ok}` goes out, then every connection proven for `h`, the asking one included, is closed with 4410 `account deleted` (7.2).
+
+**The tombstone** is `{ handle, gone, ecdh, sig, kv, prev? }`, `gone` being the server's time of deletion. It keeps only the public keys and the key history (4.2), so everyone's app can still check the messages the person signed; name, display name, bio, photo, devices, `findable`, `requests` and everything else are dropped. Anyone may still read it (that is how apps learn the account is gone). Nobody writes over it: `set`, `update` and `delete` on it are refused with `denied`, and no client may write `gone`. The username is never free again: `prove` as `h`, with any key, and a sign-up as `h` are refused with `gone`, decided before any signature is checked, so the kept keys sign nobody in. `POST /drop` to `h` answers exactly as for a name that doesn't exist. A tombstone is no account for `report.send` and `report.list`. `login.gate` (4.5) still answers for the account's login tag: it finds no box, since the page deleted them, and answers as it does for any login. A `logins/<tag>` reservation from before release 20 holds only a time, so it can't be told to be this account's and stays.
+
+**What stays**: the messages the person sent, in other people's chats, which apps show under "Deleted account"; the public keys and the username, for good; copies of public-channel posts in reports other people sent (8.7), which hold the post as stored and are not tied to the account; tags in chats (reactions, read marks) that the server can't tie to anyone; and the nightly encrypted backups (8.6), which hold the erased records until they rotate out, up to 7 days.
 
 ---
 
@@ -338,6 +350,7 @@ Text WebSocket frames, UTF-8 JSON, at most 1 MB each. Every client frame carries
 | `chat.ban` | `cid, h, on` | `{ ok }`. Blocks (`on: true`) or unblocks (`on: false`) username `h` in a group or channel (5.6): its member key no longer opens the chat. Admin level; not for DMs, not to block in a public channel, and not from an admin who is blocked; either way twice is fine. At most `bansPerChat` (1000) per chat from admins, twice that from the owner, `toolarge` past that. Blocking evicts that person's connections that hold the chat at member level. |
 | `signup.pow` | – | `{ salt, bits }`: the puzzle a new account solves before its profile may be created (9.4). The same puzzle comes back in the `pow` refusal of a `set` on `directory/<h>` sent without a solution; the page asks early and solves out of sight. The `set` carries the answer as `pow`. |
 | `media.ticket` | `cid` | `{ t, exp, limits }`. A media ticket for HTTP requests about this chat (7.7). Needs a proven connection holding a level for `cid`. |
+| `account.delete` | `vault?` | `{ ok }`, then every connection of the account, this one included, is closed with 4410. Deletes the account (4.7): `vault` is the account's vault id (`vault/<id>` without the prefix), which this op alone may delete. Only over a connection proven with the account key: `denied` for a device-key or sign-up proof, an account that doesn't exist or is already deleted, or keys changed since the proof; `unauth` before any proof; `invalid` for a malformed `vault`. |
 | `report.send` | `cid, pid, reason` | `{ ok }`. Reports post `pid` of a public group or channel (8.7); `reason` is `spam`, `abuse`, `illegal` or `other`. Needs a connection proven for an existing account (`unauth` otherwise), not `chat.open`. `denied` for a DM or a private chat, judged from the server's own record; `notfound` for no such chat, or no such post, a service note or a deleted post; `invalid` for a bad id or reason; `ratelimit` past `reportsPerMin`. The same person reporting the same post again is a no-op answered `ok`. |
 | `report.list` | `before?, limit?` | `{ reports: [{ id, ts, cid, pid, reason, name, post, key }] }`, newest first, `limit` (default 50, at most 200) older than `before` (ms). Only for a connection proven for an existing account listed in `HUSH_OWNERS` (8.7), whatever `HUSH_AUTHZ` says; `denied` for everyone else. |
 | `mail.*` | never needed: notes are watched with `sub` on `inbox/<h>/c` and written with `POST /drop` (section 6); answered `invalid` | – |
@@ -359,9 +372,9 @@ Paths `p` use exactly today's shapes: `directory/<h>`, `channels/<cid>`, `channe
 { t: "bye", reason }                           server is closing the connection
 ```
 
-Error codes: `unauth`, `denied`, `notfound`, `exists`, `invalid`, `toolarge`, `ratelimit`, `conflict`, `version`, `pow` (a drop, section 6, or a sign-up, 9.4, that must bring proof of work first; the reply carries the puzzle), `full` (media refused because the chat's allowance or the server's disk is used up, 7.7), `banned` (`chat.invite` or `chat.join` from someone on the chat's ban list, 5.6), and `internal` for an unexpected server failure. A frame that cannot be parsed at all gets an error reply without `i`; five such frames close the connection.
+Error codes: `unauth`, `denied`, `notfound`, `exists`, `invalid`, `toolarge`, `ratelimit`, `conflict`, `version`, `pow` (a drop, section 6, or a sign-up, 9.4, that must bring proof of work first; the reply carries the puzzle), `full` (media refused because the chat's allowance or the server's disk is used up, 7.7), `banned` (`chat.invite` or `chat.join` from someone on the chat's ban list, 5.6), `gone` (`prove` as, or a sign-up of, a username whose account was deleted, 4.7), and `internal` for an unexpected server failure. A frame that cannot be parsed at all gets an error reply without `i`; five such frames close the connection.
 
-Close codes. Before it closes a connection the server pushes `bye` with the reason, then closes the socket: with code 1000, or with 4401 (release 21) when the connection's proof no longer stands: `keys changed` when the account's keys were replaced over another connection and this one was proven against the old ones, `username taken` when a sign-up proof's name was created over another connection (4.2). A page closed with 4401 can't get back in with the keys it holds: its next proof is refused, and it signs the account out on that device (12, item 9).
+Close codes. Before it closes a connection the server pushes `bye` with the reason, then closes the socket: with code 1000, or with 4401 (release 21) when the connection's proof no longer stands: `keys changed` when the account's keys were replaced over another connection and this one was proven against the old ones, `username taken` when a sign-up proof's name was created over another connection (4.2). A page closed with 4401 can't get back in with the keys it holds: its next proof is refused, and it signs the account out on that device (12, item 9). With 4410 `account deleted` when the account was deleted (4.7): every connection of the account is closed so, the deleting one after its reply; any next proof is refused with `gone`.
 
 ### 7.3 Write semantics
 
@@ -589,7 +602,7 @@ Message and media content; group membership and the social graph; the mapping of
 
 | Stored | What it reveals |
 |---|---|
-| directory entries | public profiles and public keys, by design |
+| directory entries | public profiles and public keys, by design; for a deleted account (4.7), only its username, public keys, key history and the time it was deleted |
 | opt-in search and phone entries | that a person chose to be findable; phone entries are keyed-hashed at rest |
 | chat records | random ids, type, public or private, epoch, how many wraps exist (roughly members times devices), hashes of room keys, sealed metadata, activity time of the last message |
 | chat bans | per group or channel, how many usernames its admins blocked, as tags keyed under `addr.key` (5.6, 8.3): who they are can't be read from the database alone |

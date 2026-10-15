@@ -171,6 +171,7 @@ async function dmIdFor(peer){
 const wrapSalt=(base,e,handle,dev)=>e===undefined?base+':'+handle+(dev?':'+dev:''):'hush-wrap-v2|'+base+'|'+Number(e)+'|'+handle+'|'+(dev||'');
 async function wrapKey(raw,handle,base,e){
   if(handle!==S.me.handle&&typeof keyChanged==='function'&&keyChanged(handle))return {}; // a key this device hasn't accepted: its devices can't be checked, and the fallback would wrap to the old account key
+  if(handle!==S.me.handle&&S.dir[handle]&&S.dir[handle].gone)return {}; // a deleted account keeps its public keys for old signatures only: nothing is locked to it any more
   const pk=peerKeys(handle);if(!pk)throw new Error('nokey');
   const devs=await verifiedDevs(handle),out={};
   if(!devs.length)try{out[rid22()]=await wrapTo(raw,pk.ecdh,wrapSalt(base,e,handle))}catch{} // no device on their profile yet: to the account key (one that doesn't import gets nothing, rather than stopping the key change)

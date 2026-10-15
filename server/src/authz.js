@@ -118,9 +118,12 @@ function standardCheck(a, op, p, ctx) {
     case 'directory': {
       if (read) return;                                   // profiles are public; reads are rate-limited
       if (list) noList();
-      if (del) fail('denied', 'profiles are never deleted');
+      // A deleted account's tombstone (SPEC.md 4.7) is the server's alone: nobody writes over it, nor makes one.
+      if (ctx.prev && ctx.prev.gone !== undefined) fail('denied', 'this account was deleted');
+      if (del) fail('denied', 'profiles are never deleted; account.delete leaves a tombstone');
       own(a, p.id);
       const d = ctx.d || {}, prev = ctx.prev;
+      if (d.gone !== undefined) fail('denied', 'only the server marks an account deleted');
       if (!prev && d.prev !== undefined) fail('denied', 'the key history is kept by the server');
       if (!prev) {
         if (a.mayCreate !== p.id || !a.pub) fail('denied', 'sign up first');
@@ -211,7 +214,7 @@ function standardCheck(a, op, p, ctx) {
       return;
     case 'vault':
       if (list) noList();
-      if (del) fail('denied', 'vaults are never deleted');
+      if (del) fail('denied', 'vaults are never deleted');   // except by account.delete, the account's last act (SPEC.md 4.7)
       return;
     case 'backup':
       if (list) noList();

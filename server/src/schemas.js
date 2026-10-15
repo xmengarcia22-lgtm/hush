@@ -39,7 +39,7 @@ const bad = (what, field) => fail('invalid', `${what}: bad "${field}"`);
 
 // ---- identity-plane collections -------------------------------------------
 
-const DIRECTORY_KEYS = new Set(['handle', 'name', 'disp', 'bio', 'photo', 'ecdh', 'sig', 'devs', 'findable', 'requests', 'kv', 'ts', 'prev']);
+const DIRECTORY_KEYS = new Set(['handle', 'name', 'disp', 'bio', 'photo', 'ecdh', 'sig', 'devs', 'findable', 'requests', 'kv', 'ts', 'prev', 'gone']);
 function directory(ctx, d) {
   const w = 'directory';
   only(d, DIRECTORY_KEYS, w); need(d, ['handle', 'ecdh', 'sig'], w);
@@ -54,6 +54,7 @@ function directory(ctx, d) {
   if (d.requests !== undefined && !bool(d.requests)) bad(w, 'requests');
   if (d.kv !== undefined && !int(d.kv, 1, 1e6)) bad(w, 'kv');
   if (d.ts !== undefined && !num(d.ts)) bad(w, 'ts');
+  if (d.gone !== undefined && !num(d.gone)) bad(w, 'gone');   // a deleted account's tombstone (SPEC.md 4.7), written by the server only (authz.js)
   if (d.devs !== undefined) {
     if (!isPlain(d.devs)) bad(w, 'devs');
     for (const [id, e] of Object.entries(d.devs)) {

@@ -112,6 +112,15 @@ as the live operator, can test whether a guessed user reported a given post, the
 One-on-one chats and private groups and channels can never be reported: the server checks its own record of
 the chat, not what the app says. Only the usernames in `HUSH_OWNERS` can read reports (`SPEC.md` 8.7).
 
+### Deleting an account is confirmed by the app, not the server
+
+Deleting your account asks for your password or recovery words first, but that check happens in the app. The
+server can't verify a password, and every signed-in device holds the account keys (`SPEC.md` 10.4, A7), which
+is all the server asks for: a connection signed in with the account key. So someone who can run a modified
+app on one of your unlocked devices could delete your account without knowing your password. Deletion is
+instant and can't be undone, and the username is never freed. A server-side check is planned together with
+the stronger password system (OPAQUE, roadmap item 2). What deletion erases and what stays is in `SPEC.md` 4.7.
+
 ### Other limits
 
 - **One device, whole account.** Every device holds the account's private keys, so one compromised device

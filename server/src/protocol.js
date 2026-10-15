@@ -63,7 +63,7 @@ function takeWrite(c, p) {
 // powerNeedsSecure: false switches the rule off for development and tests only; production ignores it.
 const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
-const hasAccount = (c) => !!c.proven && !!c.ctx.store.get('directory/' + c.proven, SYSTEM).d;
+const hasAccount = (c) => { const d = !!c.proven && c.ctx.store.get('directory/' + c.proven, SYSTEM).d; return !!d && d.gone === undefined; };   // a tombstone is no account (4.7)
 
 const HANDLERS = {
   hello(c, f) {
@@ -93,6 +93,8 @@ const HANDLERS = {
     c.proving = true;
     try {
       const dir = typeof f.h === 'string' && HANDLE.test(f.h) ? c.ctx.store.get('directory/' + f.h, SYSTEM).d : null;
+      // A deleted account (4.7) keeps its public keys for old messages, never for signing in; nor is the name free again.
+      if (dir && dir.gone !== undefined) fail('gone', 'this account was deleted');
       let r;
       try {
         r = await verifyProof({ dir, h: f.h, dev: f.dev, pub: f.pub, sig: f.sig, nonce: c.nonce });
@@ -104,6 +106,7 @@ const HANDLERS = {
       // the old ones is refused, and the connection remembers which key version it was proven for (server.js closes
       // it when that version is left behind).
       const dir2 = c.ctx.store.get('directory/' + f.h, SYSTEM).d;
+      if (dir2 && dir2.gone !== undefined) fail('gone', 'this account was deleted');
       if (!dir && dir2) fail('denied', 'that username was just taken; reconnect');
       if (dir && (!dir2 || dir2.kv !== dir.kv || !dir2.sig || dir2.sig.x !== dir.sig.x || dir2.sig.y !== dir.sig.y)) fail('denied', 'the account keys changed while signing in; reconnect');
       c.kv = dir2 ? (dir2.kv === undefined ? 1 : dir2.kv) : 1;
@@ -253,6 +256,17 @@ const HANDLERS = {
     return c.ctx.store.setBan({ cid: f.cid, h: f.h, on: f.on }, c.actor());
   },
 
+  // ---- deleting the account (SPEC.md 4.7) ----
+  // The page's last step, after it erased what only it can find. Only from a connection proven with the account key
+  // itself: never a device key or a sign-up proof. The reply goes out first, then every connection of the account closes.
+  'account.delete'(c, f) {
+    if (!c.proven) fail('unauth', 'sign in first');
+    if (c.provedWith !== 'account') fail('denied', 'deleting an account needs a sign-in with the account key');
+    const h = c.proven;
+    c.ctx.store.deleteAccount({ vault: f.vault }, c.actor());
+    return { __after: () => { if (c.ctx.onAccountGone) c.ctx.onAccountGone(h); } };
+  },
+
   // ---- reports (SPEC.md 8.7) ----
   // Needs an account that exists: a sign-up proof alone costs no puzzle, and each new name would be a fresh tag.
   'report.send'(c, f) {
@@ -282,7 +296,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, owners, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, owners, onClose, onAccountGone }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;

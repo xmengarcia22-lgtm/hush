@@ -72,7 +72,7 @@ export class Drops {
     if (typeof to !== 'string' || !HANDLE.test(to)) fail('invalid', 'drop: bad recipient');
     if (!noteOk(blob)) fail('invalid', 'drop: a note is a sealed blob of exactly the padded size');
     const dir = this.store.get('directory/' + to, SYSTEM).d;
-    if (!dir) fail('notfound', 'drop: no such recipient');
+    if (!dir || dir.gone !== undefined) fail('notfound', 'drop: no such recipient');   // a deleted account (SPEC.md 4.7) is no recipient
     if (this.needsPow(to, dir, now)) {
       const bits = this.limits.dropPowBits;
       const nonce = pow && isPlain(pow) ? pow.nonce : undefined;
@@ -90,6 +90,9 @@ export class Drops {
     this.store.set(parent + '/' + id, { epk: { x: blob.epk.x, y: blob.epk.y }, iv: blob.iv, ct: blob.ct, ts: hour }, SYSTEM);
     return { id };
   }
+
+  // Forgets a deleted account's mailbox allowance (SPEC.md 4.7).
+  forget(to) { this.recipient.map.delete(to); }
 
   // Forgets last hour's used proofs and idle buckets.
   prune(now = this.now()) {

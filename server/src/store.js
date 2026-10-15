@@ -761,6 +761,40 @@ export class Store extends EventEmitter {
   // Reports older than 90 days. Returns how many went.
   sweepReports(now = this.now()) { return Number(this.q.reportSweep.run(now).changes); }
 
+  // ---- deleting an account (SPEC.md 4.7) -------------------------------------------------
+  // In one transaction: the vault the page names, the mailbox, the secured mark, the search entry, and every row whose
+  // body or keyed tag names the account (phone entries, retired recovery records, link offers, blocks, reports it sent);
+  // then the profile becomes a tombstone that keeps only the public keys, so old messages still check out and the name
+  // is never taken again. Who may ask is decided in protocol.js (the account key itself); the key must still be current.
+  deleteAccount({ vault }, actor) {
+    if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
+    if (vault !== undefined && !(typeof vault === 'string' && ID.VAULT.test(vault))) fail('invalid', 'account.delete: bad vault id');
+    const h = actor.handle, now = this.now(), dp = parseDocPath('directory/' + h), dir = this._read(dp, now);
+    if (!dir || dir.gone !== undefined) fail('denied', 'there is no account to delete');
+    if (!actor.pub || !dir.sig || actor.pub.x !== dir.sig.x || actor.pub.y !== dir.sig.y) fail('denied', 'the account keys changed since this connection signed in; reconnect');
+    const tomb = { handle: h, gone: now, ecdh: dir.ecdh, sig: dir.sig, kv: dir.kv === undefined ? 1 : dir.kv };
+    if (Array.isArray(dir.prev)) tomb.prev = dir.prev;
+    validateForKind('directory', { ...dp, now, op: 'set', prev: dir }, tomb);
+    const sp = parseDocPath('search/' + h), hadSearch = !!this._read(sp, now), run = (sql, ...a) => this.db.prepare(sql).run(...a);
+    this._tx(() => {
+      if (vault !== undefined) this._remove(parseDocPath('vault/' + vault));
+      run('DELETE FROM docs WHERE parent = ?', 'inbox/' + h + '/c');
+      run('DELETE FROM docs WHERE path IN (?, ?)', 'secure/' + h, 'search/' + h);
+      run("DELETE FROM docs WHERE parent = 'phones' AND json_extract(d, '$.handle') = ?", h);
+      run("DELETE FROM docs WHERE parent IN ('recovery', 'linkreqs') AND json_extract(d, '$.h') = ?", h);
+      for (const { cid } of this.db.prepare('SELECT DISTINCT cid FROM bans').all()) this.q.banDel.run(cid, this._banTag(cid, h));
+      for (const r of this.db.prepare('SELECT id, cid, pid, tag FROM reports').all()) {
+        if (r.tag === keyedId(this.addrKey, 'report', h + '|' + r.cid + '|' + r.pid)) run('DELETE FROM reports WHERE id = ?', r.id);
+      }
+      this._write(dp, tomb, now);
+    });
+    const pp = parseDocPath('presence/' + h);
+    if (this._remove(pp)) this._emit(pp, null, 'del', actor);
+    if (hadSearch) this._emit(sp, null, 'del', actor);
+    this._emit(dp, tomb, 'set', actor);   // server.js leaves the 4401 path alone for a tombstone; protocol.js closes with 4410
+    return {};
+  }
+
   // ---- media over HTTP (SPEC.md 7.7) ---------------------------------------------------
   // A piece travels as raw bytes: a 12-byte iv, then the AES-GCM ciphertext. It is stored as before, iv apart.
   // `media_ids` keeps per media id only its stored size (for the chat's allowance) and, for a disappearing

@@ -47,7 +47,7 @@ function createHushAdapter(url,opts){
       e=>{if(e&&e.code==='version'){fatal='This copy of Hush is out of date for the server. Reload the page.';api.error=fatal;closed=true}try{sock.close()}catch{}})};
     sock.onmessage=ev=>{if(sock!==ws)return;onMessage(ev)};
     sock.onerror=()=>{};
-    sock.onclose=ev=>{if(sock!==ws)return;ws=null;onClose();if(opts.onClosed)try{opts.onClosed(ev&&ev.code,ev&&ev.reason)}catch{}}; // the code says why (4401: our keys are no longer the account's, SPEC.md 7.2)
+    sock.onclose=ev=>{if(sock!==ws)return;ws=null;const was=proven;onClose();if(opts.onClosed)try{opts.onClosed(ev&&ev.code,ev&&ev.reason,was)}catch{}}; // the code says why (4401: our keys are no longer the account's, SPEC.md 7.2; 4410: the account `was` signed in as was deleted)
   }
   function onMessage(ev){let f;try{f=JSON.parse(typeof ev.data==='string'?ev.data:String(ev.data))}catch{return}
     if(Number.isInteger(f.i)&&calls.has(f.i)){const c=calls.get(f.i);calls.delete(f.i);clearTimeout(c.timer);if(f.ok)c.resolve(f);else c.reject(Object.assign(mkErr(f.e,f.m),f.e==='pow'?{bits:f.bits,salt:f.salt}:{}));return}
@@ -100,6 +100,7 @@ function createHushAdapter(url,opts){
   api.setOwner=async(cid,cap)=>{await needOpen(cid);return call('chat.owner',{cid,cap})}; // the owner key, from the owner's new account secret
   api.banChat=async(cid,h,on)=>{await needOpen(cid);return call('chat.ban',{cid,h,on:!!on})}; // block a username from a group or channel, or let it back in: the server refuses a blocked member key
   api.report=(cid,pid,reason)=>call('report.send',{cid,pid,reason}); // a public channel's message: the chat, the message id and a reason, nothing else. No chat level needed
+  api.deleteAccount=o=>call('account.delete',{vault:o&&o.vault}); // the whole account, for good: only on a connection proven with the account key; the vault id goes too, since the server can't work it out
   // ---- media over HTTP (SPEC.md 7.7): this connection vouches for a short-lived ticket, then raw encrypted pieces
   // travel over plain HTTP requests. A ticket dies with its connection, so every reconnect starts afresh. ----
   const FETCH=opts.fetch||(typeof fetch!=='undefined'?fetch.bind(globalThis):null);
@@ -176,6 +177,7 @@ function createHushAdapter(url,opts){
     e=>{if(identity&&identity.h===h){
       if(e&&e.code==='unauth'&&/expired/.test(e.message||'')&&!staleRetry){staleRetry=true;setTimeout(()=>{if(identity&&identity.h===h)reconnectNow()},0);return} // the waiting callers stay waiting: the next hello signs in
       api.identityError=e;if(e&&e.code==='denied'&&opts.onDenied)try{opts.onDenied(e)}catch{} // the page looks whether the account's keys moved on without it (release 21)
+      if(e&&e.code==='gone'&&opts.onGone)try{opts.onGone(h)}catch{} // the account was deleted (release 31)
       settleProof(e)}}).finally(()=>{proofP=null});return proofP}
   const awaitProof=()=>new Promise((res,rej)=>proofWaiters.push({res,rej}));
   function settleProof(err){for(const w of proofWaiters.splice(0))err?w.rej(err):w.res()}
@@ -279,7 +281,8 @@ async function connectServer(){
     caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onPower:(cid,held)=>askPower(cid,held),onEvict:cid=>onChatEvicted(cid),
     onKv:kv=>{if(S.me&&!S.rekeying&&typeof kv==='number'&&kv>(S.me.kv||1))signedOutHere()}, // proven against newer keys than this device's: another device replaced them (release 21)
     onDenied:()=>keysMovedOn(), // a refused sign-in: see whether the profile's keys moved on without this device
-    onClosed:code=>{if(code===4401)keysMovedOn()}, // closed by the server for that very reason: look now, not after the next sign-in attempt
+    onClosed:(code,why,was)=>{if(code===4401)keysMovedOn();if(code===4410&&was)accountGone(was)}, // closed by the server for that very reason: look now, not after the next sign-in attempt
+    onGone:h=>accountGone(h), // a sign-in refused because the account was deleted
     onBadges:b=>{S.badges=b||{};if(!S.me)return;renderList();if(S.chan){S.rendered=null;renderConv()}if(S.tab==='profile')setTab('profile')}}); // the operator's badge list came with the handshake
   await Promise.race([db.ready,new Promise(r=>setTimeout(r,5000))]);
   if(!db.online)SRV_ERR=db.error||unreachable();
