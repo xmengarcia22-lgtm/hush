@@ -154,7 +154,7 @@ test('the wiring for the menu swipe: where it may start, and it follows the fing
   assert.match(src, /plan\.node\.style\.animation='none';plan\.node\.style\.transform='translateX\(-100%\)'/, 'starts shut, without its own slide-in');
   assert.match(src, /if\(p\.kind==='menu'\)\{p\.node\.style\.transform=`translateX\(\$\{Math\.min\(0,d-p\.width\)\}px\)`/);
   assert.match(src, /if\(p\.kind==='menu'\)\{if\(go\)\{[^}]*\}else p\.bd\._close\(\);tidy\(p\);return\}/, 'let go early and it closes, through the same close as a tap');
-  assert.match(src, /\$\('#menuBtn'\)\.onclick=openDrawer;/, 'the menu button still opens it');
+  assert.match(src, /\$\('#menuBtn'\)\.onclick=\(\)=>\{haptic\(\);openDrawer\(\)\};/, 'the menu button still opens it, with a light tap');
 });
 
 test('the back step a swipe takes matches the Back buttons', () => {

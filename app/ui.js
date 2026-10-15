@@ -206,8 +206,8 @@ const fmtTime=ts=>new Date(ts).toLocaleTimeString([], {hour:'numeric',minute:'2-
 function fmtListTime(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return fmtTime(ts);if(n-d<6*864e5)return d.toLocaleDateString([], {weekday:'short'});return d.toLocaleDateString([], {month:'short',day:'numeric'})}
 function fmtDay(ts){const d=new Date(ts),n=new Date();if(d.toDateString()===n.toDateString())return 'Today';const y=new Date(n);y.setDate(n.getDate()-1);if(d.toDateString()===y.toDateString())return 'Yesterday';return d.toLocaleDateString([], {month:'long',day:'numeric'})}
 // A short tap: the iPhone app's native Haptics plugin, else the Vibration API (Android and others; iPhone browsers have
-// none, so nothing happens there). Never with reduced motion. firm: destructive actions and errors.
-const haptic=firm=>{try{if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;const C=window.Capacitor;
+// none, so nothing happens there). Reduce Motion doesn't stop it: iOS keeps haptics on with it. firm: destructive actions and errors.
+const haptic=firm=>{try{const C=window.Capacitor;
   if(C&&C.isNativePlatform&&C.isNativePlatform())C.nativePromise('Haptics','impact',{style:firm?'MEDIUM':'LIGHT'}).catch(()=>{}); // an app build without the plugin refuses: no buzz
   else if(navigator.vibrate)navigator.vibrate(firm?20:10)}catch{}};
 const toastErr=(msg,action,fn)=>{haptic(true);toast(msg,action,fn)}; // a toast that says something failed
@@ -279,8 +279,8 @@ function listBack(){ // one step back on the list: a settings page or the archiv
   if((S.tab==='profile'&&isSettingsPage())||(S.tab==='chats'&&S.showArchived))swipeBack();else setTab('chats',-1)}
 /* ---------- list pane ---------- */
 $('#menuBtn').innerHTML=I.menu;$('#tabChatsIc').innerHTML=I.chatsIc;$('#tabContactsIc').innerHTML=I.peopleIc;$('#tabProfileIc').innerHTML=I.contactsIc;$('#searchIc').innerHTML=I.search;$('#newBtn').innerHTML=I.pencil;
-$('#menuBtn').onclick=openDrawer;$('#newBtn').onclick=()=>S.tab==='contacts'?openEditContact(null):openNewChat();
-document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{const d=TABS.indexOf(b.dataset.tab)-TABS.indexOf(S.tab);if(d)setTab(b.dataset.tab,Math.sign(d));else if(b.dataset.tab==='profile'&&isSettingsPage()){S.profilePage='main';setTab('profile')}else if(b.dataset.tab==='chats'&&S.showArchived){S.showArchived=false;setListTitle();renderList()}});
+$('#menuBtn').onclick=()=>{haptic();openDrawer()};$('#newBtn').onclick=()=>S.tab==='contacts'?openEditContact(null):openNewChat();
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{const d=TABS.indexOf(b.dataset.tab)-TABS.indexOf(S.tab);if(d){haptic();setTab(b.dataset.tab,Math.sign(d))}else if(b.dataset.tab==='profile'&&isSettingsPage()){S.profilePage='main';setTab('profile')}else if(b.dataset.tab==='chats'&&S.showArchived){S.showArchived=false;setListTitle();renderList()}});
 $('#q').oninput=e=>{S.query=e.target.value.trim().toLowerCase();S.tab==='contacts'?renderContacts():renderList()};
 
 const lastRead=k=>ls.get(`hush:read:${S.me.handle}:${k}`,0);
@@ -2420,6 +2420,17 @@ function settingsAdvanced(body,me){
       catch{P().backup=!on;cb.checked=!on;saveContacts();toastErr('That didn\u2019t save. Try again.')}cb.disabled=false};
     tg.append(cb,el('span',null,'Message backup'));
     body.append(tg,el('p','hint','On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.'))}
+  {// TEMPORARY (remove once haptics work): what the iPhone app gives this page, and one direct Haptics call
+    const tv=html('button','menu-item flush',I.sliders+'<span>Test vibration</span>'),out=el('p','hint');
+    tv.onclick=async()=>{const C=window.Capacitor,r=[];
+      r.push('Capacitor: '+(C?(C.getPlatform?C.getPlatform():'?'):'not found'),'Native: '+!!(C&&C.isNativePlatform&&C.isNativePlatform()),
+        'Plugins: '+((C&&C.PluginHeaders||[]).map(h=>h.name).join(', ')||'none'),'Reduce Motion: '+matchMedia('(prefers-reduced-motion: reduce)').matches);
+      out.textContent=r.join(' · ')+' · Calling…';
+      try{if(!C||!C.nativePromise)throw new Error('no native bridge');
+        await Promise.race([C.nativePromise('Haptics','impact',{style:'HEAVY'}),new Promise((_,no)=>setTimeout(()=>no(new Error('no answer in 3 s')),3000))]);r.push('Call: OK')}
+      catch(e){r.push('Call failed: '+((e&&(e.message||e.code))||String(e)))}
+      out.textContent=r.join(' · ')};
+    body.append(tv,out)}
   body.append(el('div','menu-label flush','Security'));
   {const al=html('button','menu-item flush',I.lockMd+'<span>Lock Hush</span>');al.append(el('span','role',lsPw()?'Password':lockCfg()?'PIN':'Off'));al.onclick=openAppLock;body.append(al)}
   body.append(el('div','menu-label flush','Encryption'));
