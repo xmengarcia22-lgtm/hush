@@ -2655,21 +2655,24 @@ function swipeBack(){ // the back step a sub-page takes, the same as its Back bu
   if(S.tab==='profile'&&isSettingsPage()){S.profilePage=S.profilePage==='settings'?'main':'settings';setTab('profile',-1);return}
   if(S.tab==='chats'&&S.showArchived){S.showArchived=false;setListTitle();renderList();const v=$('#threads');v.classList.remove('tab-in-l','tab-in-r');void v.offsetWidth;v.classList.add('tab-in-l')}
 }
-// Pull to refresh on the chat list: the circle follows the finger, spins briefly and springs back. Messages already arrive
-// live, so the refresh only redraws the list and re-reads profiles; the spin shows even when nothing is new.
+// Pull to refresh on the chat list: a gap opens above the rows (header and search stay put) with an iOS-style spinner whose
+// ticks appear as you pull; past the line it spins briefly and the rows slide back. Messages already arrive live, so the
+// refresh only redraws the list and re-reads profiles; the spin shows even when nothing is new.
 function setupPullRefresh(){
-  const box=$('#threads'),ptr=el('div','ptr'),dot=el('span','spin');ptr.append(el('i'));ptr.firstChild.append(dot);box.before(ptr);
-  const GO=60,put=(v,ease)=>{const w=ptr.firstChild;w.style.transition=ease?'transform .25s ease-out,opacity .25s':'none';
-    w.style.transform=`translateY(${v}px)`;w.style.opacity=Math.min(1,v/GO);dot.style.transform=`rotate(${v*5}deg)`};
+  const box=$('#threads'),ptr=el('div','ptr');box.before(ptr);
+  ptr.innerHTML='<svg viewBox="0 0 28 28" aria-hidden="true">'+[0,1,2,3,4,5,6,7].map(i=>`<line x1="14" y1="3" x2="14" y2="8.5" transform="rotate(${i*45} 14 14)" opacity="${1-(8-i)%8*.1}"/>`).join('')+'</svg>';
+  const ticks=[...ptr.querySelectorAll('line')],GO=60,put=(v,ease)=>{ptr.style.transition=ease?'height .25s ease-out':'none';ptr.style.height=v+'px';
+    box.classList.toggle('pull',v>0);ticks.forEach((t,i)=>t.style.visibility=i<v/GO*8?'':'hidden')};
   let x0=0,y0=null,d=0,busy=false;
   box.addEventListener('touchstart',e=>{d=0;y0=!busy&&box.scrollTop<=0&&e.touches.length===1?e.touches[0].clientY:null;if(y0!=null)x0=e.touches[0].clientX},{passive:true});
   box.addEventListener('touchmove',e=>{if(y0==null)return;const t=e.touches[0],dy=t.clientY-y0;
     if(box.scrollTop>0||Math.abs(t.clientX-x0)>Math.abs(dy)){y0=null;put(0,1);return} // the list scrolled, or it's a sideways swipe
     d=Math.max(0,Math.min(90,dy*.5));put(d)},{passive:true});
   box.addEventListener('touchend',async()=>{if(y0==null)return;y0=null;if(d<GO){put(0,1);return}
-    busy=true;haptic();put(GO,1);dot.classList.add('go');
+    busy=true;haptic();put(GO,1);ptr.classList.add('go');
     await Promise.all([Promise.all([renderList(),refreshDir()]).catch(()=>{}),new Promise(r=>setTimeout(r,450))]);
-    dot.classList.remove('go');put(0,1);busy=false});
+    ptr.classList.remove('go');put(0,1);busy=false});
+  box.addEventListener('touchcancel',()=>{if(y0!=null){y0=null;put(0,1)}});
 }
 function setupSwipeNav(){
   const app=$('#app'),list=document.querySelector('.pane-list'),chat=$('#chatPane');let g=null,quietUntil=0;
