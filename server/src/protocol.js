@@ -63,6 +63,7 @@ function takeWrite(c, p) {
 // powerNeedsSecure: false switches the rule off for development and tests only; production ignores it.
 const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
+const hasAccount = (c) => !!c.proven && !!c.ctx.store.get('directory/' + c.proven, SYSTEM).d;
 
 const HANDLERS = {
   hello(c, f) {
@@ -252,6 +253,21 @@ const HANDLERS = {
     return c.ctx.store.setBan({ cid: f.cid, h: f.h, on: f.on }, c.actor());
   },
 
+  // ---- reports (SPEC.md 8.7) ----
+  // Needs an account that exists: a sign-up proof alone costs no puzzle, and each new name would be a fresh tag.
+  'report.send'(c, f) {
+    if (!hasAccount(c)) fail('unauth', 'sign in first');
+    if (!c.reports.take()) fail('ratelimit', 'too many reports; slow down');
+    return c.ctx.store.report({ cid: f.cid, pid: f.pid, reason: f.reason }, c.actor());
+  },
+  // Only for the operator's own accounts (HUSH_OWNERS), whatever HUSH_AUTHZ says.
+  'report.list'(c, f) {
+    if (!hasAccount(c) || !(c.ctx.owners || []).includes(c.proven)) fail('denied', 'not allowed');
+    const before = f.before === undefined ? Number.MAX_SAFE_INTEGER : f.before, limit = f.limit === undefined ? 50 : f.limit;
+    if (!Number.isFinite(before) || !Number.isInteger(limit) || limit < 1) fail('invalid', 'report.list: bad before or limit');
+    return { reports: c.ctx.store.reports({ before, limit: Math.min(limit, 200) }) };
+  },
+
   // ---- media over HTTP (SPEC.md 7.7): a short-lived ticket that lets HTTP requests act with this connection's
   // level for one chat. The level is checked again on every request, so the ticket grants nothing by itself.
   'media.ticket'(c, f) {
@@ -266,7 +282,7 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, onClose }
+  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, owners, onClose }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
@@ -297,6 +313,7 @@ export class Connection {
     this.posts = new TokenBucket(L.postsPerMin, L.postsPerMin / 60);
     this.sides = new TokenBucket(L.sideWritesPerMin, L.sideWritesPerMin / 60);
     this.creates = new TokenBucket(L.chatCreatesPerDay, L.chatCreatesPerDay / 86400);
+    this.reports = new TokenBucket(L.reportsPerMin, L.reportsPerMin / 60);
     this.helloTimer = setTimeout(() => this.close('hello timeout'), L.helloDeadlineMs);
     this.idleTimer = null;
     this.touch();

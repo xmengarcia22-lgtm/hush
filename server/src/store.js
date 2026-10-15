@@ -2,7 +2,8 @@
 //   docs    – SQLite table `docs` in hush.db (everything durable)
 //   media   – SQLite tables `chunks` (encrypted media pieces) and `media_ids` (size and expiry per media id) in media.db
 //   memory  – presence and typing, never written to disk
-// plus the `chats` table: per chat, the hashes of its room keys and its epoch; and `bans`: keyed tags of blocked usernames.
+// plus the `chats` table: per chat, the hashes of its room keys and its epoch; `bans`: keyed tags of blocked usernames;
+// and `reports`: the server's own copies of reported public-channel posts, without the reporter (SPEC.md 8.7).
 //
 // Every successful write emits a `change` event after it is committed; the
 // subscription registry turns those into pushes. A key rotation or admin change
@@ -58,6 +59,10 @@ CREATE TABLE IF NOT EXISTS chats(
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gone(k TEXT PRIMARY KEY, ts REAL NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS bans(cid TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(cid, tag)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, ts REAL NOT NULL, exp REAL NOT NULL, cid TEXT NOT NULL, pid TEXT NOT NULL,
+  reason TEXT NOT NULL, name TEXT, post TEXT NOT NULL, key TEXT, tag TEXT NOT NULL UNIQUE) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS reports_ts ON reports(ts);
+CREATE INDEX IF NOT EXISTS reports_exp ON reports(exp);
 `;
 
 const SCHEMA_MEDIA = `
@@ -92,6 +97,8 @@ const SCHEMA_VERSION = '2';
 const ADD_KINDS = new Set(['posts', 'comments']);
 const EXP_KINDS = new Set(['posts', 'comments']);
 const SEALED_KINDS = new Set(['posts', 'comments']);
+const REPORT_REASONS = new Set(['spam', 'abuse', 'illegal', 'other']);
+const REPORT_TTL_MS = 90 * 86400_000;   // a report is kept 90 days, then swept (SPEC.md 8.7)
 const TOP_LITERAL = /^[a-z]+$/;   // top-level collection names are safe to inline into SQL
 const PREVIEW_FIELDS = ['type', 'visibility', 'epoch', 'keys', 'akeys', 'openKeys'];
 const PUBLIC_PREVIEW_FIELDS = ['name', 'desc', 'photo', 'owner', 'admins', 'ts', 'last'];
@@ -235,6 +242,9 @@ export class Store extends EventEmitter {
       banDel: this.db.prepare('DELETE FROM bans WHERE cid = ? AND tag = ?'),
       banCount: this.db.prepare('SELECT COUNT(*) AS n FROM bans WHERE cid = ?'),
       banDelChat: this.db.prepare('DELETE FROM bans WHERE cid = ?'),
+      reportPut: this.db.prepare('INSERT OR IGNORE INTO reports(id, ts, exp, cid, pid, reason, name, post, key, tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+      reportList: this.db.prepare('SELECT id, ts, cid, pid, reason, name, post, key FROM reports WHERE ts < ? AND exp >= ? ORDER BY ts DESC, id DESC LIMIT ?'),
+      reportSweep: this.db.prepare('DELETE FROM reports WHERE exp < ?'),
       chunkGet: this.media.prepare('SELECT i, iv, d FROM chunks WHERE cid = ? AND mid = ? AND i = ?'),
       chunkPut: this.media.prepare('INSERT INTO chunks(cid, mid, i, iv, d) VALUES (?, ?, ?, ?, ?) ON CONFLICT(cid, mid, i) DO UPDATE SET iv = excluded.iv, d = excluded.d'),
       chunkDel: this.media.prepare('DELETE FROM chunks WHERE cid = ? AND mid = ? AND i = ?'),
@@ -725,6 +735,31 @@ export class Store extends EventEmitter {
     this.emit('evict', { cid, keep: actor.conn || null, h });
     return {};
   }
+
+  // ---- reports (SPEC.md 8.7) ----------------------------------------------------------
+  // Only a post in a public group or channel can be reported, judged from the server's own record (a crafted client can
+  // make a DM or group "public"). What is kept is the server's own copy of the post and that epoch's published key,
+  // never anything the reporter sent; the reporter is only a keyed tag (like bans), so the same report twice is one row.
+  report({ cid, pid, reason }, actor) {
+    if (!actor || actor === SYSTEM || !actor.handle) fail('unauth', 'sign in first');
+    if (typeof cid !== 'string' || !ID.CID.test(cid) || typeof pid !== 'string' || !ID.ITEM_ID.test(pid) || !REPORT_REASONS.has(reason)) fail('invalid', 'report.send: bad chat id, message id or reason');
+    const { doc, row } = this._chatDoc(cid), now = this.now();
+    if (!doc || !row) fail('notfound', 'no such chat');
+    if (row.type === 'dm' || doc.visibility !== 'public') fail('denied', 'only posts in public channels can be reported');
+    const r = this.q.get.get(`channels/${cid}/posts/${pid}`), post = r ? JSON.parse(r.d) : null;
+    if (!post || post.sv === 1 || post.del === true || (post.exp > 0 && post.exp < now)) fail('notfound', 'no such message');
+    const key = isPlain(doc.openKeys) && typeof doc.openKeys[post.e] === 'string' ? doc.openKeys[post.e] : null;
+    const tag = keyedId(this.addrKey, 'report', actor.handle + '|' + cid + '|' + pid);
+    this.q.reportPut.run(genId(), now, now + REPORT_TTL_MS, cid, pid, reason, typeof doc.name === 'string' ? doc.name : null, r.d, key, tag);
+    return {};
+  }
+
+  // Newest first, up to `limit` older than `before` (ms). Whoever may call this is decided in protocol.js; tags never leave.
+  reports({ before, limit }, now = this.now()) {
+    return this.q.reportList.all(before, now, limit).map((x) => ({ id: x.id, ts: x.ts, cid: x.cid, pid: x.pid, reason: x.reason, name: x.name, post: JSON.parse(x.post), key: x.key }));
+  }
+  // Reports older than 90 days. Returns how many went.
+  sweepReports(now = this.now()) { return Number(this.q.reportSweep.run(now).changes); }
 
   // ---- media over HTTP (SPEC.md 7.7) ---------------------------------------------------
   // A piece travels as raw bytes: a 12-byte iv, then the AES-GCM ciphertext. It is stored as before, iv apart.

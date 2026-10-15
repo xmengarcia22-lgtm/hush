@@ -201,7 +201,7 @@ function channels(ctx, d) {
     if (d.admins !== undefined && !(Array.isArray(d.admins) && d.admins.every((h) => ID.HANDLE.test(h)))) bad(w, 'admins');
     if (d.name !== undefined && !str(d.name, 0, 60)) bad(w, 'name');
     if (d.desc !== undefined && !str(d.desc, 0, 200)) bad(w, 'desc');
-    if (d.photo !== undefined && !str(d.photo, 0, 200 * KB)) bad(w, 'photo');
+    if (d.photo != null && !str(d.photo, 0, 200 * KB)) bad(w, 'photo');   // null: no photo (the app creates a channel with photo:null)
   }
 }
 

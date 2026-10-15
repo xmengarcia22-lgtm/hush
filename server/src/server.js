@@ -191,7 +191,7 @@ export function createServer(cfg) {
     const address = clientAddress(req, trustProxy);
     const addrTag = tagger.tag(address), dayTag = tagger.tagDay(address);   // the address itself goes no further
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
+      const conn = new Connection(ws, { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, owners: cfg.owners || [], onClose: (c) => { conns.delete(c); tickets.dropConn(c); } });
       conns.add(conn);
     });
   };
@@ -214,13 +214,14 @@ export function createServer(cfg) {
   every(Math.max(250, Math.min(5000, limits.typingTtlMs)), () => store.prune(), 'prune');
   every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); pwMisses.prune(); pwRepeats.prune(); invites.prune(); drops.prune(); }, 'rotate');
   every(86400_000, () => { tagger.rotateDay(); signups.prune(); }, 'rotateDay');
-  every(3600_000, () => { store.sweepInbox(); store.sweepGone(); }, 'inboxSweep');   // notes older than 30 days (SPEC.md 8.6)
+  every(3600_000, () => { store.sweepInbox(); store.sweepGone(); store.sweepReports(); }, 'inboxSweep');   // notes older than 30 days, reports older than 90 (SPEC.md 8.6)
 
   return {
     store, subs, conns, limits, tagger, authz, staticRoot, drops, tickets,
     sweepInbox: (t) => store.sweepInbox(t),
     sweepMedia: (t) => store.sweepMedia(t),
     sweepLinkreqs: (t) => store.sweepLinkreqs(t),
+    sweepReports: (t) => store.sweepReports(t),
     tlsPort: () => (https && https.listening ? https.address().port : null),
     async listen() {
       const one = (s, port, host) => new Promise((resolve, reject) => {

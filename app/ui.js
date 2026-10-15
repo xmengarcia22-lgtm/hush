@@ -30,6 +30,7 @@ const I={
  link:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></svg>',
  smile:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5v.5M15 9.5v.5"/></svg>',
  chart:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 20V11M12 20V4M18 20v-6"/></svg>',
+ flag:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
  trash:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
  group:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></svg>',
  groupSm:'<svg class="mega-sm" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="8" r="4"/><path d="M1.5 21a7.5 7.5 0 0 1 15 0z"/><path d="M16 4a4 4 0 0 1 0 8M18.5 14a7.5 7.5 0 0 1 4 7h-3" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
@@ -313,6 +314,8 @@ const canPin=c=>isMember(c)&&(typeOf(c)==='dm'||isAdmin(c));
 // Who may delete a message for everyone: its author; outside DMs an admin, but never the owner's, which only the owner may.
 // shortcut: the page's rule only; the server lets any admin delete any message, since it never learns who wrote what.
 const mayDeleteForAll=({t,mine,admin,owner,byOwner})=>mine||(admin&&t!=='dm'&&(owner||!byOwner));
+// Only messages in a public group or channel can be reported: the server can't read anything else, so it couldn't check a report.
+const mayReport=(c,p,mine)=>typeOf(c)!=='dm'&&c.visibility==='public'&&!mine&&p.sv!==1&&!p.svc&&!p.del&&!!p._id;
 const mentionsMe=t=>!!(t&&S.me&&new RegExp('(^|[^\\p{L}\\p{N}_@])@'+S.me.handle+'(?![\\p{L}\\p{N}_])','iu').test(t));
 const draftKey=cid=>`hush:draft:${S.me.handle}:${cid}`;
 function fmtWhen(ts){const d=new Date(ts),n=new Date(),tm=fmtTime(ts);if(d.toDateString()===n.toDateString())return 'today at '+tm;
@@ -407,7 +410,7 @@ function searchExtras(box,items){
   const q=S.query.replace(/^@/,'');if(!q)return;
   const now=Date.now(),pre='p:'+S.me.handle+':';
   const hits=[...(S.msgIdx||new Map()).entries()]
-    .filter(([k,m])=>k.startsWith(pre)&&!(m.exp&&m.exp<=now)&&m.text&&m.text.toLowerCase().includes(q)&&convById(m.cid)&&!isRequest(convById(m.cid)))
+    .filter(([k,m])=>k.startsWith(pre)&&!(m.exp&&m.exp<=now)&&m.text&&m.text.toLowerCase().includes(q)&&!(m.from&&m.from!==S.me.handle&&isBlocked(m.from))&&convById(m.cid)&&!isRequest(convById(m.cid)))
     .map(([,m])=>m).sort((a,b)=>b.ts-a.ts).slice(0,40);
   if(hits.length){box.append(el('div','menu-label','Messages'));
     hits.forEach(m=>{const c=convById(m.cid),t=typeOf(c),b=el('button','thread'),main=el('div','t-main'),top=el('div','t-row'),bot=el('div','t-row');
@@ -467,6 +470,13 @@ function chatMenu(anchor,c){
 function deleteMenu(anchor,opts){ // "Delete for me" / "Delete for everyone": picking one is the confirmation
   closeMenus();const m=el('div','popmenu msgmenu');
   opts.forEach(([label,fn])=>{const b=html('button','menu-item danger',I.trash);b.append(el('span',null,label));b.onclick=()=>{m.remove();haptic(true);fn()};m.append(b)});
+  placeMenu(m,anchor);
+}
+function reportMenu(anchor,c,p){ // picking a reason sends it: the server gets the chat, the message id and the reason, nothing else
+  closeMenus();const m=el('div','popmenu msgmenu');m.append(el('div','menu-label','Report this message'));
+  [['spam','Spam'],['abuse','Abuse'],['illegal','Illegal content'],['other','Other']].forEach(([r,label])=>{const b=html('button','menu-item',I.flag);b.append(el('span',null,label));
+    b.onclick=async()=>{m.remove();try{await S.db.report(c.id,p._id,r);toast('Reported. Thanks.')}
+      catch(e){const k=e&&e.code;toastErr(k==='denied'||k==='notfound'?'This can\u2019t be reported any more.':k==='ratelimit'?'Too many reports. Try again later.':'Couldn\u2019t send the report. Check your connection and try again.')}};m.append(b)});
   placeMenu(m,anchor);
 }
 // Deleting a whole chat. A DM: for me hides it; for everyone takes my messages from both sides (each person deletes only
@@ -609,7 +619,7 @@ async function computeUnread(){
     if(!l||l.from===S.me.handle||l.ts<=lr||c.id===S.chan){S.unread.set(c.id,0);S.mentions.set(c.id,0);return}
     const k=c.id+':'+l.ts+':'+lr;if(S.unreadKey.get(c.id)===k)return;S.unreadKey.set(c.id,k);
     try{const s=await S.db.collection(`channels/${c.id}/posts`).where('ts','>',lr).limit(100).get();
-      const ds=(await unsealAll(c,s.docs.map(d=>Object.assign({_id:d.id},d.data())))).filter(d=>d.from!==S.me.handle&&!d.svc&&!d.del&&d.ts<=now+3000&&!(d.exp&&d.exp<=now));
+      const ds=(await unsealAll(c,s.docs.map(d=>Object.assign({_id:d.id},d.data())))).filter(d=>d.from!==S.me.handle&&!(d.from&&isBlocked(d.from))&&!d.svc&&!d.del&&d.ts<=now+3000&&!(d.exp&&d.exp<=now));
       S.unread.set(c.id,ds.length);let men=0;
       if(typeOf(c)==='group')for(const d of ds){const o=await openPost(c,d);if(o.text&&mentionsMe(o.text))men++}
       S.mentions.set(c.id,men)}catch{S.unread.set(c.id,1)}
@@ -970,6 +980,7 @@ async function drawPinBar(){
   if(!pins.length){pb.hidden=true;return}
   const idx=S.pinIdx%pins.length,id=pins[idx];let p=allPosts().find(x=>x._id===id);
   if(!p&&S.db){if(!S.pinCache.has(id))S.pinCache.set(id,S.db.doc(`channels/${c.id}/posts/${id}`).get().then(s=>s.exists?unsealPost(c,Object.assign({_id:id},s.data())):null).catch(()=>null));p=await S.pinCache.get(id)}
+  if(p&&p.from&&p.from!==S.me.handle&&isBlocked(p.from))p=null; // someone I blocked: shown as unavailable
   const o=p?await openPost(c,p):null;if(curConv()!==c&&curConv()?.id!==c.id)return;
   pb.replaceChildren();pb.hidden=false;pb.insertAdjacentHTML('beforeend',I.pin);
   const m=el('div','t-main');m.append(el('div','pb-title','Pinned message'+(pins.length>1?` ${idx+1} of ${pins.length}`:'')),el('div','t-sub',p?snippet(o):'Message no longer available'));pb.append(m);
@@ -1801,6 +1812,8 @@ function msgMenu(anchor,p,o,quiet){ // quiet: a press-and-hold already gave the 
   if(o.text!=null&&!o.poll)items.push([I.fwd,'Forward',()=>openForward(p,o)]);
   if(o.text)items.push([I.copy,'Copy text',async()=>{try{await navigator.clipboard.writeText(plainText(o.text));haptic();toast('Copied')}catch{toastErr('Copying isn\u2019t allowed here. Press and hold the text to select it.')}}]);
   if(mine&&o.text!=null&&!o.poll&&S.comp)items.push([I.edit,'Edit',()=>setEdit(p,o)]);
+  if(mayReport(c,p,mine))items.push([I.flag,'Report',()=>reportMenu(anchor,c,p)]);
+  if(!mine&&validHandle(p.from)&&!isSelf(c)&&p.sv!==1&&!p.svc)items.push(isBlocked(p.from)?[I.x,'Unblock '+displayName(p.from),()=>{unblockPeer(p.from);toast(displayName(p.from)+' unblocked')}]:[I.x,'Block '+displayName(p.from),()=>confirmBlockPerson(p.from),'danger']);
   if(o.poll&&!(c.closed&&c.closed[p._id])&&(mine||admin))items.push([I.chart,'Stop poll',async()=>{try{await S.db.doc('channels/'+c.id).update({closed:{[p._id]:true}})}catch{toastErr('Couldn\u2019t stop the poll. Try again.')}}]);
   const forAll=['Delete for everyone',async()=>{try{await deletePost(c.id,p)}catch{toastErr('Couldn\u2019t delete it. Try again.')}}];
   items.push([I.trash,'Delete',()=>deleteMenu(anchor,isSelf(c)?[['Delete',forAll[1]]]:[['Delete for me',()=>hideMsg(c.id,p._id)],...(mayDeleteForAll({t,mine,admin,owner:isOwner(c),byOwner:!!c.owner&&p.from===c.owner})?[forAll]:[])]),'danger']);
@@ -3933,7 +3946,8 @@ async function noteOk(p){
 const isBlocked=h=>!!(h&&S.prefs&&Array.isArray(S.prefs.blocked)&&S.prefs.blocked.includes(h));
 const isChatBlocked=cid=>!!(S.prefs&&Array.isArray(S.prefs.blockedChats)&&S.prefs.blockedChats.includes(cid));
 const hiddenConv=c=>!!c&&(isChatBlocked(c.id)||clearedConv(c)||(typeOf(c)==='dm'&&!isSelf(c)&&isBlocked(dmPeer(c))));
-function afterBlockChange(){if(S.chan&&hiddenConv(curConv()))closeConv();else if(S.chan){S.rendered=null;applyExpiry();renderConv()}renderList();updateTitle();if(S.tab==='profile')setTab('profile')}
+function afterBlockChange(){S.unreadKey.clear();computeUnread(); // counts made before the change were cached with the old list
+  if(S.chan&&hiddenConv(curConv()))closeConv();else if(S.chan){S.rendered=null;applyExpiry();renderConv()}renderList();updateTitle();if(S.tab==='profile')setTab('profile')}
 function blockPeer(h){haptic(true);const b=P().blocked||(P().blocked=[]);if(!b.includes(h))b.push(h);saveContacts();afterBlockChange()}
 function unblockPeer(h){const b=P().blocked||[];P().blocked=b.filter(x=>x!==h);saveContacts();afterBlockChange();restoreDm(h).catch(()=>{})}
 /* ===== HUSH UNBLOCK BEGIN ===== */

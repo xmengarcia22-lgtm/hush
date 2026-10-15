@@ -104,6 +104,14 @@ A public channel is meant for anyone to read, so its key is stored on the server
 and anyone with its data, can read every post. Only private groups, private channels and one-on-one chats
 are end-to-end encrypted.
 
+Reporting a post in a public group or channel keeps a copy of that post (which the server could already read), its
+key, the channel's name and the reason on the server for 90 days, even if the post is later deleted or the
+channel turns private. The server does not store who reported, only a tag keyed with the server's secret
+`addr.key`, used to count the same person's report of the same post once. Someone who holds that secret, such
+as the live operator, can test whether a guessed user reported a given post, the same as with blocked users.
+One-on-one chats and private groups and channels can never be reported: the server checks its own record of
+the chat, not what the app says. Only the usernames in `HUSH_OWNERS` can read reports (`SPEC.md` 8.7).
+
 ### Other limits
 
 - **One device, whole account.** Every device holds the account's private keys, so one compromised device

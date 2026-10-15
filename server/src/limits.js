@@ -68,6 +68,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   searchPerMin: 30,             // per connection
   postsPerMin: 60,              // posts and comments per connection (SPEC.md 9.4 counts per chat; a connection is one person)
   sideWritesPerMin: 120,        // reactions, read marks and typing marks per connection
+  reportsPerMin: 5,             // report.send per connection (SPEC.md 8.7)
   invitesPerMinPerAddr: 20,     // chat.invite lookups per address tag (SPEC.md 5.5)
   leaveRotateMaxEpoch: 23,      // the highest epoch a rotation for someone leaving may reach; 24 to 31 stay for removals (SPEC.md 5.6)
   powerNeedsSecure: true,       // owners and admins of groups and channels need a secured account (SPEC.md 4.6); always on in production

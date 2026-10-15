@@ -36,6 +36,7 @@ const lines = [
   cfg.origins === 'any' ? 'Allowed origins: any (HUSH_ORIGINS=*; never in production)' : cfg.origins.length ? `Allowed origins: ${cfg.origins.join(', ')}, and pages served from this host` : 'Allowed origins: pages served from this host only (set HUSH_ORIGINS for others)',
   cfg.trustProxy ? 'Client addresses: taken from X-Forwarded-For (behind Caddy)' : 'Client addresses: the socket\'s own (set HUSH_TRUST_PROXY=1 behind Caddy)',
   Object.keys(cfg.badges || {}).length ? `Badges: ${Object.entries(cfg.badges).map(([h, b]) => `@${h} ${b}`).join(', ')}` : 'Badges: none (set HUSH_BADGES to give some)',
+  cfg.owners && cfg.owners.length ? `Report readers: ${cfg.owners.map((h) => '@' + h).join(', ')}` : 'Report readers: none (set HUSH_OWNERS to read reports)',
 ];
 if (cfg.staticDir) lines.push(`Serving the app from: ${cfg.staticDir}`, `Open the app at: http://${host}:${port}/`);
 if (tls) {

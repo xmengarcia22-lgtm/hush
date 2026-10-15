@@ -338,6 +338,8 @@ Text WebSocket frames, UTF-8 JSON, at most 1 MB each. Every client frame carries
 | `chat.ban` | `cid, h, on` | `{ ok }`. Blocks (`on: true`) or unblocks (`on: false`) username `h` in a group or channel (5.6): its member key no longer opens the chat. Admin level; not for DMs, not to block in a public channel, and not from an admin who is blocked; either way twice is fine. At most `bansPerChat` (1000) per chat from admins, twice that from the owner, `toolarge` past that. Blocking evicts that person's connections that hold the chat at member level. |
 | `signup.pow` | – | `{ salt, bits }`: the puzzle a new account solves before its profile may be created (9.4). The same puzzle comes back in the `pow` refusal of a `set` on `directory/<h>` sent without a solution; the page asks early and solves out of sight. The `set` carries the answer as `pow`. |
 | `media.ticket` | `cid` | `{ t, exp, limits }`. A media ticket for HTTP requests about this chat (7.7). Needs a proven connection holding a level for `cid`. |
+| `report.send` | `cid, pid, reason` | `{ ok }`. Reports post `pid` of a public group or channel (8.7); `reason` is `spam`, `abuse`, `illegal` or `other`. Needs a connection proven for an existing account (`unauth` otherwise), not `chat.open`. `denied` for a DM or a private chat, judged from the server's own record; `notfound` for no such chat, or no such post, a service note or a deleted post; `invalid` for a bad id or reason; `ratelimit` past `reportsPerMin`. The same person reporting the same post again is a no-op answered `ok`. |
+| `report.list` | `before?, limit?` | `{ reports: [{ id, ts, cid, pid, reason, name, post, key }] }`, newest first, `limit` (default 50, at most 200) older than `before` (ms). Only for a connection proven for an existing account listed in `HUSH_OWNERS` (8.7), whatever `HUSH_AUTHZ` says; `denied` for everyone else. |
 | `mail.*` | never needed: notes are watched with `sub` on `inbox/<h>/c` and written with `POST /drop` (section 6); answered `invalid` | – |
 | `call.*` | reserved for stage 10 (16.2); answered `invalid` until then | – |
 | `ping` | – | `{ ok, now }` |
@@ -462,12 +464,24 @@ WAL journal, `synchronous = NORMAL`, `secure_delete = ON` so deleted rows are ze
 | Job | Interval | Action |
 |---|---|---|
 | expiry sweep | 1 min | delete posts with `0 < exp < now`, and media whose `media_ids.exp` has passed (7.7); forget expired media tickets |
-| mailbox sweep | 1 h | delete notes from other people older than 30 days, never the owner's own; a mailbox over 500 notes loses its oldest when a note is added, other people's first |
+| mailbox sweep | 1 h | delete notes from other people older than 30 days, never the owner's own; a mailbox over 500 notes loses its oldest when a note is added, other people's first; delete reports past their 90 days (8.7) |
 | link-request sweep | 1 min | delete `linkreqs/*` not written for 10 minutes, aged by the server's own clock (release 24) |
 | presence and typing | continuous | in-memory TTL |
 | backup | nightly | `.backup` to a temp file, encrypt with `age` to an offline public key, copy off the box (a Hetzner Storage Box or any other location the owner picks), delete temp, keep 7 |
 | vacuum | weekly | reclaim and zero freed pages |
 | disk watch | 1 min, on upload | refuse new media (507 `full`) when the data disk has under 10 % **and** under 5 GB free, so a large disk with room to spare keeps working; alerting the owner is the health watch's job (11.5) |
+
+### 8.7 Reports
+
+Anyone signed in may report a post in a public group or channel (`report.send`, 7.1) as spam, abuse, illegal or other. Whether a chat is public is decided from the server's own record (its frozen `type` is not `dm` and its `visibility` is `public`), never from the request, so a DM or a private chat can never be reported, even one a crafted client created with `visibility: public`. The table is the server's own, like `bans`; no document path reaches it:
+
+```
+reports   (id TEXT PRIMARY KEY, ts, exp, cid, pid, reason, name, post, key, tag TEXT UNIQUE)
+```
+
+A row holds the time, an expiry 90 days later, the chat and post ids, the reason, the chat's public name at that moment, the server's own copy of the stored post (nothing the reporter sent), and the published key of that post's epoch (`openKeys[e]`), so the report can still be read if the channel later turns private or is deleted. It never holds the reporter: only `tag = HMAC(addr.key, "report:" + handle | cid | pid)`, unique, so the same person reporting the same post again changes nothing. Reports are read with `report.list` by the usernames in `HUSH_OWNERS` and nobody else, and the tag is never sent. The hourly sweep deletes rows past `exp`, and `report.list` never returns one.
+
+What this reveals: the server keeps, for 90 days, a copy of a post it could already read (a public group or channel publishes its keys in `openKeys`), with the reason, even after the post is deleted or a disappearing message expires. A copy of the database without `addr.key` can't tell who reported. A live operator, who holds `addr.key`, can test whether a guessed username reported a given post, exactly as with block tags (5.6, 10.4 A2), and sees the proven handle of the connection sending each report while it is running.
 
 ---
 
@@ -550,6 +564,7 @@ Buckets live in memory. "address bucket" means a token bucket keyed by `HMAC(hou
 | `POST /drop` | address, recipient | 30 / h per address, charged on every attempt; 100 / h per recipient; proof of work once a recipient's hour is half used, or always for a recipient with `requests: true` (section 6) |
 | own mailbox notes over the socket (`set` on `inbox/<h>/c`) | connection | 100 / h (`dropsPerHour`); from release 21 a note marked `own: 1` is not counted, since the mailbox itself holds at most 500 (`inboxMax`) and the page re-writes its whole chat list after a key change (9.3) |
 | `chat.create` | connection | 200 / day (`chatCreatesPerDay`) |
+| `report.send` | connection | 5 / min (`reportsPerMin`), every call counted (8.7) |
 | `chat.invite` | address | 20 / min (`invitesPerMinPerAddr`), as 5.5 asks |
 | `chat.open` failures | address | 20 / min; a wrong key from a connection that already holds the chat is not counted (it is not guessing: a client may try an owner key it may hold, 5.6), nor is a blocked username's right member key |
 | posts and comments | connection | 60 / min (`postsPerMin`); a connection is one person, which is what "per chat level" meant |
@@ -578,6 +593,7 @@ Message and media content; group membership and the social graph; the mapping of
 | opt-in search and phone entries | that a person chose to be findable; phone entries are keyed-hashed at rest |
 | chat records | random ids, type, public or private, epoch, how many wraps exist (roughly members times devices), hashes of room keys, sealed metadata, activity time of the last message |
 | chat bans | per group or channel, how many usernames its admins blocked, as tags keyed under `addr.key` (5.6, 8.3): who they are can't be read from the database alone |
+| reports | for 90 days, a copy of each reported public-channel post, that epoch's published key, the channel's name and the reason; the reporter only as a tag keyed under `addr.key` (8.7) |
 | posts, acts, reads | per chat: times, sizes, pseudonymous tags, ciphertext |
 | media pieces | per chat: how many media ids, their sizes and piece counts, when they were uploaded, and for media of a disappearing message, when it expires; never what kind of file, its name or its key |
 | mailbox notes | recipient handle, hour of receipt, an opaque 1 KB blob, and whether the owner wrote it to themselves; someone else's note until the owner deletes it or 30 days pass, the owner's own until they delete it |
@@ -586,13 +602,13 @@ Message and media content; group membership and the social graph; the mapping of
 
 ### 10.3 What the server never stores
 
-IP addresses; which handle is in which chat (blocks are kept only as tags keyed under `addr.key`, 5.6: a copy of the database without that key can't tell who is blocked); who sent any post; who talks to whom; which handles share a device or connection; message content, names of private groups, member lists, contact lists; receipt timestamps other than the mailbox hour; access logs of any kind.
+IP addresses; which handle is in which chat (blocks are kept only as tags keyed under `addr.key`, 5.6: a copy of the database without that key can't tell who is blocked); who reported a post (only a tag keyed the same way, 8.7); who sent any post; who talks to whom; which handles share a device or connection; message content, names of private groups, member lists, contact lists; receipt timestamps other than the mailbox hour; access logs of any kind.
 
 ### 10.4 Adversaries and outcomes
 
 **A1. Someone steals the database or a backup.** Gets everything in 10.2 and nothing in 10.3. Cannot reverse phone or login addresses without `addr.key`. Cannot open any box or message.
 
-**A2. A curious operator watching the live process.** Additionally sees, per connection, the proven handle, which chats it opened, and the network address. Can therefore reconstruct membership over time by watching, and sees the username in each `chat.ban`; with `addr.key` it can also test usernames against a chat's block tags. Nothing durable records membership, and the design keeps sender identity off the mailbox path, but this adversary is only partly defended against. Full defence requires network anonymity, out of scope.
+**A2. A curious operator watching the live process.** Additionally sees, per connection, the proven handle, which chats it opened, and the network address. Can therefore reconstruct membership over time by watching, and sees the username in each `chat.ban`; with `addr.key` it can also test usernames against a chat's block tags, and against report tags to learn whether a guessed person reported a given post (8.7). Nothing durable records membership, and the design keeps sender identity off the mailbox path, but this adversary is only partly defended against. Full defence requires network anonymity, out of scope.
 
 **A3. A malicious server.** Can refuse service, delete or reorder data, serve stale chat records, and withhold key rotations. Cannot read content, forge posts (inner signatures), inject members without a wrap that the invitee's device can open (it has no device private keys), or impersonate a handle (no account private keys). Two replays that would have let it re-admit a removed member through an honest admin's client are refused by the client (5.3): a copy of an older epoch's wrap presented as the new epoch's, and sealed metadata from before the removal. It can serve altered JavaScript; see 10.6.
 
@@ -717,6 +733,8 @@ Outside the page's control: the browser's own password manager, which is offered
 ### 12.3 Badges and mentions (stage 8)
 
 **Badges.** The operator decides who carries a badge, in `HUSH_BADGES` on the server, and nowhere else. The server sends the whole list in the `hello` reply (`badges: { "<handle>": "founder" | "verified" }`), and the page draws the badge after that person's name wherever a name is shown: the chat list, the chat header, the profile sheet, search results, member lists, and sender names in groups and channels. A profile document cannot carry a badge (9.3 refuses unknown fields) and the page never reads one from a profile, so nobody can give themselves one. The list is public by nature and names handles only.
+
+**Report readers.** In the same way, `HUSH_OWNERS` on the server (comma-separated usernames, each `^[a-z0-9_]{3,20}$`, any other entry stops the server at start-up) names the operator's own accounts, the only ones `report.list` answers (8.7). Register those usernames before listing them: until one exists, anyone could sign up with it.
 
 **Mentions.** `@handle` in a message is shown as a link wherever the page shows the text, in one-on-one chats, groups and channels alike. The link is made from the text alone: nothing is looked up because a mention is on screen. A tap looks the handle up (the same lookup the search box uses, by exact username, which finds anyone) and opens the one-on-one chat with that person under the usual message-request rules; a mention of oneself opens one's own Saved Messages; a blocked or unfindable handle shows a short notice.
 

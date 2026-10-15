@@ -12,6 +12,7 @@
 //   HUSH_LOG           "off" silences logging  default on
 //   HUSH_LIMITS        JSON object overriding limits.js DEFAULT_LIMITS
 //   HUSH_BADGES        JSON object of username to badge, e.g. {"Alice":"founder"}; badges: founder, verified. Default: none
+//   HUSH_OWNERS        comma-separated usernames that may read reports (report.list), e.g. alice,bob. Default: none
 //   HUSH_TLS_PORT      also listen with HTTPS on this port (development over the local network; unset = off)
 //   HUSH_TLS_HOST      bind address for it         default 0.0.0.0 (every network this PC is on)
 //   HUSH_TLS_DIR       folder holding key.pem and cert.pem (`npm run dev:lan` makes them)
@@ -48,6 +49,20 @@ export function parseBadges(raw) {
   return out;
 }
 
+// Owners (SPEC.md 8.7): the operator's own usernames, the only ones that may read reports (report.list). Decided here and
+// nowhere else, like badges. Register these usernames before listing them: until then anyone could sign up as one.
+export function parseOwners(raw) {
+  if (raw == null || !String(raw).trim()) return [];
+  const out = [];
+  for (const k of String(raw).split(',')) {
+    const h = k.trim().toLowerCase().replace(/^@/, '');
+    if (!h) continue;
+    if (!ID.HANDLE.test(h)) throw new Error(`HUSH_OWNERS: "${k.trim()}" is not a username`);
+    if (!out.includes(h)) out.push(h);
+  }
+  return out;
+}
+
 export function loadConfig(env = process.env) {
   let limits = {};
   if (env.HUSH_LIMITS) {
@@ -65,6 +80,7 @@ export function loadConfig(env = process.env) {
     logging: env.HUSH_LOG !== 'off',
     limits,
     badges: parseBadges(env.HUSH_BADGES),
+    owners: parseOwners(env.HUSH_OWNERS),
     tls: env.HUSH_TLS_PORT ? loadTls(env) : null,
   };
 }

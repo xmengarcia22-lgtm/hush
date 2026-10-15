@@ -144,7 +144,7 @@ test('joining by link: the proof must match, wraps are added, labels cannot coll
 });
 
 test('public channels: anyone signed in can list and preview them; posting still needs the admin key', async () => {
-  const { caps } = await createChat(A, 'cPublic000001', channelDoc({ visibility: 'public', name: 'News', desc: 'd', owner: 'alice', admins: [], meta: undefined, openKeys: { 0: 'k'.repeat(44) } }));
+  const { caps } = await createChat(A, 'cPublic000001', channelDoc({ visibility: 'public', name: 'News', desc: 'd', photo: null, owner: 'alice', admins: [], meta: undefined, openKeys: { 0: 'k'.repeat(44) } }));
   const list = await B.ok('query', { p: 'channels', w: [['visibility', '==', 'public']], l: 100 });
   assert.deepEqual(list.docs.map((d) => d.id), ['cPublic000001']);
   const pv = (await B.ok('get', { p: 'channels/cPublic000001' })).d;
