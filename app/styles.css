@@ -43,6 +43,7 @@ svg{display:block}
 
 #app{display:grid;grid-template-columns:1fr;height:100%;position:relative}
 html.kb-up,html.kb-up body{overflow:hidden;overscroll-behavior:none}
+html.kb-up .tabs{display:none} /* behind the keys, like a native app; back when they close */
 @media(min-width:760px){#app{grid-template-columns:340px 1fr}.pane-list{border-right:1px solid var(--line)}.back{display:none!important}}
 @media(max-width:759px){#app.in-chat .pane-list{display:none}#app:not(.in-chat) .pane-chat{display:none}}
 .pane{position:relative;display:flex;flex-direction:column;min-height:0;min-width:0}

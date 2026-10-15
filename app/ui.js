@@ -1094,10 +1094,13 @@ async function readSide(cid,docs,label,done){ // turn the tags back into names, 
 }
 /* The on-screen keyboard covers the bottom of the page on a phone. The browser tells us how much room is
    really left, so the whole app shrinks to fit and the message box ends up sitting right above the keys. */
-let kbT=null;
+// The iPhone app's Keyboard plugin unhooks WKWebView from the keyboard notifications, so visualViewport may not shrink there;
+// the plugin reports the keys' height instead (0 for a hardware keyboard's QuickType bar).
+let kbT=null,kbH=0;
+addEventListener('keyboardWillShow',e=>{kbH=e.keyboardHeight||0;fitKeyboard()});addEventListener('keyboardWillHide',()=>{kbH=0;fitKeyboard()});
 function fitKeyboard(){
   const vv=window.visualViewport,app=document.getElementById('app');if(!vv||!app)return;
-  const h=Math.round(vv.height),off=Math.round(vv.offsetTop||0),hidden=Math.max(0,Math.round(innerHeight-h-off));
+  const h=Math.round(kbH?Math.min(vv.height,innerHeight-kbH):vv.height),off=Math.round(vv.offsetTop||0),hidden=Math.max(0,Math.round(innerHeight-h-off));
   const up=hidden>80||off>1,notch=parseFloat(getComputedStyle(document.documentElement).paddingTop)||0;
   app.style.height=up?(h-notch)+'px':''; // the page pads the notch and home bar (safe areas): keys down, the plain 100% fits; keys up, only the notch's padding is above the app
   app.style.transform=off>1?'translateY('+off+'px)':'';
@@ -1105,6 +1108,11 @@ function fitKeyboard(){
   const msgs=document.getElementById('msgs');if(msgs&&S.stick)msgs.scrollTop=msgs.scrollHeight;
 }
 function onViewport(){clearTimeout(kbT);kbT=setTimeout(fitKeyboard,16)}
+// Keys up: a drag on a list closes them, and so does a drag down on the messages (as iOS apps do)
+{let x0=0,y0=null;
+  document.addEventListener('touchstart',e=>{const t=e.touches[0];y0=e.touches.length===1&&e.target.closest?.('#threads,#contacts,#msgs')?t.clientY:null;x0=t.clientX},{passive:true});
+  document.addEventListener('touchmove',e=>{if(y0==null||!document.documentElement.classList.contains('kb-up'))return;const t=e.touches[0],dy=t.clientY-y0;
+    if(Math.abs(dy)>10&&Math.abs(dy)>Math.abs(t.clientX-x0)&&(dy>0||!e.target.closest('#msgs'))){y0=null;document.activeElement?.blur()}},{passive:true})}
 document.addEventListener('gesturestart',e=>{if(!e.target.closest?.('.viewer'))e.preventDefault()},{passive:false}); // Safari ignores maximum-scale; only the media viewer may pinch
 if(window.visualViewport){visualViewport.addEventListener('resize',onViewport);visualViewport.addEventListener('scroll',onViewport)}
 addEventListener('orientationchange',()=>setTimeout(fitKeyboard,250));
@@ -2420,17 +2428,6 @@ function settingsAdvanced(body,me){
       catch{P().backup=!on;cb.checked=!on;saveContacts();toastErr('That didn\u2019t save. Try again.')}cb.disabled=false};
     tg.append(cb,el('span',null,'Message backup'));
     body.append(tg,el('p','hint','On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.'))}
-  {// TEMPORARY (remove once haptics work): what the iPhone app gives this page, and one direct Haptics call
-    const tv=html('button','menu-item flush',I.sliders+'<span>Test vibration</span>'),out=el('p','hint');
-    tv.onclick=async()=>{const C=window.Capacitor,r=[];
-      r.push('Capacitor: '+(C?(C.getPlatform?C.getPlatform():'?'):'not found'),'Native: '+!!(C&&C.isNativePlatform&&C.isNativePlatform()),
-        'Plugins: '+((C&&C.PluginHeaders||[]).map(h=>h.name).join(', ')||'none'),'Reduce Motion: '+matchMedia('(prefers-reduced-motion: reduce)').matches);
-      out.textContent=r.join(' · ')+' · Calling…';
-      try{if(!C||!C.nativePromise)throw new Error('no native bridge');
-        await Promise.race([C.nativePromise('Haptics','impact',{style:'HEAVY'}),new Promise((_,no)=>setTimeout(()=>no(new Error('no answer in 3 s')),3000))]);r.push('Call: OK')}
-      catch(e){r.push('Call failed: '+((e&&(e.message||e.code))||String(e)))}
-      out.textContent=r.join(' · ')};
-    body.append(tv,out)}
   body.append(el('div','menu-label flush','Security'));
   {const al=html('button','menu-item flush',I.lockMd+'<span>Lock Hush</span>');al.append(el('span','role',lsPw()?'Password':lockCfg()?'PIN':'Off'));al.onclick=openAppLock;body.append(al)}
   body.append(el('div','menu-label flush','Encryption'));
