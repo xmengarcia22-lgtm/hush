@@ -1098,9 +1098,10 @@ let kbT=null;
 function fitKeyboard(){
   const vv=window.visualViewport,app=document.getElementById('app');if(!vv||!app)return;
   const h=Math.round(vv.height),off=Math.round(vv.offsetTop||0),hidden=Math.max(0,Math.round(innerHeight-h-off));
-  app.style.height=h+'px';
+  const up=hidden>80||off>1,notch=parseFloat(getComputedStyle(document.documentElement).paddingTop)||0;
+  app.style.height=up?(h-notch)+'px':''; // the page pads the notch and home bar (safe areas): keys down, the plain 100% fits; keys up, only the notch's padding is above the app
   app.style.transform=off>1?'translateY('+off+'px)':'';
-  const up=hidden>80||off>1;document.documentElement.classList.toggle('kb-up',up);
+  document.documentElement.classList.toggle('kb-up',up);
   const msgs=document.getElementById('msgs');if(msgs&&S.stick)msgs.scrollTop=msgs.scrollHeight;
 }
 function onViewport(){clearTimeout(kbT);kbT=setTimeout(fitKeyboard,16)}
