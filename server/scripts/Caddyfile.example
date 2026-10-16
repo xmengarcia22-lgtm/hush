@@ -38,6 +38,19 @@
 	root * /srv/hush/www
 	file_server
 
+	# A missing file gets the branded page (404.html: plain HTML, no scripts) and keeps its 404 status. Error responses
+	# skip the header block above, so this one carries its own copy.
+	handle_errors 404 {
+		header {
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+			-Server
+		}
+		rewrite * /404.html
+		file_server
+	}
+
 	# The API. Caddy adds X-Forwarded-For; the server uses it only for a salted, in-memory rate-limit tag.
 	# /media/* carries encrypted pieces (SPEC.md 7.7): no logging, no caching (the server sends no-store),
 	# and no compression, since ciphertext doesn't compress.
