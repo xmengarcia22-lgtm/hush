@@ -665,7 +665,7 @@ setInterval(()=>{if(!document.hidden)checkForUpdate()},10*60e3);
 function renderBanner(){
   const b=$('#banner');b.replaceChildren();
   if(!S.db)b.append(el('div','banner',SRV_ERR||'Connecting to Hush\u2026'));
-  else if(!S.db.online)b.append(el('div','banner',SRV_ERR||('Can\u2019t reach the Hush server at '+S.db.addr+'. Reconnecting\u2026')));
+  else if(!S.db.online)b.append(el('div','banner',SRV_ERR||srvDown(S.db.addr)));
   else if(S.stale){const n=el('div','banner nudge');n.append(el('span',null,'Hush was updated.'));const go=el('button','link sm','Reload');go.onclick=()=>location.reload();n.append(go);b.append(n)}
   else if(S.me&&!hasRecovery(S.me.handle)){ // stays until recovery words are set up; no close button on purpose
     if(!S.contactsReady||S.tab==='profile')return; // wait for the vault (another device may have set them up already)

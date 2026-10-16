@@ -267,6 +267,8 @@ function createHushAdapter(url,opts){
 }
 /* ===== HUSH ADAPTER END ===== */
 let SRV_ERR='';
+// The banner while the server doesn't answer: with a network on this device, the fault is the server's
+const srvDown=url=>navigator.onLine?'Hush is temporarily down, back soon. Reconnecting…':'Can’t reach the Hush server at '+url+'. Check that it’s running, then this will reconnect on its own.';
 function hushServerUrl(){let s=String(HUSH_CONFIG.server||'').trim();
   // Opened from another device (a phone on the same Wi-Fi, `npm run dev:lan`): a loopback address here would mean
   // that device itself, so talk to the server the page came from instead.
@@ -276,7 +278,7 @@ function hushServerUrl(){let s=String(HUSH_CONFIG.server||'').trim();
   s=s.replace(/^https?:/,m=>m==='https:'?'wss:':'ws:').replace(/\/+$/,'');return /\/ws$/.test(s)?s:s+'/ws'}
 async function connectServer(){
   const url=hushServerUrl();
-  const unreachable=()=>'Can\u2019t reach the Hush server at '+url+'. Check that it\u2019s running, then this will reconnect on its own.';
+  const unreachable=()=>srvDown(url);
   const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner();if(on)checkForUpdate()},
     caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onPower:(cid,held)=>askPower(cid,held),onEvict:cid=>onChatEvicted(cid),
     onKv:kv=>{if(S.me&&!S.rekeying&&typeof kv==='number'&&kv>(S.me.kv||1))signedOutHere()}, // proven against newer keys than this device's: another device replaced them (release 21)
@@ -286,6 +288,7 @@ async function connectServer(){
     onBadges:b=>{S.badges=b||{};if(!S.me)return;renderList();if(S.chan){S.rendered=null;renderConv()}if(S.tab==='profile')setTab('profile')}}); // the operator's badge list came with the handshake
   await Promise.race([db.ready,new Promise(r=>setTimeout(r,5000))]);
   if(!db.online)SRV_ERR=db.error||unreachable();
+  for(const e of ['online','offline'])addEventListener(e,()=>{if(!db.online){SRV_ERR=db.error||unreachable();renderBanner()}}); // the wording follows the device's network
   db.mediaLimits().catch(()=>{}); // this server's media limits, for checking files before they're sent
   return db;
 }
