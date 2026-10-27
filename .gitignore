@@ -10,6 +10,19 @@ addr.key
 *.key
 .env
 .env.*
+hush.env
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.keystore
+*secret*
+*credential*
+
+# Backups, of any kind.
+*backup*
+*.bak
+before-*/
 
 # Leftovers of the Firebase version of the app, kept locally only.
 index.firebase-backup.html
