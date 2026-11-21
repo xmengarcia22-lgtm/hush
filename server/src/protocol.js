@@ -12,22 +12,31 @@ import { TokenBucket } from './limits.js';
 import { SYSTEM } from './store.js';
 import { verifyProof, HANDLE } from './identity.js';
 import { ID } from './paths.js';
-import { rankOf } from './authz.js';
+import { rankOf, chatTypeOf } from './authz.js';
 import { clientLimits } from './media.js';
 import { leadingZeroBits } from './drops.js';
+import { DEV_ID } from './schemas.js';
+import { byteLength } from './merge.js';
 
 const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const PROTOCOL_VERSION = 1;
 const OPEN = 1;
 const MAX_BAD_FRAMES = 5;
+const HEAD_I = /"i"\s*:\s*(-?\d{1,15})(?![\d.eE])/;   // a frame's i, read from its first bytes: the adapter sends it first
+const PING = /^\{"i":(0|[1-9]\d{0,14}),"op":"ping"\}$/;   // the adapter's keep-alive, byte for byte (no leading zero: that is not JSON): the one frame answered over the frame allowance
 
 // Not part of the protocol: notes are watched through `sub` on inbox/<h>/c and written through
 // POST /drop (SPEC.md 6), so the pull-and-ack ops once planned were never needed.
 const NOT_YET = ['mail.pull', 'mail.ack'];
 
-function takeQuery(c) {
-  if (!c.queries.take()) fail('ratelimit', 'too many queries, slow down');
+function takeQuery(c, n = 1) {
+  if (!c.queries.take(n)) fail('ratelimit', 'too many queries, slow down');
+}
+// An answer refused for its size was read up to the cap and is paid for (replyError): until it is paid off, the connection's mget, query
+// and sub are refused before anything is read, so refusals can't keep the single thread busy; its other frames go on (release 110).
+function answerOk(c) {
+  if (!c.refusals.peek()) fail('ratelimit', 'slow down');
 }
 
 // The per-path limits of SPEC.md 9.4. Blind addresses (account boxes, login reservations, link requests, phone
@@ -35,9 +44,10 @@ function takeQuery(c) {
 // path; profile reads are counted per connection, every path of an mget included, so the directory cannot be
 // walked; posts and the side rows have their own per-connection rates.
 const BLIND = /^(?:accounts|logins|phones|recovery)\//;
+const BOX = /^(?:accounts|vault|backup|logins)\//;   // the rows anyone may make before signing in, up to 2 MB each
 const LINKREQ = /^linkreqs\//;
 const DIRECTORY = /^directory\//;
-const CHAT_WRITE = /^channels\/[^/]+\/(posts|comments|acts|reads|typing)(?:\/|$)/;
+const CHAT_WRITE = /^channels\/[^/]+\/(posts|comments|acts|reads|typing|call)(?:\/|$)/;
 function takeRead(c, p) {
   if (typeof p !== 'string') return;
   if (LINKREQ.test(p)) {   // polled every few seconds by the devices on both ends, so counted apart from the other blind lookups
@@ -52,6 +62,7 @@ function takeWrite(c, p) {
   const m = CHAT_WRITE.exec(typeof p === 'string' ? p : '');
   if (!m) return;
   if (m[1] === 'posts' || m[1] === 'comments') { if (!c.posts.take()) fail('ratelimit', 'too many messages; slow down'); }
+  else if (m[1] === 'call') { if (!c.calls.take()) fail('ratelimit', 'too many call signals; slow down'); }
   else if (!c.sides.take()) fail('ratelimit', 'too many marks; slow down');
 }
 // A `set` that would create a profile is a sign-up. It brings proof of work (SPEC.md 9.4): a nonce such that
@@ -64,6 +75,14 @@ function takeWrite(c, p) {
 const secured = (c) => (!c.limits.powerNeedsSecure && process.env.NODE_ENV !== 'production') || !c.proven || !(c.ctx.store.authz && c.ctx.store.authz.mode === 'standard') || !!c.ctx.store.get('secure/' + c.proven, SYSTEM).d;
 const isSignup = (c, p) => !!c.mayCreate && p === 'directory/' + c.mayCreate && !c.ctx.store.get(p, SYSTEM).d;
 const hasAccount = (c) => { const d = !!c.proven && c.ctx.store.get('directory/' + c.proven, SYSTEM).d; return !!d && d.gone === undefined; };   // a tombstone is no account (4.7)
+// The push ops (push.set, push.clear, wake.mint, wake.revoke) need an account that exists and share one bucket.
+const PUSH_TOKEN = /^[0-9a-f]{64}$/i;
+function takePush(c) {
+  if (!hasAccount(c)) fail('unauth', 'sign in first');
+  if (!c.pushOps.take()) fail('ratelimit', 'too many push changes; slow down');
+}
+const devOf = (f, op) => { if (typeof f.dev !== 'string' || !DEV_ID.test(f.dev)) fail('invalid', `${op}: bad device id`); return f.dev; };
+const kindOf = (f, op) => { if (f.kind !== undefined && f.kind !== 'voip' && f.kind !== 'alert') fail('invalid', `${op}: bad kind`); return f.kind === undefined ? 'voip' : f.kind; };
 
 const HANDLERS = {
   hello(c, f) {
@@ -79,7 +98,7 @@ const HANDLERS = {
       nonce: c.nonce,
       now: c.nonceAt,
       v: PROTOCOL_VERSION,
-      limits: { maxFrameBytes: L.maxFrameBytes, mgetMax: L.mgetMax, queryLimitMax: L.queryLimitMax, subsPerConn: L.subsPerConn, docsPerSub: L.docsPerSub, idleMs: L.idleMs },
+      limits: { maxFrameBytes: L.maxFrameBytes, mgetMax: L.mgetMax, queryLimitMax: L.queryLimitMax, subsPerConn: L.subsPerConn, docsPerSub: L.docsPerSub, idleMs: L.idleMs, framesPerMin: L.framesPerMin },
       badges: c.ctx.badges || {},   // who carries a badge next to their name: the operator's list (SPEC.md 12.3), never a profile field
     };
   },
@@ -112,6 +131,7 @@ const HANDLERS = {
       c.kv = dir2 ? (dir2.kv === undefined ? 1 : dir2.kv) : 1;
       c.proven = f.h;
       c.provedWith = r.via;
+      c.dev = r.via === 'device' ? f.dev : null;
       c.pub = r.pub;
       c.mayCreate = r.via === 'signup' ? f.h : null;
       c.nonce = null;                                   // single use
@@ -126,6 +146,7 @@ const HANDLERS = {
   get(c, f) { takeRead(c, f.p); return c.ctx.store.get(f.p, c.actor()); },
 
   mget(c, f) {
+    answerOk(c);
     takeQuery(c);
     if (!Array.isArray(f.ps)) fail('invalid', 'mget: "ps" must be a list of paths');
     for (const p of f.ps) takeRead(c, p);
@@ -136,6 +157,17 @@ const HANDLERS = {
     // A note to yourself (own: 1) is bounded by inboxMax, not the bucket: the page rewrites its whole chat list after a key change (release 21).
     if (typeof f.p === 'string' && f.p.startsWith('inbox/') && !(f.d && f.d.own === 1) && !c.drops.take()) fail('ratelimit', 'too many pointers dropped; slow down');
     takeWrite(c, f.p);
+    // A link ask (SPEC.md 14.14) is the one record a connection writes before signing in: counted per address, so no one place fills the table.
+    if (typeof f.p === 'string' && LINKREQ.test(f.p) && f.d && f.d.state === 'ask' && !c.ctx.linkAsks.take(c.addrTag)) fail('ratelimit', 'too many link codes shown from here; wait a while');
+    // A new box (SPEC.md 4.3) needs no proof and no puzzle, so it is the one way to fill hush.db with rows nobody can tie
+    // to anyone: none is made on a nearly full disk, a connection that hasn't signed in makes so many a day, so many bytes,
+    // per address under the daily salt, and a signed-in one so many per account, whatever its sockets. A replaced box
+    // grows a row that is already there and is not counted.
+    if (typeof f.p === 'string' && BOX.test(f.p) && !c.ctx.store.get(f.p, SYSTEM).d) {
+      if (!c.ctx.disk.ok()) fail('full', 'the server is out of space right now');
+      const n = byteLength(f.d ?? null), B = c.ctx.boxes;
+      if (c.proven ? !B.acct.take(c.proven) || !B.acctBytes.take(c.proven, n) : !B.anon.take(c.dayTag) || !B.anonBytes.take(c.dayTag, n)) fail('ratelimit', c.proven ? 'too many new boxes today' : 'too many new boxes from here today');
+    }
     const actor = c.actor(), creating = isSignup(c, f.p);
     if (f.was !== undefined) actor.was = f.was;   // the version a write was merged from (backups); checked, never stored
     if (creating) {
@@ -177,6 +209,7 @@ const HANDLERS = {
   add(c, f) { takeWrite(c, f.p); return c.ctx.store.add(f.p, f.d, c.actor()); },
 
   query(c, f) {
+    answerOk(c);
     takeQuery(c);
     if (f.p === 'search' && !c.search.take()) fail('ratelimit', 'too many searches; slow down');
     return { docs: c.ctx.store.query(f.p, { w: f.w, o: f.o, l: f.l }, c.actor()) };
@@ -185,6 +218,7 @@ const HANDLERS = {
   sub(c, f) {
     const s = f.s;
     if (!(Number.isInteger(s) || (typeof s === 'string' && s.length > 0 && s.length <= 32))) fail('invalid', 'sub: bad "s"');
+    answerOk(c);
     const { spec, init } = c.ctx.store.prepareSub({ p: f.p, ids: f.ids, w: f.w, o: f.o, l: f.l }, c.actor());
     c.ctx.subs.add(c, { s, ...spec });
     return { __after: () => c.send({ s, t: 'init', docs: init }) };
@@ -198,7 +232,8 @@ const HANDLERS = {
   // ---- room keys (SPEC.md 5) ----
   'chat.create'(c, f) {
     if (f.d && f.d.type !== 'dm' && !secured(c)) fail('secure', 'owning a group or channel needs a stronger password; secure your account first');
-    if (!c.creates.take()) fail('ratelimit', 'too many new chats today');
+    if (!c.proven) fail('unauth', 'sign in first');
+    if (!c.ctx.creates.take(c.proven)) fail('ratelimit', 'too many new chats today');   // per account, whatever the socket
     const r = c.ctx.store.createChat({ cid: f.cid, d: f.d, caps: f.caps }, c.actor());
     c.chats.set(f.cid, { level: r.level, epoch: r.epoch, type: r.type, h: r.h });
     return { level: r.level, epoch: r.epoch };
@@ -212,10 +247,11 @@ const HANDLERS = {
     // A blocked username's member key is the right key, so this is not counted as a wrong one (SPEC.md 5.6). It goes by the
     // level the key gave: an owner or admin key is never refused, not even one held at member level below.
     if (r.level === 'member' && c.ctx.store.isBanned(f.cid, c.proven)) fail('denied', 'you were removed from this chat');
-    // An owner or admin whose account isn't secured opens at member level: their tools wait, and `held` says why.
+    // An owner or admin whose account isn't secured opens at member level: their tools wait, and `held` says why. The connection
+    // keeps it, so a channel's member and blocked lists still reach it (authz.js).
     if (r.type !== 'dm' && (r.level === 'owner' || r.level === 'admin') && !secured(c)) {
       const held = r.level;
-      r = { ...r, level: 'member' };
+      r = { ...r, level: 'member', held };
       c.chats.set(f.cid, r);
       return { level: r.level, epoch: r.epoch, held };
     }
@@ -232,8 +268,10 @@ const HANDLERS = {
     try { return c.ctx.store.joinChat({ cid: f.cid, iid: f.iid, proof: f.proof, wraps: f.wraps }, c.actor()); }
     catch (e) { if (e instanceof HushError && e.code === 'denied') c.ctx.openFails.take(c.addrTag); throw e; }
   },
+  // Counted with the messages: a channel's key changes have no cap now (release 91), and each one evicts every other connection.
   'chat.rotate'(c, f) {
-    const r = c.ctx.store.rotateChat({ cid: f.cid, epoch: f.epoch, keys: f.keys, cap: f.cap, meta: f.meta, openKeys: f.openKeys, why: f.why }, c.actor());
+    if (!c.posts.take()) fail('ratelimit', 'too many key changes; slow down');
+    const r = c.ctx.store.rotateChat({ cid: f.cid, epoch: f.epoch, keys: f.keys, cap: f.cap, meta: f.meta, openKeys: f.openKeys, why: f.why, back: f.back, invites: f.invites, prune: f.prune }, c.actor());
     const e = c.chats.get(f.cid);
     if (e) c.chats.set(f.cid, { ...e, epoch: r.epoch, h: r.h });
     return { epoch: r.epoch };
@@ -254,6 +292,36 @@ const HANDLERS = {
   // An admin blocks a username from a group or channel, or lets it back in (SPEC.md 5.6).
   'chat.ban'(c, f) {
     return c.ctx.store.setBan({ cid: f.cid, h: f.h, on: f.on }, c.actor());
+  },
+  // Member cards and join requests (SPEC.md 5.6, release 91): counted with the marks; a wrong link proof as a wrong invite link.
+  'chat.card'(c, f) {
+    if (!c.sides.take()) fail('ratelimit', 'too many marks; slow down');
+    return c.ctx.store.card({ cid: f.cid, e: f.e, iv: f.iv, ct: f.ct }, c.actor());
+  },
+  'chat.ask'(c, f) {
+    if (!c.ctx.openFails.peek(c.addrTag)) fail('ratelimit', 'too many wrong invite links from here; wait a minute');
+    if (!c.sides.take()) fail('ratelimit', 'too many marks; slow down');
+    try { return c.ctx.store.ask({ cid: f.cid, iid: f.iid, proof: f.proof, iv: f.iv, ct: f.ct }, c.actor()); }
+    catch (e) { if (e instanceof HushError && e.code === 'denied') c.ctx.openFails.take(c.addrTag); throw e; }
+  },
+  // A channel's reactions and votes (SPEC.md 5.4), counted with the marks as today; and which of them are this account's own, counted with query and mget.
+  'chat.act'(c, f) {
+    if (!c.sides.take()) fail('ratelimit', 'too many marks; slow down');
+    return c.ctx.store.act({ cid: f.cid, post: f.post, kind: f.kind, e: f.e, iv: f.iv, ct: f.ct }, c.actor());
+  },
+  'chat.mine'(c, f) {
+    takeQuery(c);
+    return c.ctx.store.mine({ cid: f.cid, posts: f.posts }, c.actor());
+  },
+  // Which tag each author's card sits under (SPEC.md 5.6, release 93): counted with query and mget, as the reads of the cards are: a token for every
+  // mgetMax (300) names, at least one, so 10,000 cost 34, as reading 10,000 paths by mget would; an hs that is not a list costs one (and is invalid).
+  'chat.slots'(c, f) {
+    takeQuery(c, Math.max(1, Math.ceil((Array.isArray(f.hs) ? f.hs.length : 0) / c.limits.mgetMax)));
+    return c.ctx.store.slots({ cid: f.cid, cap: f.cap, hs: f.hs }, c.actor());
+  },
+  // The key chain (SPEC.md 5.6, release 91): one row per epoch, replaced in place, so a page's backfill is not counted beyond its frames.
+  'chat.chain'(c, f) {
+    return c.ctx.store.chain({ cid: f.cid, e: f.e, b: f.b, c: f.c }, c.actor());
   },
 
   // ---- deleting the account (SPEC.md 4.7) ----
@@ -292,11 +360,55 @@ const HANDLERS = {
     if (!c.ctx.tickets) fail('invalid', 'media is not served here');
     return { ...c.ctx.tickets.issue(c, f.cid), limits: clientLimits(c.limits.media) };
   },
+
+  // ---- calls (SPEC.md 16.2): a credential for the operator's relay (TURN), for a one-on-one chat this connection holds at
+  // member level, the same check as writing a call record. The TURN REST scheme: username "<expiry, unix seconds>:<name>",
+  // password base64(HMAC-SHA1(secret, username)). The name is the account's name for today (server.js, turnName): the relay
+  // can count one account's allocations (user-quota) but learns no username, and tomorrow's name doesn't link to today's.
+  'call.relay'(c, f) {
+    if (!c.proven) fail('unauth', 'sign in first');
+    if (typeof f.cid !== 'string' || !ID.CID.test(f.cid)) fail('invalid', 'call.relay: bad chat id');
+    const a = c.actor();
+    if (!rankOf(a, f.cid) || chatTypeOf(a, f.cid) !== 'dm') fail('denied', 'open this one-on-one chat with its key first');
+    const t = c.ctx.turn;
+    if (!t) fail('unavailable', 'calls are not available on this server');
+    const r = c.ctx.relays, m = c.ctx.acctRelays.min, h = c.ctx.acctRelays.hour;
+    if (!r.peek(c.addrTag)) fail('ratelimit', 'too many calls from here; wait a minute');
+    if (!m.peek(c.proven) || !h.peek(c.proven)) fail('ratelimit', 'too many calls from this account; wait a while');
+    r.take(c.addrTag); m.take(c.proven); h.take(c.proven);   // all or none: a refusal by one doesn't spend the others
+    const username = Math.floor(c.ctx.now() / 1000 + t.ttl) + ':' + c.ctx.turnName(c.proven);
+    return { iceServers: [{ urls: [...t.urls], username, credential: createHmac('sha1', t.secret).update(username).digest('base64') }], ttl: t.ttl };
+  },
+
+  // ---- ringing, and a "New message" nudge, when the app is closed: a push address per iPhone device (`kind` voip for
+  // calls, alert for the nudge), and random wake tickets pointing at it (`k` c or m) that the device hands to its
+  // contacts; a caller rings or nudges through POST /wake (server.js). The store checks the device is the account's own
+  // (and, for a device-proven connection, the one that signed in).
+  'push.set'(c, f) {
+    takePush(c);
+    const dev = devOf(f, 'push.set'), kind = kindOf(f, 'push.set');
+    if (typeof f.tok !== 'string' || !PUSH_TOKEN.test(f.tok) || !['prod', 'sandbox'].includes(f.env)) fail('invalid', 'push.set: bad token or environment');
+    return c.ctx.store.pushSet({ dev, tok: f.tok.toLowerCase(), env: f.env, kind }, c.actor());
+  },
+  'push.clear'(c, f) {
+    takePush(c);
+    return c.ctx.store.pushClear({ dev: devOf(f, 'push.clear'), kind: kindOf(f, 'push.clear') }, c.actor());
+  },
+  'wake.mint'(c, f) {
+    takePush(c);
+    if (f.k !== undefined && f.k !== 'c' && f.k !== 'm') fail('invalid', 'wake.mint: bad kind');
+    return c.ctx.store.wakeMint({ dev: devOf(f, 'wake.mint'), n: f.n === undefined ? 1 : f.n, k: f.k === undefined ? 'c' : f.k }, c.actor());
+  },
+  'wake.revoke'(c, f) {
+    takePush(c);
+    if (typeof f.tk !== 'string' || !ID.LABEL.test(f.tk)) fail('invalid', 'wake.revoke: bad ticket');
+    return c.ctx.store.wakeRevoke({ tk: f.tk }, c.actor());
+  },
 };
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, pwMisses, pwRepeats, signups, invites, tickets, addrTag, dayTag, now, badges, owners, onClose, onAccountGone }
+  // ctx: { store, subs, limits, disk, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, linkAsks, pwMisses, pwRepeats, signups, boxes, creates, invites, relays, acctRelays, turnName, tickets, addrTag, dayTag, now, badges, owners, turn, onClose, onAccountGone }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
@@ -308,26 +420,31 @@ export class Connection {
     this.nonceAt = 0;
     this.proven = null;        // handle this connection acts for
     this.provedWith = null;    // 'account' | 'device' | 'signup'
+    this.dev = null;           // the device id a device proof named
     this.pub = null;           // the account public key behind the proof
     this.kv = 1;               // the account's key version this connection was proven against
     this.mayCreate = null;     // handle this connection may create (sign-up)
     this.signupPow = null;     // { salt, bits }: the puzzle a sign-up on this connection solves, once
     this.proving = false;
-    this.chats = new Map();    // cid → { level, epoch, type, h: hash of the key it opened with }
+    this.chats = new Map();    // cid → { level, epoch, type, h: hash of the key it opened with, held?: the owner or admin level its key gave, unsecured }
     this.closed = false;
     this.cleaned = false;
     this.badCount = 0;
+    this.held = false;         // past sendBufferBytes unsent: frames wait in `later` (hold)
+    this.later = [];
     const L = this.limits;
     this.frames = new TokenBucket(L.framesPerMin, L.framesPerMin / 60);
     this.bytes = new TokenBucket(L.bytesPerMin, L.bytesPerMin / 60);
+    this.refusals = new TokenBucket(L.bytesPerMin, L.bytesPerMin / 60);   // what answers refused for their size read (answerOk)
     this.queries = new TokenBucket(L.queriesPerMin, L.queriesPerMin / 60);
     this.drops = new TokenBucket(L.dropsPerHour, L.dropsPerHour / 3600);
     this.dirReads = new TokenBucket(L.directoryReadsPerMin, L.directoryReadsPerMin / 60);
     this.search = new TokenBucket(L.searchPerMin, L.searchPerMin / 60);
     this.posts = new TokenBucket(L.postsPerMin, L.postsPerMin / 60);
     this.sides = new TokenBucket(L.sideWritesPerMin, L.sideWritesPerMin / 60);
-    this.creates = new TokenBucket(L.chatCreatesPerDay, L.chatCreatesPerDay / 86400);
+    this.calls = new TokenBucket(L.callSignalsPerMin, L.callSignalsPerMin / 60);
     this.reports = new TokenBucket(L.reportsPerMin, L.reportsPerMin / 60);
+    this.pushOps = new TokenBucket(L.pushOpsPerMin, L.pushOpsPerMin / 60);
     this.helloTimer = setTimeout(() => this.close('hello timeout'), L.helloDeadlineMs);
     this.idleTimer = null;
     this.touch();
@@ -348,7 +465,7 @@ export class Connection {
 
   // The identity view handed to the store's authorization checks.
   actor() {
-    return { handle: this.proven, viaAccountKey: this.provedWith === 'account' || this.provedWith === 'signup', mayCreate: this.mayCreate, pub: this.pub, chats: this.chats, conn: this };
+    return { handle: this.proven, viaAccountKey: this.provedWith === 'account' || this.provedWith === 'signup', dev: this.dev, mayCreate: this.mayCreate, pub: this.pub, chats: this.chats, conn: this };
   }
 
   // Called by the server when a rotation or deletion revokes this connection's level.
@@ -365,7 +482,38 @@ export class Connection {
   }
 
   send(obj) {
-    if (this.ws.readyState === OPEN) this.ws.send(JSON.stringify(obj));
+    if (this.ws.readyState !== OPEN) return;
+    // What a client asked for (a reply, a watch's first load) only makes its next frames wait (hold); what it did not (a watch's
+    // pushes) is not held back by that, so past the hard limit a client that does not read is closed.
+    if (obj.i === undefined && obj.t !== 'init' && this.ws.bufferedAmount > this.limits.sendBufferMaxBytes) return this.close('not reading');
+    this.ws.send(JSON.stringify(obj));
+    if (this.ws.bufferedAmount > this.limits.sendBufferBytes) this.hold();
+  }
+
+  // Past the soft limit the client's frames wait, read or not, until what it has not taken drains below it: a slow reader is only
+  // slowed. ws has no drain event, so it is looked at every 50 ms. Draining counts as not idle (its keep-alive waits unread too); a
+  // client that never drains ends at idleMs as before.
+  hold() {
+    if (this.held || this.closed) return;
+    this.held = true;
+    this.ws.pause();
+    let last = this.ws.bufferedAmount;
+    const t = setInterval(() => {
+      if (this.closed) return clearInterval(t);
+      const now = this.ws.bufferedAmount;
+      if (now < last) this.touch();
+      last = now;
+      if (now > this.limits.sendBufferBytes) return;
+      clearInterval(t);
+      this.held = false;
+      while (!this.held && !this.closed && this.later.length) this.take(...this.later.shift());
+      this.readAgain();
+    }, 50);
+    if (t.unref) t.unref();
+  }
+
+  readAgain() {
+    if (!this.waiting && !this.held && !this.closed) this.ws.resume();
   }
 
   close(reason, code = 1000) {
@@ -402,6 +550,9 @@ export class Connection {
 
   replyError(i, e) {
     if (e instanceof HushError) {
+      // An answer refused for its size was read up to the cap: it is paid for, below zero if need be, from an allowance of its own
+      // (refilled when answerOk let the request in), so an honest page's refused watch never refuses its other frames (release 110).
+      if (e.n) this.refusals.tokens -= e.n;
       const out = { i, ok: false, e: e.code, m: e.message };
       if (e.code === 'pow') { out.bits = e.bits; out.salt = e.salt; }   // the puzzle to solve, then try again
       return this.send(out);
@@ -411,6 +562,11 @@ export class Connection {
   }
 
   onMessage(data, isBinary) {
+    if (this.held) return void this.later.push([data, isBinary]);   // already read off the socket when it paused: kept, in order
+    this.take(data, isBinary);
+  }
+
+  take(data, isBinary) {
     try {
       this.handleFrame(data, isBinary);
     } catch (e) {
@@ -421,17 +577,43 @@ export class Connection {
     }
   }
 
+  // Over its allowance a socket is not read for a moment, one frame's refill (300 a minute): most of a flood's cost is in reading, unmasking and
+  // checking each frame before it gets here, so the sender waits on its own socket instead. Its refusals are only that much later.
+  waitToRead() {
+    if (this.waiting) return;
+    this.waiting = true;
+    this.ws.pause();
+    const t = setTimeout(() => { this.waiting = false; this.readAgain(); }, 200);
+    if (t.unref) t.unref();
+  }
+
   handleFrame(data, isBinary) {
     if (this.closed) return;
     this.touch();
     const size = data.length;
+    // The allowances come before parsing, so large junk frames can't keep the single thread busy, whatever each op charges. Over them only
+    // the first bytes are read, for the i a page relies on hearing back; a frame with none there is a bad frame.
+    const framed = this.frames.take();
+    if (!framed || !this.bytes.take(size)) {
+      this.waitToRead();
+      const head = isBinary ? '' : Buffer.isBuffer(data) ? data.toString('latin1', 0, 64) : String(data).slice(0, 64);
+      // A page's keep-alive is answered all the same (release 100): a page that had spent its frames on a long chat list took the
+      // refusal for a dead socket and reconnected, which loaded the list again. Only that exact frame, only when it was the frame
+      // allowance that refused it, only after hello; no token is given and the socket still waits, so it is no way around the allowance.
+      // (The pattern's longest match is 33 characters, so the 64-character head never cuts a longer frame down to one.)
+      const ping = !framed && this.helloed && PING.exec(head);
+      if (ping) return this.send({ i: Number(ping[1]), ok: true, now: this.ctx.now() });
+      const m = HEAD_I.exec(head), L = this.limits;
+      // retry: the milliseconds before asking again is any use, one frame's refill or this frame's bytes'
+      return m ? this.send({ i: Number(m[1]), ok: false, e: 'ratelimit', m: 'slow down', retry: Math.ceil(framed ? size * 60000 / L.bytesPerMin : 60000 / L.framesPerMin) })
+        : this.rejectFrame({ ok: false, e: 'invalid', m: 'frame needs an integer "i" and a string "op"' });
+    }
     let f;
     try { f = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : String(data)); }
     catch { return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame is not JSON' }); }
     if (isBinary || !f || typeof f !== 'object' || Array.isArray(f)) return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame must be a JSON object' });
     if (!Number.isInteger(f.i) || typeof f.op !== 'string') return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame needs an integer "i" and a string "op"' });
     const i = f.i;
-    if (!this.frames.take() || !this.bytes.take(size)) return this.send({ i, ok: false, e: 'ratelimit', m: 'slow down' });
     let result;
     try {
       if (!this.helloed && f.op !== 'hello') fail('unauth', 'say hello first');

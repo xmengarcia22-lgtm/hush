@@ -1,0 +1,19 @@
+#!/usr/sbin/nft -f
+# Hush call relay (SPEC.md 16.3): coturn may forward only to this server's own address (turnserver.conf, allowed-peer-ip),
+# and here only to its own relay ports there, so a caller can't point it at Caddy's HTTP/3 (udp/443) or anything else on
+# the box. Install as /etc/hush/turn.nft, owner root, mode 644, and replace <server address> (the conf's relay-ip).
+# scripts/hush-turn-nft.service loads it. The first two lines make loading it again replace the table, not add to it.
+# Every relay gets this file with its own address (the US setup script does that sed). skuid takes the user name: nft resolves
+# it when loading and lists it back as the number (100 on Helsinki).
+table inet hush_turn
+delete table inet hush_turn
+table inet hush_turn {
+	chain out {
+		# just before a default filter chain (priority 0), and only ever drops
+		type filter hook output priority -1; policy accept;
+		# only what the relay forwards (it leaves from a relay port); replies from 3478 to a client on this host stay allowed
+		meta skuid turnserver ip daddr <server address> udp sport 49152-49651 udp dport != 49152-49651 drop
+		# and to nothing but this server, even if coturn's own peer check (allowed-peer-ip) were bypassed
+		meta skuid turnserver udp sport 49152-49651 ip daddr != <server address> drop
+	}
+}

@@ -1,0 +1,113 @@
+{
+ "about": "The profile, Privacy and Advanced as the page draws them, for server/test/settings-actions.test.js (its head says how this is recorded). Never edit by hand.",
+ "screens": {
+  "profile": {
+   "rows": [
+    "p.t-sub.center: @alice",
+    "label.field: Name",
+    "label.field: Username capitals",
+    "p.hint: You can change which letters are capitals. The letters themselves stay the same, and people find you either way.",
+    "label.field: Bio",
+    "button.primary: Save profile",
+    "div.err: ",
+    "p.hint: Your name, photo and bio are visible to anyone on Hush. Your messages are what’s encrypted.",
+    "hr.pf-sep: ",
+    "button.menu-item.flush.pf-row: More settings | ›",
+    "button.menu-item.flush.pf-row: Saved Messages | ›"
+   ],
+   "sha": "ed660a214488143a"
+  },
+  "profile, an account with nothing in the directory": {
+   "rows": [
+    "p.t-sub.center: @alice",
+    "label.field: Name",
+    "label.field: Username capitals",
+    "p.hint: You can change which letters are capitals. The letters themselves stay the same, and people find you either way.",
+    "label.field: Bio",
+    "button.primary: Save profile",
+    "div.err: ",
+    "p.hint: Your name, photo and bio are visible to anyone on Hush. Your messages are what’s encrypted.",
+    "hr.pf-sep: ",
+    "button.menu-item.flush.pf-row: More settings | ›",
+    "button.menu-item.flush.pf-row: Saved Messages | ›"
+   ],
+   "sha": "6328d0559b7351f3"
+  },
+  "privacy, a new account": {
+   "rows": [
+    "div.set-label: Who can find me in search",
+    "div.seg: Anyone | Exact username only",
+    "p.hint: Either way, being found doesn’t let anyone read your messages. Your invite link always works.",
+    "div.set-label: New people can",
+    "div.seg: Message me directly | Send a request first",
+    "p.hint: With “Send a request first,” Hush asks a new person to send one text message as a request before a one-on-one chat. Chats you already have aren’t affected. People can still add you to groups and channels.",
+    "label.toggle: Show my online status and last seen",
+    "p.hint: People you can see in Hush will see when you’re online. Turn it off and they’ll see “last seen recently” instead.",
+    "div.menu-label.flush: Blocked",
+    "div: ",
+    "p.hint: Nothing is blocked. You can block a person from their profile or a chat’s menu, or block someone from a group you run in its member list."
+   ],
+   "sha": "2b483443a0dca68d"
+  },
+  "privacy, both choices on, a saved number and every kind of block": {
+   "rows": [
+    "div.set-label: Who can find me in search",
+    "div.seg: Anyone | Exact username only",
+    "p.hint: Either way, being found doesn’t let anyone read your messages. Your invite link always works.",
+    "div.set-label: New people can",
+    "div.seg: Message me directly | Send a request first",
+    "p.hint: With “Send a request first,” Hush asks a new person to send one text message as a request before a one-on-one chat. Chats you already have aren’t affected. People can still add you to groups and channels.",
+    "label.toggle: Show my online status and last seen",
+    "p.hint: People you can see in Hush will see when you’re online. Turn it off and they’ll see “last seen recently” instead.",
+    "div.menu-label.flush: Blocked",
+    "div.menu-item.flush.static: bea | Bea | Person · everywhere | Unblock",
+    "div.menu-item.flush.static: c9 | Chat | This chat only | Unblock",
+    "div.menu-item.flush.static: d7 | Dan | This chat only | Unblock",
+    "div: zed | Zed | Blocked from Team | Unblock"
+   ],
+   "sha": "ead5cc4782dc3559"
+  },
+  "advanced, Message backup on": {
+   "rows": [
+    "div.menu-label.flush: Account recovery",
+    "button.menu-item.flush: Recovery words | On",
+    "button.menu-item.flush: Restore an account",
+    "label.toggle: Message backup",
+    "p.hint: On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.",
+    "div.menu-label.flush: Security",
+    "button.menu-item.flush: Lock Hush | Off",
+    "div.menu-label.flush: Encryption",
+    "label.toggle: Show what Hush stores",
+    "p.hint: Shows your messages the way Hush keeps them: scrambled text that only the people in the chat can unlock. A way to see for yourself that Hush can’t read them.",
+    "button.menu-item.flush: How encryption works",
+    "div.menu-label.flush: Banners",
+    "label.toggle: Hide message text in banners",
+    "p.hint: Banners then say only “New message”.",
+    "div.menu-label.flush: Account",
+    "button.menu-item.danger.flush: Delete account"
+   ],
+   "sha": "9d4a417288bf9be2"
+  },
+  "advanced, Message backup off": {
+   "rows": [
+    "div.menu-label.flush: Account recovery",
+    "button.menu-item.flush: Recovery words | On",
+    "button.menu-item.flush: Restore an account",
+    "label.toggle: Message backup",
+    "p.hint: On: your messages are restored when you log in on a new phone. Off: older messages stay only on the devices that already have them, so a stolen password reveals nothing from before.",
+    "div.menu-label.flush: Security",
+    "button.menu-item.flush: Lock Hush | Off",
+    "div.menu-label.flush: Encryption",
+    "label.toggle: Show what Hush stores",
+    "p.hint: Shows your messages the way Hush keeps them: scrambled text that only the people in the chat can unlock. A way to see for yourself that Hush can’t read them.",
+    "button.menu-item.flush: How encryption works",
+    "div.menu-label.flush: Banners",
+    "label.toggle: Hide message text in banners",
+    "p.hint: Banners then say only “New message”.",
+    "div.menu-label.flush: Account",
+    "button.menu-item.danger.flush: Delete account"
+   ],
+   "sha": "9d4d6b055393849a"
+  }
+ }
+}

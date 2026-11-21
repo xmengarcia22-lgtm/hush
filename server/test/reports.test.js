@@ -1,11 +1,12 @@
 // Reports (SPEC.md 8.7): a post in a public group or channel can be reported; the server keeps its own copy of the post,
-// that epoch's published key and the reason, never the reporter; only the operator's HUSH_OWNERS read them.
+// that epoch's published key and the reason, never the reporter; only the operator's HUSH_OWNERS read them. Since release 107
+// only a channel is made public; the report rule itself is unchanged, so a public group from before still counts.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import { parseOwners, loadConfig } from '../src/config.js';
-import { startServer, connect, connectAs, signup, makeIdentity, cap, channelDoc, groupDoc, dmDoc, createChat } from './helpers.js';
+import { startServer, connect, connectAs, signup, makeIdentity, cap, label, wrap, CAPS, channelDoc, groupDoc, dmDoc, createChat } from './helpers.js';
 
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const post = (over = {}) => ({ sl: 1, ts: Date.now(), e: 0, n: 'bm9uY2U=', d: 'Y2lwaGVy', oh: sha('t0'), on: 0, ...over });
@@ -28,6 +29,7 @@ before(async () => {
 after(async () => { await A.close(); await B.close(); await O.close(); await S.stop(); });
 
 const rows = () => S.srv.store.db.prepare('SELECT * FROM reports').all();
+const plant = (cid, over) => { const st = S.srv.store, { p, doc } = st._chatDoc(cid); st._write(p, { ...doc, ...over }, st.now()); };   // a record as it could be before release 107, which no write makes any more
 
 test('a post in a public channel can be reported; the owner reads the server\'s own copy, never the reporter', async () => {
   // The reporter never opened the channel: anyone may read a public one.
@@ -60,20 +62,32 @@ test('a post in a public channel can be reported; the owner reads the server\'s 
 
 test('DMs and private chats can never be reported, whatever the client claims', async () => {
   const DM = 'd' + 'R'.repeat(22), G = 'gRepPrivate01', C = 'cRepPrivate01', GP = 'gRepPubGrp001', CP = 'cRepWasPub001';
-  await createChat(A, DM, dmDoc({ visibility: 'public' }), { m: cap() });   // a crafted DM that says it is public
+  // A crafted DM that says it is public is no longer made (release 107: only a channel can be public). One marked so in the
+  // store, as a record from before that release could be, is still judged by its type.
+  assert.equal((await A.call('chat.create', { cid: DM, d: dmDoc({ visibility: 'public' }), caps: { m: cap() } })).e, 'invalid');
+  await createChat(A, DM, dmDoc(), { m: cap() });
+  plant(DM, { visibility: 'public' });
   await createChat(A, G, groupDoc());
   await createChat(A, C, channelDoc());
   await createChat(A, CP, pubChannel());
   for (const cid of [DM, G, C, CP]) await A.ok('set', { p: `channels/${cid}/posts/${PID}`, d: post() });
   for (const cid of [DM, G, C]) assert.equal((await B.call('report.send', { cid, pid: PID, reason: 'spam' })).e, 'denied', cid);
   assert.equal((await B.call('report.send', { cid: DM, pid: 'nOpE00000001', reason: 'spam' })).e, 'denied', 'a missing post in a DM says nothing more');
-  // A channel made private after it was public is judged by what it is now.
+  // A channel made private after it was public is judged by what it is now. Private it gets after a key change, as the page
+  // makes one: with its current key still published it is no longer made private (release 107).
   await B.ok('report.send', { cid: CP, pid: PID, reason: 'spam' });
-  await A.ok('update', { p: `channels/${CP}`, d: { visibility: 'private', name: null, desc: null, owner: null, admins: null } });
+  const goPrivate = { p: `channels/${CP}`, d: { visibility: 'private', name: null, desc: null, owner: null, admins: null } };
+  assert.equal((await A.call('update', goPrivate)).e, 'invalid');
+  await A.ok('chat.rotate', { cid: CP, epoch: 1, keys: { [label()]: wrap() }, cap: cap() });
+  await A.ok('update', goPrivate);
   assert.equal((await A.call('report.send', { cid: CP, pid: PID, reason: 'spam' })).e, 'denied');
-  // A public group is a public chat like a public channel.
-  await createChat(A, GP, groupDoc({ visibility: 'public', name: 'Club', owner: 'alice', admins: [], meta: undefined, openKeys: { 0: OPEN_KEY } }));
-  await A.ok('set', { p: `channels/${GP}/posts/${PID}`, d: post() });
+  // A public group is no longer made (release 107). One from before that release, here written straight into the store, is a
+  // public chat like a public channel.
+  const pubGroup = { visibility: 'public', name: 'Club', owner: 'alice', admins: [], meta: undefined, openKeys: { 0: OPEN_KEY } };
+  assert.equal((await A.call('chat.create', { cid: GP, d: groupDoc(pubGroup), caps: CAPS() })).e, 'invalid');
+  await createChat(A, GP, groupDoc());
+  plant(GP, pubGroup);
+  await A.ok('set',{ p: `channels/${GP}/posts/${PID}`, d: post() });
   await B.ok('report.send', { cid: GP, pid: PID, reason: 'illegal' });
 });
 

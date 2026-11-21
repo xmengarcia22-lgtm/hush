@@ -89,7 +89,8 @@ test('proof of work: asked for when the recipient only wants contacts, checked s
     await B.ok('update', { p: 'directory/bob', d: { requests: true } });
     const asked = await json(await post(S.httpUrl, { to: 'bob', blob: note() }));
     assert.equal(asked.status, 429); assert.equal(asked.e, 'pow'); assert.equal(asked.bits, 8); assert.equal(asked.hour, hourOf(Date.now()));
-    assert.equal((await json(await post(S.httpUrl, { to: 'bob', blob: note(), pow: { nonce: 'wrong' } }))).e, 'pow');
+    const bad = ['wrong', 'wrong2', 'wrong3', 'wrong4'].find((n) => !powOk('bob', asked.hour, n, 8)); // one nonce in 256 is a valid 8-bit proof for a given hour by chance: pick one that is not
+    assert.equal((await json(await post(S.httpUrl, { to: 'bob', blob: note(), pow: { nonce: bad } }))).e, 'pow');
     const nonce = solve('bob', asked.hour, asked.bits);
     assert.equal(powOk('bob', asked.hour, nonce, 8), true);
     assert.equal(powOk('bob', asked.hour - 36e5, nonce, 8) && powOk('bob', asked.hour, nonce, 8), powOk('bob', asked.hour - 36e5, nonce, 8), 'tied to the hour');

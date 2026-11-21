@@ -2,13 +2,23 @@
 
 Private messaging with end-to-end encryption: a web app and the small Node.js server behind it.
 
-The server stores encrypted messages it cannot read, public profiles, and the minimum needed to deliver
-data to the right people. It does not store IP addresses or access logs, and its database does not record
-chat membership, who sent which message, or who talks to whom. Group names and member lists are encrypted
-with the group's own key. People find their chats through an encrypted list only their own devices can
-open. Invitations arrive in a sealed mailbox that records only the recipient and the hour. Searching by
-name or part of a username lists only people who turned that on; typing an exact username finds anyone,
-since that is how chats start. `SPEC.md` is the full design and threat model.
+The server stores encrypted messages, public profiles, and the minimum needed to deliver data to the right
+people. A copy of its database cannot read the messages. It does not store IP addresses or access logs, and
+its database does not record chat membership, who sent which message, or who talks to whom. Group names and
+member lists are encrypted with the group's own key. People find their chats through an encrypted list only
+their own devices can open. Invitations arrive in a sealed mailbox that records only the recipient and the
+hour. Searching by name or part of a username lists only people who turned that on; typing an exact username
+finds anyone, since that is how chats start. `SPEC.md` is the full design and threat model.
+
+**A malicious server can still read new messages in private groups and one-on-one chats.** The server, or
+anyone who can write to its database, can serve a key change with a key it chose, wrapped to the members'
+public keys. Nothing signs or announces a group or one-on-one key change, so people's apps accept it and seal
+new messages under that key from then on. The server can then read those messages, with their media keys,
+service notes and call setup, and the names and member lists written afterwards. Checking security codes does
+not stop this. Messages sealed before the switch stay unreadable to it. Private channels refuse such a key
+change on devices that have seen the channel's key chain and hold the owner's signed admin list, but not on a
+device seeing the channel for the first time. A fix is being decided. Today the server also serves the page
+itself. [SECURITY.md](SECURITY.md) has the full list of limits.
 
 ## What the server can see
 
@@ -27,7 +37,10 @@ since that is how chats start. `SPEC.md` is the full design and threat model.
 
 **A live server**, or anyone running it, sees more than the database does. It sees which account sends each
 message, which chats each connection opens, and each person's contact list, which their app refreshes about
-once a minute. The claims above about who sends what and who talks to whom are true of the stored data only.
+once a minute. During a voice call its relay also sees both people's network addresses and how long the call
+lasts (`SECURITY.md`). The claims above about who sends what and who talks to whom are true of the stored data only.
+A live server that acts against its users can also plant a key and read new messages in private groups and
+one-on-one chats (see above).
 
 ## What is here
 

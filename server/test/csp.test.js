@@ -24,7 +24,8 @@ test('the policy allows the local server and nothing from Google', () => {
   const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(html)[1];
   assert.ok(!/googleapis|firebaseapp|firebase/.test(meta));
   assert.match(meta, /script-src 'self';/, 'scripts come only from the page\'s own origin, each pinned by its integrity attribute');
-  assert.match(meta, /connect-src 'self' data: blob: ws:\/\/127\.0\.0\.1:8080 http:\/\/127\.0\.0\.1:8080 wss:\/\/hushappofficial\.com;/, 'the socket, the same address for POST /drop when the page is opened at another origin, and the production socket named for browsers whose \'self\' does not cover it');
+  assert.match(meta, /connect-src 'self' data: blob: wss:\/\/hushappofficial\.com;/, 'the socket and POST /drop on the page\'s own origin, and the production socket named for browsers whose \'self\' does not cover it');
+  assert.ok(!/127\.0\.0\.1|localhost/.test(meta), 'the loopback spellings are not in the production page: the development static server adds them itself');
   assert.ok(!/frame-src/.test(meta));
 });
 

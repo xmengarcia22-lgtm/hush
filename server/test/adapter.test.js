@@ -335,3 +335,44 @@ test('reconnects after the server restarts and re-establishes subscriptions', as
     assert.deepEqual(db.statuses, [true, false, true]);
   } finally { db.close(); if (S2) await S2.stop(); }
 });
+
+// ---- ringing when the app is closed: the push address and wake tickets are account ops; POST /wake is anonymous ----
+test('POST /wake: one anonymous JSON body, no cookie or referrer, and nothing comes back, not even a failure', async () => {
+  const S = await startServer();
+  const calls = [];
+  const db = openAdapter(S.url, { fetch: async (url, o) => { calls.push([url, o]); if (o.body.includes('boom')) throw new Error('net'); return { ok: true, status: 204 }; } });
+  const live = openAdapter(S.url);
+  try {
+    await Promise.all([db.ready, live.ready]);
+    assert.equal(await db.wake('tIcKeT0123456789abcdef'), undefined);
+    assert.equal(await db.wake('boom'), undefined, 'a network failure is swallowed: the caller has a call to place');
+    const [url, o] = calls[0];
+    assert.equal(url, S.httpUrl + '/wake');
+    assert.deepEqual([o.method, o.body, o.credentials, o.cache, o.referrerPolicy, o.headers['content-type']], ['POST', '{"tk":"tIcKeT0123456789abcdef"}', 'omit', 'no-store', 'no-referrer', 'application/json']);
+    assert.equal(calls.length, 2);
+    assert.equal(await live.wake('tIcKeT0123456789abcdef'), undefined, 'the real server answers 204 for an unknown ticket, and the adapter says nothing');
+  } finally { db.close(); live.close(); await S.stop(); }
+});
+
+test('pushSet, wakeMint, wakeRevoke and pushClear go straight over the proven connection, no chat to open', async () => {
+  const S = await startServer({ authz: 'standard' });
+  const alice = await makeIdentity('alice');
+  const db = openAdapter(S.url, { offlineWaitMs: 5000 });
+  try {
+    await db.ready;
+    await db.prove(proofFor(alice));
+    await db.doc('directory/alice').set(directoryDoc(alice));
+    const dev = await makeDevice(alice);
+    await db.doc('directory/alice').update({ devs: { [dev.id]: dev.entry } });
+    await db.pushSet({ dev: dev.id, tok: 'AB'.repeat(32), env: 'prod' });
+    const { tickets } = await db.wakeMint({ dev: dev.id, n: 2 });
+    assert.equal(tickets.length, 2);
+    for (const tk of tickets) assert.match(tk, /^[A-Za-z0-9_-]{22}$/);
+    assert.deepEqual(S.srv.store.wakeLookup(tickets[0]), { h: 'alice', dev: dev.id, k: 'c', tok: 'ab'.repeat(32), env: 'prod' });
+    await db.wakeRevoke({ tk: tickets[0] });
+    assert.equal(S.srv.store.wakeLookup(tickets[0]), null);
+    await db.pushClear({ dev: dev.id });
+    assert.equal(S.srv.store.wakeLookup(tickets[1]), null, 'the address gone, its tickets go with it');
+    await assert.rejects(db.pushSet({ dev: dev.id, tok: 'zz', env: 'prod' }), (e) => e.code === 'invalid');
+  } finally { db.close(); await S.stop(); }
+});

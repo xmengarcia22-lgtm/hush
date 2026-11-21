@@ -5,9 +5,11 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { startServer, connect, connectAs, signup, solveSignup, makeIdentity, directoryDoc, cap, label, wrap, sealed, CAPS, groupDoc, createChat, TAG } from './helpers.js';
-import { hashEq } from '../src/store.js';
+import { startServer, connect, connectAs, signup, solveSignup, makeIdentity, makeDevice, signText, sessionMsg, directoryDoc, cap, label, wrap, sealed, CAPS, groupDoc, createChat, TAG } from './helpers.js';
+import { hashEq, SYSTEM } from '../src/store.js';
 import { loadConfig } from '../src/config.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
+import { NOTE_BYTES } from '../src/schemas.js';
 
 const gid = (n) => 'g' + String(n).padStart(12, '0');
 const post = () => ({ sl: 1, ts: Date.now(), e: 0, n: 'bm9uY2U=', d: 'Y2lwaGVy', oh: 'a'.repeat(64), on: 0 });
@@ -53,6 +55,88 @@ test('a new account brings proof of work; a per-address count stays only as a ba
     assert.equal((await again.call('set', { p: 'directory/alice', d: { ...directoryDoc(alice), name: 'Alice' } })).ok, true, 'rewriting an existing profile needs no puzzle');
     await again.close();
     assert.notEqual(S.srv.tagger.tagDay('1.2.3.4'), S.srv.tagger.tag('1.2.3.4'), 'the daily tag is its own salt');
+    assert.equal(DEFAULT_LIMITS.signupsPerDayPerAddr, 10, 'the backstop itself: ten a day (release 62; the test helper lifts it to 1000)');
+  } finally { await S.stop(); }
+});
+
+test('boxes made before signing in are counted per address a day and refused on a full disk; a signed-in account\'s own are not counted', async () => {
+  const box = (n = 4) => ({ iv: 'aXY=', ct: 'Y'.repeat(n) });
+  const S = await startServer({ authz: 'standard', limits: { anonBoxesPerDayPerAddr: 3, anonBoxBytesPerDayPerAddr: 200 } });
+  try {
+    const anon = await connect(S.url); await anon.hello();
+    assert.equal((await anon.call('set', { p: 'accounts/' + 'A'.repeat(43), d: box() })).ok, true);
+    assert.equal((await anon.call('set', { p: 'vault/v' + 'b'.repeat(32), d: { ...box(), ts: 1 } })).ok, true);
+    assert.equal((await anon.call('set', { p: 'vault/v' + 'c'.repeat(32), d: { ...box(160), ts: 1 } })).e, 'ratelimit', 'the third would pass the day\'s bytes');
+    assert.equal((await anon.call('set', { p: 'logins/' + 'D'.repeat(43), d: { ts: 1 } })).e, 'ratelimit', 'and the day\'s count is used up');
+    assert.equal((await anon.call('set', { p: 'vault/v' + 'b'.repeat(32), d: { ...box(), ts: 2 } })).ok, true, 'replacing a box that is there is not a new box');
+    const other = await connect(S.url, { headers: { 'x-forwarded-for': '203.0.113.9' } }); await other.hello();
+    assert.equal((await other.call('set', { p: 'logins/' + 'E'.repeat(43), d: { ts: 1 } })).ok, true, 'another address has its own day');
+    const A = await signup(S.url, await makeIdentity('alice'));
+    for (const k of ['f', 'g', 'h', 'i']) assert.equal((await A.call('set', { p: 'vault/v' + k.repeat(32), d: { ...box(), ts: 1 } })).ok, true, 'signed in: the address count does not apply');
+    await anon.close(); await other.close(); await A.close();
+  } finally { await S.stop(); }
+  const U = await startServer({ authz: 'standard', limits: { boxesPerDayPerAcct: 2, boxBytesPerDayPerAcct: 400 } });
+  try {
+    const alice = await makeIdentity('alice'), A1 = await signup(U.url, alice), A2 = await connectAs(U.url, alice);
+    assert.equal((await A1.call('set', { p: 'vault/v' + 'a'.repeat(32), d: { ...box(), ts: 1 } })).ok, true);
+    assert.equal((await A2.call('set', { p: 'backup/b' + 'b'.repeat(32), d: { ...box(), ts: 1 }, was: 0 })).ok, true, 'on another socket');
+    assert.equal((await A1.call('set', { p: 'vault/v' + 'c'.repeat(32), d: { ...box(), ts: 1 } })).e, 'ratelimit', 'the account\'s day is used up, whatever the socket');
+    assert.equal((await A2.call('set', { p: 'vault/v' + 'a'.repeat(32), d: { ...box(), ts: 2 } })).ok, true, 'replacing its own box is not a new box');
+    const B = await signup(U.url, await makeIdentity('bob'));
+    assert.equal((await B.call('set', { p: 'vault/v' + 'd'.repeat(32), d: { ...box(), ts: 1 } })).ok, true, 'another account has its own day...');
+    assert.equal((await B.call('set', { p: 'vault/v' + 'e'.repeat(32), d: { ...box(380), ts: 1 } })).e, 'ratelimit', '...and its own bytes');
+    const anon = await connect(U.url); await anon.hello();
+    assert.equal((await anon.call('set', { p: 'logins/' + 'F'.repeat(43), d: { ts: 1 } })).ok, true, 'the address count before signing in is a separate one');
+    await A1.close(); await A2.close(); await B.close(); await anon.close();
+  } finally { await U.stop(); }
+  const T = await startServer({ authz: 'standard', diskFree: () => ({ free: 1e9, total: 40e9 }) });
+  try {
+    const A = await signup(T.url, await makeIdentity('alice'));   // a profile is not a box: a sign-up still works
+    assert.equal((await A.call('set', { p: 'vault/v' + 'a'.repeat(32), d: { ...box(), ts: 1 } })).e, 'full', 'no new box on a nearly full disk, signed in or not');
+    const anon = await connect(T.url); await anon.hello();
+    assert.equal((await anon.call('set', { p: 'accounts/' + 'A'.repeat(43), d: box() })).e, 'full');
+    T.srv.store.set('vault/v' + 'b'.repeat(32), { ...box(), ts: 1 }, SYSTEM);
+    assert.equal((await anon.call('set', { p: 'vault/v' + 'b'.repeat(32), d: { ...box(), ts: 2 } })).ok, true, 'a box already there may still be replaced');
+    assert.equal((await A.call('set', { p: `channels/${gid(1)}/posts/pOsT00000001`, d: post() })).e, 'denied', 'other writes are not the disk guard\'s business (this one wants a chat key)');
+    await anon.close(); await A.close();
+  } finally { await T.stop(); }
+});
+
+test('chat creates are counted per account, whatever the socket', async () => {
+  const S = await startServer({ authz: 'standard', limits: { chatCreatesPerDay: 2 } });
+  try {
+    const alice = await makeIdentity('alice');
+    const A1 = await signup(S.url, alice), A2 = await connectAs(S.url, alice);
+    await createChat(A1, gid(1), groupDoc());
+    await createChat(A2, gid(2), groupDoc());
+    assert.equal((await A2.call('chat.create', { cid: gid(3), d: groupDoc(), caps: CAPS() })).e, 'ratelimit', 'a second socket is not a second allowance');
+    assert.equal((await A1.call('chat.create', { cid: gid(3), d: groupDoc(), caps: CAPS() })).e, 'ratelimit');
+    const A3 = await connectAs(S.url, alice);
+    assert.equal((await A3.call('chat.create', { cid: gid(3), d: groupDoc(), caps: CAPS() })).e, 'ratelimit', 'nor is a fresh one');
+    const B = await signup(S.url, await makeIdentity('bob'));
+    await createChat(B, gid(4), groupDoc());
+    const anon = await connect(S.url); await anon.hello();
+    assert.equal((await anon.call('chat.create', { cid: gid(5), d: groupDoc(), caps: CAPS() })).e, 'unauth');
+    await A1.close(); await A2.close(); await A3.close(); await B.close(); await anon.close();
+  } finally { await S.stop(); }
+});
+
+test('so many sockets open at once per address; the next is refused at the upgrade', async () => {
+  const S = await startServer();
+  try {
+    const from = (a) => connect(S.url, { headers: { 'x-forwarded-for': a } });
+    const open = [];
+    for (let i = 0; i < 40; i++) open.push(await from('203.0.113.77'));
+    await assert.rejects(from('203.0.113.77'), /http 429|ECONNRESET|socket hang up/, 'the 41st');
+    S.srv.tagger.rotate(); S.srv.tagger.rotateDay();
+    await assert.rejects(from('203.0.113.77'), /http 429|ECONNRESET|socket hang up/, 'a salt rotation is not a fresh allowance: the count is "open at once"');
+    const other = await from('203.0.113.78'); await other.hello();   // another address is not held back
+    await open.pop().close();
+    const again = await from('203.0.113.77'); await again.hello();   // one closed: one more fits
+    await assert.rejects(from('203.0.113.77'), /http 429|ECONNRESET|socket hang up/);
+    assert.equal(S.srv.conns.size, 41, '39 left open, the other address, and the one that fit');
+    await other.close(); await again.close();
+    for (const c of open) await c.close();
   } finally { await S.stop(); }
 });
 
@@ -71,6 +155,52 @@ test('with nothing listed, only a page served from this host may connect; HUSH_O
     assert.equal((await fetch(S.httpUrl + '/media/limits', { headers: { origin: 'https://evil.example' } })).headers.get('access-control-allow-origin'), null, 'no CORS for a stranger');
     assert.equal((await fetch(S.httpUrl + '/media/limits', { headers: { origin: 'http://' + host } })).headers.get('access-control-allow-origin'), 'http://' + host);
   } finally { await S.stop(); }
+});
+
+test('with nothing listed, POST /wake and POST /drop answer another site\'s page, or Origin null, with 403 denied before anything is counted; this host\'s page, a listed origin and a request with no Origin are processed as before', async () => {
+  const sent = [], apns = { close() {}, send(x) { sent.push(x); return Promise.resolve({ status: 200, reason: '' }); } };   // Apple, standing in
+  // A simple request (text/plain, so no preflight): what a form or a script on any site can make a visitor's browser send.
+  const send = (T, path, body, origin) => fetch(T.httpUrl + path, { method: 'POST', headers: { 'content-type': 'text/plain', ...(origin === undefined ? {} : { origin }) }, body: JSON.stringify(body) });
+  const code = async (r) => { const t = await r.text(); try { return JSON.parse(t).e; } catch { return t; } };   // a 204 has no body
+  const note = { epk: { x: 'x'.repeat(43), y: 'y'.repeat(43) }, iv: 'aXY=', ct: Buffer.alloc(NOTE_BYTES, 7).toString('base64') };
+  const S = await startServer({ authz: 'standard', origins: [], apns });   // the default outside the tests
+  try {
+    const host = new URL(S.httpUrl).host;
+    // bob signs up on a page served here, lists his phone and hands out one call ticket for it
+    const bob = await makeIdentity('bob'), phone = await makeDevice(bob);
+    const B = await connect(S.url, { headers: { Origin: 'http://' + host } });
+    const { nonce } = await B.hello();
+    await B.ok('prove', { h: 'bob', sig: await signText(bob.sigKey, sessionMsg(nonce, 'bob')), pub: bob.sig });
+    const { salt, bits } = await B.ok('signup.pow');
+    await B.ok('set', { p: 'directory/bob', d: directoryDoc(bob), pow: solveSignup(salt, bits) });
+    await B.ok('update', { p: 'directory/bob', d: { devs: { [phone.id]: phone.entry } } });
+    await B.ok('push.set', { dev: phone.id, tok: 'ab'.repeat(32), env: 'prod' });
+    const [tk] = (await B.ok('wake.mint', { dev: phone.id })).tickets;
+    await B.close();
+    const tries = [];
+    for (const origin of ['https://evil.example', 'null']) {   // 'null': a sandboxed frame, or a form under no-referrer
+      const w = await send(S, '/wake', { tk }, origin), d = await send(S, '/drop', { to: 'bob', blob: note }, origin);
+      tries.push({ origin, wake: [w.status, await code(w)], drop: [d.status, await code(d)] });
+    }
+    assert.deepEqual(tries, [{ origin: 'https://evil.example', wake: [403, 'denied'], drop: [403, 'denied'] }, { origin: 'null', wake: [403, 'denied'], drop: [403, 'denied'] }]);
+    assert.equal(S.srv.wakes.addr.size + S.srv.wakes.minute.size + S.srv.wakes.hour.size, 0, 'no wake allowance was spent, the address\'s or the ticket\'s');
+    assert.equal(S.srv.drops.addr.size + S.srv.drops.recipient.size, 0, 'nor a drop allowance, and no note was filed');
+    assert.equal(sent.length, 0, 'the phone did not ring');
+    // This host's own page (behind Caddy only the scheme differs) and a request with no Origin at all (curl, the install
+    // scripts' check): processed as before.
+    for (const origin of ['https://' + host, undefined]) {
+      assert.equal((await send(S, '/wake', { tk }, origin)).status, 204);
+      assert.equal((await (await send(S, '/drop', { to: 'bob', blob: note }, origin)).json()).ok, true, 'a note filed for bob');
+    }
+    assert.equal(sent.length, 2, 'both rang the phone');
+  } finally { await S.stop(); }
+  const T = await startServer({ origins: ['https://app.example'] });   // a page on a separate static host, listed in HUSH_ORIGINS
+  try {
+    assert.equal((await send(T, '/wake', { tk: 'A'.repeat(22) }, 'https://app.example')).status, 204);
+    assert.equal((await send(T, '/drop', { to: 'nobody', blob: note }, 'https://app.example')).status, 404, 'it looked for the mailbox');
+    assert.deepEqual([T.srv.wakes.addr.size, T.srv.drops.addr.size], [1, 1], 'both processed, and counted');
+    assert.equal((await send(T, '/wake', { tk: 'A'.repeat(22) }, 'https://evil.example')).status, 403, 'another site is still refused');
+  } finally { await T.stop(); }
 });
 
 test('searches, chat creation, posts, side marks and profile reads each have their own rate', async () => {

@@ -88,12 +88,12 @@ function lift(from, to) {
 }
 const createHushAdapter = new Function(lift('/* ===== HUSH ADAPTER BEGIN ===== */', '/* ===== HUSH ADAPTER END ===== */') + '\nreturn createHushAdapter;')();
 const JOIN_CODE = [
-  lift('const typeOf=', '\n'),
+  lift('const typeOf=', '\n'), lift('const chatRec=', '\nconst dmPeer='),
   lift('async function freshChan(cid){', '\n'),
   lift('function parseJoin(s){', 'async function joinPublic('),   // parseJoin, inviteRaws, handleJoin, joinPrivate
   lift('function confirmJoin(c,j){', 'function segControl('),
 ].join('\n');
-const STUBS = ['S', 'toast', 'toastErr', 'convById', 'showMeta', 'openConv', 'openDm', 'sheet', 'el', 'convAvatar', 'memberText', 'subsText'];
+const STUBS = ['S', 'toast', 'toastErr', 'convById', 'showMeta', 'openConv', 'openDm', 'sheet', 'el', 'convAvatar', 'memberText', 'subsText', 'ksMap'];
 const page = (env) => new Function('env', `const {${STUBS.join(',')}}=env;\n${JOIN_CODE}\nreturn {handleJoin,confirmJoin};`)(env);
 
 test('the page says "You were removed" for a banned answer, in handleJoin and in the join sheet, and "revoked" for a missing invite', async () => {
@@ -119,7 +119,7 @@ test('the page says "You were removed" for a banned answer, in handleJoin and in
       openConv: () => assert.fail('nothing opens'), openDm: () => assert.fail('not a contact link'),
       sheet: () => { sheets++; return { body: { append() {} }, close() {} }; },
       el: (tag, cls, text) => { const e = { tag, cls, textContent: text || '', disabled: false, append() {} }; els.push(e); return e; },
-      convAvatar: () => ({}), memberText: () => '', subsText: () => '',
+      convAvatar: () => ({}), memberText: () => '', subsText: () => '', ksMap: () => ({}),
     };
     const { handleJoin, confirmJoin } = page(env);
     const link = (cid, iid = 'iNvItE000001') => `#join=${cid}.${iid}.${'s'.repeat(22)}`;   // location.hash, as the page passes it

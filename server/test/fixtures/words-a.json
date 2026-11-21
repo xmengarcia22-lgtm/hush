@@ -1,0 +1,1592 @@
+{
+ "about": [
+  "The approved words of release A (release 103), row by row: 110 rows of the word table CHANGES-A.tsv, 108 with new words and 2 removed. Row 889 and the new words of rows 380, 1177, 1204, 1206 and 1209 come from the fix round after the review (2026-11-11). The new words of rows 1205 and 1211 come from release 104 (2026-11-12). Made by a script from that table; not edited by hand. Read by server/test/words-a.test.js. Release 106 (redesign step E, 2026-11-16), by a script again: the new words of row 889 no longer name a phone number, and row 936 is taken out because its screen, the contact card, is gone; 109 rows are left.",
+  "row: the row of the word table. line: its line in app/ui.js before the release (commit 0a82d9f), for the reader only. fn: the top-level unit of app/ui.js the sentence stands in.",
+  "Signs (apostrophe, three dots, curly quotes) are written here in the form the file writes them in that string: the sign itself, or backslash, u and four digits.",
+  "kind words: old and new are the sentence cut at its values. Word pieces stand at the even places, the values (code) at the odd ones. The test looks for the pieces in order, each value between its two pieces and joined to them by + or ${ }, the first piece opening a string and the last one closing it: new must stand in the unit fn, old nowhere in the file.",
+  "kind cases: a sentence the code puts together from pieces with a choice in it. code is the expression as the file writes it; it must stand in the unit fn, and run with args it must give the sentence gives. A list roles in args answers the reads of p.role in turn, so that powerLead gives each pair of words of the table (three of the six pairs no account sees, because one answer chooses both words). gone: pieces of the old code that stand nowhere in the file.",
+  "kind markup: as cases, for a string of HTML. Run with args the code must have the tags (the tags of the old string, in order), hold none of < > & \" ' ` outside them, and read gives once each tag is a space.",
+  "kind removed: the two strings of gone stand nowhere in the file, and last (the entry before them and what follows the list) stands in the unit fn.",
+  "replaced: what the first build of release A said in five rows and the fix round replaced. was: those words, as the sign itself and escaped where they hold a sign. None of them may stand anywhere in the file."
+ ],
+ "rows": [
+  {
+   "row": "308",
+   "line": 1551,
+   "fn": "sendErr",
+   "kind": "words",
+   "old": [
+    "This phone doesn\\u2019t have this chat\\u2019s key yet. Close the chat and open it again, and Hush will set up a key for the two of you."
+   ],
+   "new": [
+    "This chat isn\\u2019t ready on this phone yet. Close it and open it again."
+   ]
+  },
+  {
+   "row": "309",
+   "line": 1552,
+   "fn": "sendErr",
+   "kind": "words",
+   "old": [
+    "This phone doesn\\u2019t have this chat\\u2019s key yet. An admin\\u2019s phone will add it when they next open the chat."
+   ],
+   "new": [
+    "This chat isn\\u2019t ready on this phone yet. It will be once an admin next opens it."
+   ]
+  },
+  {
+   "row": "310",
+   "line": 1553,
+   "fn": "sendErr",
+   "kind": "words",
+   "old": [
+    "This channel\\u2019s new key couldn\\u2019t be checked, so nothing was sent. Reload Hush. If the owner\\u2019s security code changed, accept the new code. If the channel was made before this version of Hush, its owner signs its admin list once: Channel info, then Edit and Save. If it keeps happening, ask the channel\\u2019s owner."
+   ],
+   "new": [
+    "Nothing was sent: Hush couldn\\u2019t check this channel. Reload Hush. If the owner\\u2019s security code changed, accept the new code. If the channel was made before this version of Hush, its owner signs its admin list once: Channel info, then Edit and Save. If it keeps happening, ask the channel\\u2019s owner."
+   ]
+  },
+  {
+   "row": "311",
+   "line": 1554,
+   "fn": "sendErr",
+   "kind": "words",
+   "old": [
+    "The server’s copy of this channel is older than one this device already checked, so nothing was sent. Reload Hush. If it keeps happening, ask the channel’s owner."
+   ],
+   "new": [
+    "Nothing was sent: this channel looks out of date. Reload Hush. If it keeps happening, ask the channel’s owner."
+   ]
+  },
+  {
+   "row": "318",
+   "line": 1561,
+   "fn": "sendErr",
+   "kind": "words",
+   "old": [
+    "The channel\\u2019s key just changed. Try again."
+   ],
+   "new": [
+    "The channel was just updated. Try again."
+   ]
+  },
+  {
+   "row": "358",
+   "line": 1839,
+   "fn": "renderConv",
+   "kind": "words",
+   "old": [
+    "Server view is on: this is all the server ever stores. Turn it off in Settings."
+   ],
+   "new": [
+    "This is all Hush ever stores: scrambled text. Turn it off in Settings."
+   ]
+  },
+  {
+   "row": "364",
+   "line": 1846,
+   "fn": "renderConv",
+   "kind": "words",
+   "old": [
+    "Messages with ",
+    "convTitle(c)",
+    " are end-to-end encrypted. Tap their name to see their profile and verify your safety number."
+   ],
+   "new": [
+    "Messages with ",
+    "convTitle(c)",
+    " are end-to-end encrypted. Tap their name to see their profile and verify your security code."
+   ]
+  },
+  {
+   "row": "366",
+   "line": 1848,
+   "fn": "renderConv",
+   "kind": "words",
+   "old": [
+    "Your channel is ready. Post text, HD photos, GIFs, videos, voice and polls. Each one is encrypted with a key only your subscribers hold."
+   ],
+   "new": [
+    "Your channel is ready. Post text, HD photos, GIFs, videos, voice and polls. Only your subscribers can read them."
+   ]
+  },
+  {
+   "row": "379",
+   "line": 1891,
+   "fn": "msgNode",
+   "kind": "words",
+   "old": [
+    "Sent before this device was added, so its key isn\\u2019t on this device."
+   ],
+   "new": [
+    "Sent before this device was added, so it can\\u2019t be shown here."
+   ]
+  },
+  {
+   "row": "380",
+   "line": 1891,
+   "fn": "msgNode",
+   "kind": "words",
+   "old": [
+    "This channel\\u2019s key history doesn\\u2019t check out, so this post can\\u2019t be opened."
+   ],
+   "new": [
+    "This channel\\u2019s history doesn\\u2019t check out, so this post can\\u2019t be opened."
+   ]
+  },
+  {
+   "row": "381",
+   "line": 1891,
+   "fn": "msgNode",
+   "kind": "words",
+   "old": [
+    "Sent before you or this device joined, so its key isn\\u2019t on this device."
+   ],
+   "new": [
+    "Sent before you joined on this device, so it can\\u2019t be shown here."
+   ]
+  },
+  {
+   "row": "451",
+   "line": 2333,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "Revoke and change the key"
+   ],
+   "new": [
+    "Revoke and remove people who joined with it"
+   ]
+  },
+  {
+   "row": "458",
+   "line": 2343,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "This channel’s admin list isn’t signed yet, so this device can’t tell who joined with this link and can’t change the key here. In Channel info, tap Edit and Save to sign it, then open the channel again. You can still revoke the link."
+   ],
+   "new": [
+    "This channel’s admin list isn’t signed yet, so this device can’t tell who joined with this link and can’t remove them here. In Channel info, tap Edit and Save to sign it, then open the channel again. You can still revoke the link."
+   ]
+  },
+  {
+   "row": "459",
+   "line": 2344,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "This device can’t tell who joined with this link (its admin key isn’t confirmed by the owner’s device, or the link is from an older version of Hush), so it can’t change the key here. You can still revoke the link."
+   ],
+   "new": [
+    "This device can’t show who joined with this link, so it can’t remove them here. The channel’s owner hasn’t confirmed this device as an admin’s yet, or the link was made with an older version of Hush. You can still revoke the link."
+   ]
+  },
+  {
+   "row": "461",
+   "line": 2346,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "People you leave unticked who joined or asked since the key last changed stay under Waiting to join until it next changes, so you can still add them back; anyone else needs a new link."
+   ],
+   "new": [
+    "Changed your mind? Most people you remove here stay under Waiting to join for now, so you can add them back. Anyone else needs a new link."
+   ]
+  },
+  {
+   "row": "462",
+   "line": 2347,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "Change the key"
+   ],
+   "new": [
+    "Remove and revoke"
+   ]
+  },
+  {
+   "row": "463",
+   "line": 2348,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "Change the key? Everyone you left unticked loses access. Open invite links stop working."
+   ],
+   "new": [
+    "Remove and revoke? Everyone you left unticked loses access. Open invite links stop working."
+   ]
+  },
+  {
+   "row": "464",
+   "line": 2350,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "Key changed. Open invite links stopped working."
+   ],
+   "new": [
+    "Invite link reset. Share a new one."
+   ]
+  },
+  {
+   "row": "466",
+   "line": 2352,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "The link stops working. People who joined through it stay subscribed. Anyone else who opened it can read until the key next changes."
+   ],
+   "new": [
+    "The link stops working. People who already joined stay. Someone who opened the link but didn’t join may still be able to read for a while. If the link got into the wrong hands, use the second choice."
+   ]
+  },
+  {
+   "row": "467",
+   "line": 2353,
+   "fn": "openRevoke",
+   "kind": "words",
+   "old": [
+    "For a link that leaked. Subscribers get a new key, except the people you leave unticked below (only people who joined in the last 30 days are listed), and every open invite link stops working."
+   ],
+   "new": [
+    "For a link that got into the wrong hands. Tick the people who should stay. Everyone you leave unticked is removed. Only people who joined in the last 30 days are listed. All invite links for this channel stop working."
+   ]
+  },
+  {
+   "row": "468",
+   "line": 2361,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Repair channel"
+   ],
+   "new": [
+    "Fix channel"
+   ]
+  },
+  {
+   "row": "469",
+   "line": 2362,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "This channel’s current key doesn’t check out on this device, so nobody can post. If an admin’s security code changed, accept the new code first and open the channel again. If the key still doesn’t check out, someone holding an old admin key may have changed it: Repair gives the channel a new key and a new admin key. Open invite links stop working."
+   ],
+   "new": [
+    "Nobody can post in this channel right now. If an admin’s security code changed, accept the new code first and open the channel again. If that doesn’t help, someone who used to be an admin may have tampered with the channel. Fixing it gives the channel a fresh start. The invite link is reset."
+   ]
+  },
+  {
+   "row": "471",
+   "line": 2363,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Check this list and untick anyone who shouldn’t be subscribed. Admins come from the list you signed; to change them, use Channel info first."
+   ],
+   "new": [
+    "Check this list and untick anyone who shouldn’t be subscribed. Admins are the ones you confirmed. To change them, use Channel info first."
+   ]
+  },
+  {
+   "row": "473",
+   "line": 2365,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "People who later join through the key chain see no posts from before the repair. Invite links still carry every key."
+   ],
+   "new": [
+    "People you add after this won’t see posts from before the fix. People who join with an invite link still see everything."
+   ]
+  },
+  {
+   "row": "474",
+   "line": 2366,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Repair"
+   ],
+   "new": [
+    "Fix channel"
+   ]
+  },
+  {
+   "row": "475",
+   "line": 2367,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Repair the channel? Everyone you unticked loses access. Open invite links stop working."
+   ],
+   "new": [
+    "Fix the channel? Everyone you unticked loses access. The invite link is reset."
+   ]
+  },
+  {
+   "row": "476",
+   "line": 2368,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Channel repaired. Open invite links stopped working."
+   ],
+   "new": [
+    "Channel fixed. Invite link reset. Share a new one."
+   ]
+  },
+  {
+   "row": "479",
+   "line": 2369,
+   "fn": "openRepair",
+   "kind": "words",
+   "old": [
+    "Couldn’t repair it. Check your connection and try again."
+   ],
+   "new": [
+    "Couldn’t fix it. Check your connection and try again."
+   ]
+  },
+  {
+   "row": "582",
+   "line": 2598,
+   "fn": "openInvite",
+   "kind": "words",
+   "old": [
+    "Create a link that lets people join this private ",
+    "noun",
+    ". The ",
+    "noun",
+    " key travels inside the link, so the server can\\u2019t use it."
+   ],
+   "new": [
+    "Create a link that lets people join this private ",
+    "noun",
+    ". Anyone who has the ",
+    "noun",
+    " link can join, so share it with care. Hush can\\u2019t open it."
+   ]
+  },
+  {
+   "row": "605",
+   "line": 2627,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Only members hold the group key. The group\\u2019s name, description and photo are not encrypted."
+   ],
+   "new": [
+    "Only members can read the messages or see the group\\u2019s name, description and photo."
+   ]
+  },
+  {
+   "row": "609",
+   "line": 2629,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Only subscribers hold the channel key. The channel\\u2019s name, description and photo are not encrypted."
+   ],
+   "new": [
+    "Only subscribers can read the posts or see the channel\\u2019s name, description and photo."
+   ]
+  },
+  {
+   "row": "618",
+   "line": 2639,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Make \\u201c",
+    "c.name",
+    "\\u201d private?\\n\\nNew posts get a new key that only current subscribers have. Posts made while it was public stay readable to anyone."
+   ],
+   "new": [
+    "Make \\u201c",
+    "c.name",
+    "\\u201d private?\\n\\nFrom now on only current subscribers can read new posts. Posts made while it was public stay readable to anyone."
+   ]
+  },
+  {
+   "row": "637",
+   "line": 2651,
+   "fn": "openConvInfo",
+   "kind": "markup",
+   "code": "I.key+'<span>Fix channel</span>'",
+   "args": {
+    "I": {
+     "key": "{I.key}"
+    }
+   },
+   "gives": "{I.key} Fix channel",
+   "tags": [
+    "<span>",
+    "</span>"
+   ],
+   "gone": [
+    "'<span>Repair</span>'"
+   ]
+  },
+  {
+   "row": "638",
+   "line": 2651,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Key refused"
+   ],
+   "new": [
+    "Needs fixing"
+   ]
+  },
+  {
+   "row": "640",
+   "line": 2653,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "This channel’s admin list isn’t signed yet (it was made before this version of Hush, or this device couldn’t check it). Check the admins, then tap Edit and Save to sign it. Until then no admin can change its key."
+   ],
+   "new": [
+    "This channel’s admin list isn’t signed yet (it was made before this version of Hush, or this device couldn’t check it). Check the admins, then tap Edit and Save to sign it. Until then no admin can remove people or reset the invite link."
+   ]
+  },
+  {
+   "row": "652",
+   "line": 2668,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Resend keys"
+   ],
+   "new": [
+    "Send access again"
+   ]
+  },
+  {
+   "row": "653",
+   "line": 2668,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "Keys sent to ",
+    "displayName(h)",
+    "\\u2019s devices"
+   ],
+   "new": [
+    "Access sent again to ",
+    "displayName(h)",
+    "\\u2019s devices"
+   ]
+  },
+  {
+   "row": "663",
+   "line": 2672,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "The channel\\u2019s key couldn\\u2019t be checked, so nothing was changed and they are not blocked. Reload Hush. If the owner\\u2019s security code changed, accept the new code."
+   ],
+   "new": [
+    "Hush couldn\\u2019t check this channel, so nothing was changed and they are not blocked. Reload Hush. If the owner\\u2019s security code changed, accept the new code."
+   ]
+  },
+  {
+   "row": "664",
+   "line": 2672,
+   "fn": "openConvInfo",
+   "kind": "words",
+   "old": [
+    "The channel\\u2019s key couldn\\u2019t be checked, so its key was not changed. They can\\u2019t open the channel again, but still hold the old key. Reload Hush. If the owner\\u2019s security code changed, accept the new code. If it keeps happening, ask the channel\\u2019s owner."
+   ],
+   "new": [
+    "They were blocked and can\\u2019t open the channel again, but securing the channel didn\\u2019t finish. Reload Hush. If the owner\\u2019s security code changed, accept the new code. If it keeps happening, ask the channel\\u2019s owner."
+   ]
+  },
+  {
+   "row": "688",
+   "line": 2713,
+   "fn": "openEditConv",
+   "kind": "words",
+   "old": [
+    "This channel is public, so its name, description and photo are visible to everyone, including the server, so people can find it."
+   ],
+   "new": [
+    "This channel is public, so everyone can see its name, description and photo. That is how people find it."
+   ]
+  },
+  {
+   "row": "689",
+   "line": 2714,
+   "fn": "openEditConv",
+   "kind": "words",
+   "old": [
+    "The name, description and photo are encrypted. Only members can see them, not the server."
+   ],
+   "new": [
+    "The name, description and photo are encrypted. Only members can see them, not Hush."
+   ]
+  },
+  {
+   "row": "707",
+   "line": 2740,
+   "fn": "openProfile",
+   "kind": "words",
+   "old": [
+    "New safety number"
+   ],
+   "new": [
+    "New security code"
+   ]
+  },
+  {
+   "row": "708",
+   "line": 2740,
+   "fn": "openProfile",
+   "kind": "words",
+   "old": [
+    "Safety number"
+   ],
+   "new": [
+    "Security code"
+   ]
+  },
+  {
+   "row": "747",
+   "line": 2802,
+   "fn": "buildSettingsPage",
+   "kind": "words",
+   "old": [
+    "Erases this device’s copy of your keys and chats. Your password or your recovery words bring the account back."
+   ],
+   "new": [
+    "Erases your chats from this device. Your password or your recovery words bring the account back."
+   ]
+  },
+  {
+   "row": "748",
+   "line": 2802,
+   "fn": "buildSettingsPage",
+   "kind": "words",
+   "old": [
+    "Erases this device’s copy of your keys and chats. Your password brings the account back; recovery words are a safer second way in."
+   ],
+   "new": [
+    "Erases your chats from this device. Your password brings the account back; recovery words are a safer second way in."
+   ]
+  },
+  {
+   "row": "749",
+   "line": 2802,
+   "fn": "buildSettingsPage",
+   "kind": "words",
+   "old": [
+    "Erases this device’s copy of your keys and chats. Save your recovery words first, or there is no way back in."
+   ],
+   "new": [
+    "Erases your chats from this device. Save your recovery words first, or there is no way back in."
+   ]
+  },
+  {
+   "row": "796",
+   "line": 2856,
+   "fn": "settingsLogin",
+   "kind": "words",
+   "old": [
+    "Removing a device gives your account new keys. It is locked out at once, your other devices are logged out and link again from here, and your contacts see that your security code changed."
+   ],
+   "new": [
+    "Removing a device locks it out at once. Your other devices are logged out and link again from here. The people you chat with see that your security code changed."
+   ]
+  },
+  {
+   "row": "831",
+   "line": 2885,
+   "fn": "settingsAdvanced",
+   "kind": "cases",
+   "code": "'copy '+(i+1)+(x==null?' does not open on this device':' opens; accounts: '+x)",
+   "args": {
+    "i": 0,
+    "x": null
+   },
+   "gives": "copy 1 does not open on this device",
+   "gone": [
+    "' does not open with this device’s key'"
+   ]
+  },
+  {
+   "row": "834",
+   "line": 2888,
+   "fn": "settingsAdvanced",
+   "kind": "words",
+   "old": [
+    "Chats now show what the server sees"
+   ],
+   "new": [
+    "Chats now show what Hush stores"
+   ]
+  },
+  {
+   "row": "836",
+   "line": 2889,
+   "fn": "settingsAdvanced",
+   "kind": "words",
+   "old": [
+    "Show what the server sees"
+   ],
+   "new": [
+    "Show what Hush stores"
+   ]
+  },
+  {
+   "row": "837",
+   "line": 2890,
+   "fn": "settingsAdvanced",
+   "kind": "words",
+   "old": [
+    "Shows messages the way they\\u2019re stored on the server: scrambled text that only the people in the chat can unlock. Useful for checking that encryption is working."
+   ],
+   "new": [
+    "Shows your messages the way Hush keeps them: scrambled text that only the people in the chat can unlock. A way to see for yourself that Hush can\\u2019t read them."
+   ]
+  },
+  {
+   "row": "889",
+   "line": 2920,
+   "fn": "openHow",
+   "kind": "words",
+   "old": [
+    "Who is in which chat and when messages are sent, plus names, photos, bios, typing and online status, and a scrambled fingerprint of your phone number if you add one. Not what anyone says. Turn on \\u201cShow what the server sees\\u201d in Settings to check."
+   ],
+   "new": [
+    "Who is in which chat, when messages are sent, and who calls whom and when, plus usernames, names, photos, bios, typing and online status. Not what anyone says. Turn on \\u201cShow what Hush stores\\u201d in Settings to check."
+   ]
+  },
+  {
+   "row": "892",
+   "line": 2922,
+   "fn": "openHow",
+   "kind": "removed",
+   "gone": [
+    "'This is a prototype. '",
+    "'The App Store version would use the Signal Protocol library, which keeps changing keys after every message for even stronger protection.'"
+   ],
+   "last": "['Public channels are open. ','Anyone can read them, so they can\\u2019t be secret.']]\n  .forEach("
+  },
+  {
+   "row": "893",
+   "line": 2922,
+   "fn": "openHow",
+   "kind": "removed",
+   "gone": [
+    "'This is a prototype. '",
+    "'The App Store version would use the Signal Protocol library, which keeps changing keys after every message for even stronger protection.'"
+   ],
+   "last": "['Public channels are open. ','Anyone can read them, so they can\\u2019t be secret.']]\n  .forEach("
+  },
+  {
+   "row": "1022",
+   "line": 3483,
+   "fn": "openRestore",
+   "kind": "words",
+   "old": [
+    "These recovery words are from before your account\\u2019s keys were replaced. Use a device you\\u2019re still logged in on, then make new words. If you aren\\u2019t logged in anywhere, these words can\\u2019t bring the account back: whoever replaced the keys has it."
+   ],
+   "new": [
+    "These recovery words are old ones. They stopped working when a device was removed from your account. Use a device you\\u2019re still logged in on, then make new words. If you aren\\u2019t logged in anywhere, these words can\\u2019t bring the account back: whoever removed the device has it."
+   ]
+  },
+  {
+   "row": "1025",
+   "line": 3494,
+   "fn": "enterAccount",
+   "kind": "words",
+   "old": [
+    "The security code on the server doesn\\u2019t match your account. Someone may have tampered with it. Continue and put your real code back?"
+   ],
+   "new": [
+    "The security code Hush holds for you doesn\\u2019t match your account. Someone may have tampered with it. Continue and put your real code back?"
+   ]
+  },
+  {
+   "row": "1027",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "owner",
+      "owner"
+     ],
+     "held": true,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re the owner of “N”. Owners look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1028",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "owner",
+      "admin"
+     ],
+     "held": true,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re the owner of “N”. Admins look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1029",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "owner",
+      "owner"
+     ],
+     "held": false,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re about to become the owner of “N”. Owners look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1030",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "owner",
+      "admin"
+     ],
+     "held": false,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re about to become the owner of “N”. Admins look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1031",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "admin",
+      "owner"
+     ],
+     "held": false,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re now an admin of “N”. Owners look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1032",
+   "line": 3528,
+   "fn": "powerLead",
+   "kind": "cases",
+   "code": "'You\\u2019re '+(p.role==='owner'?(p.held?'the owner':'about to become the owner'):'now an admin')+' of \\u201c'+p.name+'\\u201d. '+(p.role==='owner'?'Owners':'Admins')+' look after this '+p.kind+', so your password needs to be stronger: at least 12 characters.'",
+   "args": {
+    "p": {
+     "roles": [
+      "admin",
+      "admin"
+     ],
+     "held": false,
+     "name": "N",
+     "kind": "group"
+    }
+   },
+   "gives": "You’re now an admin of “N”. Admins look after this group, so your password needs to be stronger: at least 12 characters.",
+   "gone": [
+    "' hold the keys to this '",
+    ", to keep it safe.'"
+   ]
+  },
+  {
+   "row": "1086",
+   "line": 3611,
+   "fn": "linkNetErr",
+   "kind": "words",
+   "old": [
+    "Can\\u2019t reach the Hush server. Check your connection, then try again."
+   ],
+   "new": [
+    "Can\\u2019t reach Hush. Check your connection, then try again."
+   ]
+  },
+  {
+   "row": "1099",
+   "line": 3645,
+   "fn": "openLinkScanner",
+   "kind": "words",
+   "old": [
+    "Linked ",
+    "d.dev||'the new device'",
+    " to your account, key ",
+    "key",
+    ". Not yours?"
+   ],
+   "new": [
+    "Linked ",
+    "d.dev||'the new device'",
+    " to your account. Device code ",
+    "key",
+    ". Not yours?"
+   ]
+  },
+  {
+   "row": "1114",
+   "line": 3676,
+   "fn": "showOffer",
+   "kind": "words",
+   "old": [
+    "Letting ",
+    "d.dev||'the new device'",
+    " in (device key ",
+    "key",
+    ")\\u2026"
+   ],
+   "new": [
+    "Letting ",
+    "d.dev||'the new device'",
+    " in (device code ",
+    "key",
+    ")\\u2026"
+   ]
+  },
+  {
+   "row": "1119",
+   "line": 3680,
+   "fn": "showOffer",
+   "kind": "words",
+   "old": [
+    "Approved. Your account is opening on ",
+    "d.dev||'the new device'",
+    ", device key ",
+    "key",
+    "."
+   ],
+   "new": [
+    "Approved. Your account is opening on ",
+    "d.dev||'the new device'",
+    ", device code ",
+    "key",
+    "."
+   ]
+  },
+  {
+   "row": "1123",
+   "line": 3685,
+   "fn": "showOffer",
+   "kind": "words",
+   "old": [
+    "Let ",
+    "d.dev||'this device'",
+    " in? Its screen shows key ",
+    "key",
+    "."
+   ],
+   "new": [
+    "Let ",
+    "d.dev||'this device'",
+    " in? Its screen shows device code ",
+    "key",
+    "."
+   ]
+  },
+  {
+   "row": "1125",
+   "line": 3685,
+   "fn": "showOffer",
+   "kind": "words",
+   "old": [
+    "Not a device you\\u2019re holding, or a different key? Tap Not mine: nothing is shared."
+   ],
+   "new": [
+    "Not a device you\\u2019re holding, or a different code? Tap Not mine: nothing is shared."
+   ]
+  },
+  {
+   "row": "1153",
+   "line": 3823,
+   "fn": "REKEY_BACKOFF",
+   "kind": "words",
+   "old": [
+    "Couldn’t reach the server. Check your connection."
+   ],
+   "new": [
+    "Couldn’t reach Hush. Check your connection."
+   ]
+  },
+  {
+   "row": "1174",
+   "line": 3852,
+   "fn": "removeDevice",
+   "kind": "words",
+   "old": [
+    "",
+    "name",
+    " (key ",
+    "key",
+    ") will be locked out of your account at once."
+   ],
+   "new": [
+    "",
+    "name",
+    " (device code ",
+    "key",
+    ") will be locked out of your account at once."
+   ]
+  },
+  {
+   "row": "1177",
+   "line": 3853,
+   "fn": "removeDevice",
+   "kind": "words",
+   "old": [
+    "Your account gets new keys. Every other device of yours is logged out too and links again with a code from this one. If you use a password you will choose a new one. Your recovery words stop working and must be made again, and your contacts will see that your security code changed."
+   ],
+   "new": [
+    "Your other devices are logged out too. You link them again from this one. If you use a password, you’ll choose a new one. Your recovery words stop working, so you’ll make new ones. People you chat with will see that your security code changed."
+   ]
+  },
+  {
+   "row": "1183",
+   "line": 3905,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Checking with the server"
+   ],
+   "new": [
+    "Checking your account"
+   ]
+  },
+  {
+   "row": "1184",
+   "line": 3907,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Your account’s keys were already replaced from another device, so this device can’t act for the account any more. If that wasn’t you, whoever holds that device has the account: old keys and old recovery words no longer open it."
+   ],
+   "new": [
+    "Your account was secured again from another device, so this device can’t make changes any more. If that wasn’t you, whoever holds that device has the account: your old recovery words no longer open it."
+   ]
+  },
+  {
+   "row": "1185",
+   "line": 3910,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Making new keys"
+   ],
+   "new": [
+    "Securing your account"
+   ]
+  },
+  {
+   "row": "1186",
+   "line": 3915,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Couldn’t save the new keys on this device. Nothing was changed."
+   ],
+   "new": [
+    "Couldn’t finish on this device. Nothing was changed."
+   ]
+  },
+  {
+   "row": "1188",
+   "line": 3931,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Your account’s keys were replaced from another device while this was running. This device can’t act for the account any more."
+   ],
+   "new": [
+    "Another device secured your account while this was running. This device can’t make changes any more."
+   ]
+  },
+  {
+   "row": "1190",
+   "line": 3945,
+   "fn": "rekeyRun",
+   "kind": "words",
+   "old": [
+    "Changing chat keys (",
+    "rec.rotated.length+1",
+    " of ",
+    "n",
+    ")"
+   ],
+   "new": [
+    "Securing your chats (",
+    "rec.rotated.length+1",
+    " of ",
+    "n",
+    ")"
+   ]
+  },
+  {
+   "row": "1201",
+   "line": 3999,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "",
+    "rec.name",
+    " can’t use your account any more. Your account has new keys."
+   ],
+   "new": [
+    "",
+    "rec.name",
+    " can no longer use your account."
+   ]
+  },
+  {
+   "row": "1202",
+   "line": 3999,
+   "fn": "rekeySummary",
+   "kind": "cases",
+   "code": "`${ok} chat${ok===1?' is':'s are'} secured.`",
+   "args": {
+    "ok": 1
+   },
+   "gives": "1 chat is secured.",
+   "gone": [
+    "Chat keys changed in "
+   ]
+  },
+  {
+   "row": "1203",
+   "line": 3999,
+   "fn": "rekeySummary",
+   "kind": "cases",
+   "code": "`${ok} chat${ok===1?' is':'s are'} secured.`",
+   "args": {
+    "ok": 2
+   },
+   "gives": "2 chats are secured.",
+   "gone": [
+    "Chat keys changed in "
+   ]
+  },
+  {
+   "row": "1204",
+   "line": 4000,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device can still read these groups until an admin changes their key: ",
+    "mem.join(', ')",
+    "."
+   ],
+   "new": [
+    "The removed device can still read new messages in these groups: ",
+    "mem.join(', ')",
+    ". Ask an admin there to accept your new security code, then block you, unblock you and add you again. That shuts it out."
+   ]
+  },
+  {
+   "row": "1205",
+   "line": 4001,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device loses these channels when an admin’s device next opens them or starts Hush: ",
+    "dev.join(', ')",
+    ". If an admin hasn’t confirmed your new security code yet, you won’t see them either until they do. If that takes more than 30 days, you’ll need a new link."
+   ],
+   "new": [
+    "Ask an admin of these channels to open the channel: ",
+    "dev.join(', ')",
+    ". If they see you under Waiting to join, they add you, then open the channel once more. That shuts the removed device out. Until an admin has accepted your new security code, new posts there may not show for you either. If that lasts more than 30 days, ask for a new invite link."
+   ]
+  },
+  {
+   "row": "1206",
+   "line": 4002,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device can still read ",
+    "un.join(', ')",
+    " until the key next changes: you aren’t on the subscriber list there yet, so your removal changed no key. If you joined through a link that is still open, an admin’s device lists you when it next opens the channel or starts Hush; otherwise an admin needs to add you (you show under Waiting to join in Add subscribers)."
+   ],
+   "new": [
+    "The removed device can still read ",
+    "un.join(', ')",
+    ". Removing it changed nothing there, because the channel hasn’t finished adding you. If your invite link still works, an admin adds you when they next open Hush. If it doesn’t, ask an admin to add you: you are under Waiting to join. Once you are added, ask the admin to accept your new security code, then block you, unblock you and add you again. That shuts it out."
+   ]
+  },
+  {
+   "row": "1207",
+   "line": 4003,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "You had left ",
+    "left.join(', ')",
+    ", and that still stands: your leave was sent again under your new keys, and it takes effect when an admin’s device next opens the channel or starts Hush."
+   ],
+   "new": [
+    "You had left ",
+    "left.join(', ')",
+    ". That still stands."
+   ]
+  },
+  {
+   "row": "1209",
+   "line": 4005,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device still holds the admin key of ",
+    "list(adm.filter(x=>!carded(x))",
+    "; ask the owner to change admins."
+   ],
+   "new": [
+    "The removed device can still act as an admin of ",
+    "list(adm.filter(x=>!carded(x))",
+    ". Ask the owner to accept your new security code, then remove you as an admin and make you one again."
+   ]
+  },
+  {
+   "row": "1210",
+   "line": 4006,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device still holds the admin key of ",
+    "list(adm.filter(carded))",
+    ". The owner’s device replaces it when it next opens them or starts Hush, once it has confirmed your new security code and holds the channel’s admin list signed (the owner signs a channel from before this version once: Edit, then Save). It notices your new keys by itself, so the removed device can’t quietly put that off."
+   ],
+   "new": [
+    "The removed device can still act as an admin of ",
+    "list(adm.filter(carded))",
+    " until the owner next opens Hush and has accepted your new security code. If it’s an older channel, the owner first taps Edit, then Save. Then it is shut out. If the removed device is in the wrong hands, tell the owner now."
+   ]
+  },
+  {
+   "row": "1211",
+   "line": 4007,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The removed device may still manage ",
+    "own.join(', ')",
+    ": the owner or admin key couldn’t be replaced."
+   ],
+   "new": [
+    "Couldn’t secure these chats: ",
+    "own.join(', ')",
+    ". A device you removed may still have control there. Don’t use them any more. Start new chats with the same people."
+   ]
+  },
+  {
+   "row": "1212",
+   "line": 4008,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The admin key of ",
+    "uns.join(', ')",
+    " was replaced with one only your own devices hold: this device has no admin list you signed there, so no admin got the new key, and until one does the admins there can’t post or manage the channel. Open each, check its admins, then tap Edit and Save; your device hands them the key when it next opens the channel or starts Hush."
+   ],
+   "new": [
+    "Your admins in ",
+    "uns.join(', ')",
+    " can’t post or manage there right now. Open each one, check its admins, then tap Edit and Save. They get access back the next time you open Hush."
+   ]
+  },
+  {
+   "row": "1213",
+   "line": 4009,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "Someone replaced the key of ",
+    "taken.join(', ')",
+    " first, most likely from the removed device. Start those chats afresh."
+   ],
+   "new": [
+    "Someone locked you out of these chats first, most likely with the removed device: ",
+    "taken.join(', ')",
+    ". Don’t use them any more. Start new chats with the same people."
+   ]
+  },
+  {
+   "row": "1214",
+   "line": 4010,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "The chat with ",
+    "kc.join(', ')",
+    " gets its new key once you accept their new security code."
+   ],
+   "new": [
+    "Your chat with ",
+    "kc.join(', ')",
+    " is secured once you accept their new security code. Open the chat to check it."
+   ]
+  },
+  {
+   "row": "1215",
+   "line": 4011,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "Couldn’t change the key of ",
+    "bad.join(', ')",
+    "."
+   ],
+   "new": [
+    "Couldn’t secure these chats: ",
+    "bad.join(', ')",
+    ". The removed device may still read new messages there. Don’t write anything private in them; start new chats if you need to."
+   ]
+  },
+  {
+   "row": "1216",
+   "line": 4012,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "For 30 days, messages dated before today in chats that were not re-keyed can’t be told apart from the removed device’s."
+   ],
+   "new": [
+    "For the next 30 days, Hush can’t tell whether an older message in a chat that wasn’t secured again came from you or from the removed device."
+   ]
+  },
+  {
+   "row": "1217",
+   "line": 4013,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "Invite links of the changed chats stopped working."
+   ],
+   "new": [
+    "Invite links for the secured chats were reset. Share new ones."
+   ]
+  },
+  {
+   "row": "1218",
+   "line": 4013,
+   "fn": "rekeySummary",
+   "kind": "words",
+   "old": [
+    "Your other devices were logged out: link them again from here (Link a new device)."
+   ],
+   "new": [
+    "Your other devices were logged out. Link them again from here."
+   ]
+  },
+  {
+   "row": "1229",
+   "line": 4077,
+   "fn": "noKeyNotice",
+   "kind": "words",
+   "old": [
+    "They were sent before this device was added, so their keys aren\\u2019t on it."
+   ],
+   "new": [
+    "They were sent before this device was added."
+   ]
+  },
+  {
+   "row": "1243",
+   "line": 4104,
+   "fn": "logOutAccount",
+   "kind": "words",
+   "old": [
+    "",
+    "words",
+    " This device’s copy of your keys and chats will be erased."
+   ],
+   "new": [
+    "",
+    "words",
+    " Your chats will be erased from this device."
+   ]
+  },
+  {
+   "row": "1258",
+   "line": 4173,
+   "fn": "openDeleteAccount",
+   "kind": "words",
+   "old": [
+    "Copies in the server’s encrypted nightly backups are gone within 7 days."
+   ],
+   "new": [
+    "Backup copies on our side are gone within 7 days."
+   ]
+  },
+  {
+   "row": "1272",
+   "line": 4186,
+   "fn": "openDeleteAccount",
+   "kind": "cases",
+   "code": "'That’s an old one. Use your current '+(mode==='pw'?'password.':'recovery words.')",
+   "args": {
+    "mode": "pw"
+   },
+   "gives": "That’s an old one. Use your current password.",
+   "gone": [
+    "'That’s from before your account’s keys were replaced. Use your current '"
+   ]
+  },
+  {
+   "row": "1273",
+   "line": 4186,
+   "fn": "openDeleteAccount",
+   "kind": "cases",
+   "code": "'That’s an old one. Use your current '+(mode==='pw'?'password.':'recovery words.')",
+   "args": {
+    "mode": "words"
+   },
+   "gives": "That’s an old one. Use your current recovery words.",
+   "gone": [
+    "'That’s from before your account’s keys were replaced. Use your current '"
+   ]
+  },
+  {
+   "row": "1282",
+   "line": 4217,
+   "fn": "noticeNewDevices",
+   "kind": "words",
+   "old": [
+    "",
+    "name||'A device'",
+    " was added to your account. Its key is ",
+    "key",
+    "."
+   ],
+   "new": [
+    "",
+    "name||'A device'",
+    " was added to your account. Its device code is ",
+    "key",
+    "."
+   ]
+  },
+  {
+   "row": "1338",
+   "line": 4380,
+   "fn": "showOnboard",
+   "kind": "words",
+   "old": [
+    "That password is from before your account’s keys were replaced (a device was removed, or the account was set up fresh). Log in from a device you’re still logged in on, or use your new recovery words."
+   ],
+   "new": [
+    "That password is an old one. It stopped working when a device was removed from your account, or the account was set up again. Log in from a device you’re still logged in on, or use your new recovery words."
+   ]
+  },
+  {
+   "row": "1374",
+   "line": 4440,
+   "fn": "showOnboard",
+   "kind": "words",
+   "old": [
+    "This device\\u2019s key: ",
+    "key",
+    ""
+   ],
+   "new": [
+    "Device code: ",
+    "key",
+    ""
+   ]
+  },
+  {
+   "row": "1386",
+   "line": 4455,
+   "fn": "showOnboard",
+   "kind": "words",
+   "old": [
+    "Code accepted. On your other device, tap Let it in. It shows this device\\u2019s key: ",
+    "c.key",
+    "."
+   ],
+   "new": [
+    "Code accepted. On your other device, tap Let it in. It shows this device\\u2019s code: ",
+    "c.key",
+    "."
+   ]
+  },
+  {
+   "row": "1423",
+   "line": 4523,
+   "fn": "openAppLock",
+   "kind": "markup",
+   "code": "I.lockMd+'<span><b>Password</b> (strongest)<br><small>Also scrambles your account on this phone, so it stays safe even if someone copies the phone\\u2019s storage. You type it each time Hush opens.</small></span>'",
+   "args": {
+    "I": {
+     "lockMd": "{I.lockMd}"
+    }
+   },
+   "gives": "{I.lockMd} Password (strongest) Also scrambles your account on this phone, so it stays safe even if someone copies the phone’s storage. You type it each time Hush opens.",
+   "tags": [
+    "<span>",
+    "<b>",
+    "</b>",
+    "<br>",
+    "<small>",
+    "</small>",
+    "</span>"
+   ],
+   "gone": [
+    "Also keeps your keys scrambled on this device, so they stay safe even if someone copies its storage."
+   ]
+  },
+  {
+   "row": "1426",
+   "line": 4529,
+   "fn": "openPwLock",
+   "kind": "words",
+   "old": [
+    "Hush asks for your lock password when you open it, and ",
+    "lockAfterWords()",
+    ". Your keys stay scrambled on this device until you unlock."
+   ],
+   "new": [
+    "Hush asks for your lock password when you open it, and ",
+    "lockAfterWords()",
+    ". Your account stays scrambled on this phone until you unlock."
+   ]
+  },
+  {
+   "row": "1427",
+   "line": 4530,
+   "fn": "openPwLock",
+   "kind": "words",
+   "old": [
+    "Hush will ask for this password when it opens. Your account keys and invite links are kept scrambled on this device and only unscrambled in memory after you unlock. You can use your Hush password or a different one."
+   ],
+   "new": [
+    "Hush will ask for this password when it opens. Your account is kept scrambled on this phone until you unlock. You can use your Hush password or a different one."
+   ]
+  },
+  {
+   "row": "1449",
+   "line": 4551,
+   "fn": "openPinLock",
+   "kind": "words",
+   "old": [
+    "Ask for a PIN whenever Hush opens, so someone who picks up your phone can\\u2019t read your chats. Face ID comes with the App Store version."
+   ],
+   "new": [
+    "Ask for a PIN whenever Hush opens, so someone who picks up your phone can\\u2019t read your chats."
+   ]
+  },
+  {
+   "row": "1489",
+   "line": 4827,
+   "fn": "callErr",
+   "kind": "words",
+   "old": [
+    "Calls aren’t available on this server yet."
+   ],
+   "new": [
+    "Calls aren’t available yet."
+   ]
+  },
+  {
+   "row": "1551",
+   "line": 5197,
+   "fn": "republishSelf",
+   "kind": "words",
+   "old": [
+    "Your security code on the server doesn\\u2019t match this device. Restore from your backup, or contact the app owner."
+   ],
+   "new": [
+    "The security code Hush holds for you isn\\u2019t this phone\\u2019s. Someone may have tampered with it. To put yours back, open Settings, Advanced, Restore an account, and enter your recovery words."
+   ]
+  }
+ ],
+ "replaced": [
+  {
+   "row": "380",
+   "was": [
+    "This post can’t be opened on this device.",
+    "This post can\\u2019t be opened on this device."
+   ]
+  },
+  {
+   "row": "1177",
+   "was": [
+    "You’ll make new recovery words.",
+    "You\\u2019ll make new recovery words."
+   ]
+  },
+  {
+   "row": "1204",
+   "was": [
+    "Ask an admin there to block you, then unblock you and add you again."
+   ]
+  },
+  {
+   "row": "1206",
+   "was": [
+    "this is fixed when an admin next opens Hush"
+   ]
+  },
+  {
+   "row": "1209",
+   "was": [
+    "Ask the owner to remove you as an admin and make you one again."
+   ]
+  }
+ ]
+}

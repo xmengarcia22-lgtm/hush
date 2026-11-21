@@ -8,8 +8,12 @@
 //
 // check(actor, op, path, ctx) throws HushError to refuse. It may return
 // 'preview' for a chat record read without a level, which makes the store trim
-// the record (SPEC.md 5.5). `actor` describes the connection:
-// { handle, viaAccountKey, mayCreate, pub, chats: Map<cid, {level, epoch, type}> }.
+// the record (SPEC.md 5.5); 'member' for a chat record read or watched below admin
+// level, which makes the store leave out a channel's sealed member and blocked lists
+// (SPEC.md 5.5); 'blind' for a channel's read marks read below admin
+// level, which the store answers as if there were none (SPEC.md 5.4); or 'slotted' for a channel's reactions and votes, of which the
+// store hands out only those chat.act filed (SPEC.md 5.4). `actor` describes the connection:
+// { handle, viaAccountKey, mayCreate, pub, chats: Map<cid, {level, epoch, type, held?}> }.
 // `op` is one of get, query, sub, watch, set, update, delete, and put (a media piece
 // written over HTTP, SPEC.md 7.7). `ctx` carries `d`
 // (the document as it would be stored) and `prev` (what is stored now).
@@ -31,6 +35,9 @@ export function levelOf(actor, cid) {
 export const rankOf = (actor, cid) => RANK[levelOf(actor, cid)] || 0;
 export const chatTypeOf = (actor, cid) => { const e = actor && actor.chats && actor.chats.get(cid); return e ? e.type : null; };
 export const isAdminOf = (actor, cid) => rankOf(actor, cid) >= RANK.admin;
+// Who reads a channel's member and blocked lists goes by the level the key proved: an owner or admin whose account isn't secured
+// holds the chat at member level, its tools waiting (protocol.js, `held`), and still reads what its key opens.
+const listsOf = (a, cid) => { const e = a && a.chats && a.chats.get(cid); return !!e && RANK[e.held || e.level] >= RANK.admin; };
 
 function needLevel(a, cid, level) {
   needProven(a);
@@ -53,17 +60,20 @@ function keysOnlyAdded(prev, d) {
 
 const MEMBER_FIELDS = new Set(['ts', 'last', 'closed', 'keys']);
 const DM_MEMBER_FIELDS = new Set([...MEMBER_FIELDS, 'pins', 'ttl']);
-// A group's or channel's settings and description are the owner's (SPEC.md 5.4); admins keep `meta`, `invites`, `pins`.
+// A group's or channel's settings and description are the owner's (SPEC.md 5.4); admins keep `meta`, `invites`, `pins` and a private
+// channel's subscriber count `n` (SPEC.md 5.3).
 const OWNER_FIELDS = new Set(['reactions', 'comments', 'ttl', 'visibility', 'openKeys', 'name', 'desc', 'photo', 'owner', 'admins', 'ometa']);
-const ADMIN_FIELDS = new Set([...DM_MEMBER_FIELDS, ...OWNER_FIELDS, 'meta', 'invites']);
+const ADMIN_FIELDS = new Set([...DM_MEMBER_FIELDS, ...OWNER_FIELDS, 'meta', 'invites', 'n']);
 const FROZEN_FIELDS = new Set(['type', 'epoch', 'akeys']);
 
 function chatRecord(a, op, p, ctx) {
   const cid = p.id;
   switch (op) {
+    // In any channel only the owner and the admins may learn who the subscribers are (SPEC.md 5.5): below admin level the record
+    // comes without its sealed lists, and is never refused for it: a page takes `denied` as an eviction (as the read marks, below).
     case 'get':
       needProven(a);
-      return rankOf(a, cid) ? undefined : 'preview';
+      return !rankOf(a, cid) ? 'preview' : listsOf(a, cid) ? undefined : 'member';
     case 'query':                       // the public-channel listing; the store insists on visibility == public
       needProven(a);
       return;
@@ -72,7 +82,7 @@ function chatRecord(a, op, p, ctx) {
       return;
     case 'watch':
       needLevel(a, cid, 'member');
-      return;
+      return listsOf(a, cid) ? undefined : 'member';
     case 'delete':
       needLevel(a, cid, 'owner');
       return;
@@ -100,15 +110,31 @@ function chatRecord(a, op, p, ctx) {
   }
 }
 
-function chatContent(a, op, p) {
+function chatContent(a, op, p, ctx) {
   const cid = p.cid;
   // Media pieces are written over HTTP only (SPEC.md 7.7), where they are write-once and counted against the
-  // chat's allowance. `put` is that HTTP write; the socket may still read and delete pieces.
+  // chat's allowance. `put` is that HTTP write; the socket may still read pieces. Deleting them in a group or channel is
+  // the uploader's (`ctx.own`: the store matched the media token against the hash kept with the id, so the server never
+  // learns who that is) or an admin's; the server keeps no link from a media id to who uploaded it, so another member's
+  // file is not a member's to remove, and over the socket, with no token, an admin's alone (SPEC.md 5.4).
   if (p.kind === 'chunks' && (op === 'set' || op === 'update')) fail('denied', 'media is uploaded with PUT /media');
   const write = op === 'set' || op === 'update' || op === 'put';
   needLevel(a, cid, 'member');
+  if (p.kind === 'chunks' && op === 'delete' && chatTypeOf(a, cid) !== 'dm' && !(ctx && ctx.own)) needLevel(a, cid, 'admin');
+  if (p.kind === 'call' && chatTypeOf(a, cid) !== 'dm') fail('denied', 'calls are for one-on-one chats');   // SPEC.md 16.2
   if (write && (p.kind === 'posts' || p.kind === 'comments' || p.kind === 'chunks') && chatTypeOf(a, cid) === 'channel' && op !== 'update') {
     needLevel(a, cid, 'admin');   // only owners and admins post in channels; comments ride on posts
+  }
+  // Who read a channel is for its owner and admins to know: each mark sits under a tag anyone holding the chat key works out from a
+  // username. Below admin level they read as none, never `denied`, which a page takes as an eviction: it opens the chat again and
+  // loses its other watches of it. Everyone writes their own as before, so the owner's and admins' view counts stay (SPEC.md 5.4).
+  if (p.kind === 'reads' && (op === 'get' || op === 'query' || op === 'sub' || op === 'watch') && chatTypeOf(a, cid) === 'channel' && !isAdminOf(a, cid)) return 'blind';
+  // Who reacted or voted in a channel is for nobody to know, the owner and the admins included (SPEC.md 5.4). Rows come only through
+  // chat.act, under a slot only the server works out. A row from before that sits under a tag anyone holding the chat key works out from
+  // a username: it reads as none ('slotted'), never `denied`, which a page takes as an eviction. Nobody writes or deletes either kind.
+  if (p.kind === 'acts' && chatTypeOf(a, cid) === 'channel') {
+    if (op === 'get' || op === 'query' || op === 'sub' || op === 'watch') return 'slotted';
+    fail('denied', 'reactions and votes in a channel are written with chat.act');
   }
 }
 
@@ -192,6 +218,20 @@ function standardCheck(a, op, p, ctx) {
       if (del) return;
       fail('denied', 'recovery emails are retired');
     case 'linkreqs':
+      // A link ask (SPEC.md 14.14, release 58): the new device, not signed in, opens one at the address its code names,
+      // with its keys and no account named; whoever scans its code answers from their own session, so any signed-in
+      // account may answer, naming itself. The asker takes it down, and so may anyone once it is answered.
+      if (op === 'set' && !ctx.prev && ctx.d && ctx.d.state === 'ask') {
+        if (ctx.d.h !== undefined) fail('denied', 'a link ask names no account');
+        if (offerTag(ctx.d.n) !== p.id) fail('denied', 'a link ask lives only at the address its code names');
+        return;
+      }
+      if ((write || del) && ctx.prev && ctx.prev.state === 'ask') {
+        const prev = ctx.prev, d = ctx.d || {};
+        if (op === 'update' && a.handle && (d.state === 'ok' || d.state === 'no') && d.n === prev.n && d.h === a.handle) return;
+        if (del) return;
+        fail('denied', 'only a signed-in account answers a link ask');
+      }
       // A link offer (SPEC.md 14.14): a signed-in account opens it at the address its code names, the new device that
       // scanned the code claims it with its keys, and only the account that opened it answers it or takes it down; the
       // new device may clear it once answered. No login's tag, email or password is involved.
@@ -236,8 +276,18 @@ function standardCheck(a, op, p, ctx) {
       return;
     case 'channels':
       return chatRecord(a, op, p, ctx);
-    case 'posts': case 'comments': case 'acts': case 'reads': case 'typing': case 'chunks':
-      return chatContent(a, op, p);
+    case 'posts': case 'comments': case 'acts': case 'reads': case 'typing': case 'call': case 'chunks':
+      return chatContent(a, op, p, ctx);
+    case 'chain':
+      // Key-chain rows (SPEC.md 5.6, release 91): every member reads them; only chat.rotate and chat.chain write them.
+      needLevel(a, p.cid, 'member');
+      if (!read && op !== 'watch') fail('denied', 'key-chain rows come from chat.rotate and chat.chain');
+      return;
+    case 'roll':
+      // Member cards (SPEC.md 5.6, release 91): written by chat.card and chat.ask only; admins read, watch and clear them.
+      needLevel(a, p.cid, 'admin');
+      if (write) fail('denied', 'cards are written with chat.card or chat.ask');
+      return;
     default:
       fail('denied', 'not allowed');
   }

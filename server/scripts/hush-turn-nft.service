@@ -1,0 +1,17 @@
+# systemd unit for the Hush call relay's firewall rule (SPEC.md 16.3): loads /etc/hush/turn.nft (scripts/hush-turn.nft)
+# before the relay starts, and removes its table when stopped.
+# Install: copy to /etc/systemd/system/hush-turn-nft.service, then
+#   systemctl daemon-reload && systemctl enable --now hush-turn-nft
+
+[Unit]
+Description=Hush call relay firewall
+Before=hush-turn.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/hush/turn.nft
+ExecStop=/usr/sbin/nft delete table inet hush_turn
+
+[Install]
+WantedBy=multi-user.target

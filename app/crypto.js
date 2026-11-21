@@ -186,13 +186,13 @@ async function wrapTo(raw,xy,salt){
   const [ct,ej]=await Promise.all([crypto.subtle.encrypt({name:'AES-GCM',iv},k,raw),crypto.subtle.exportKey('jwk',eph.publicKey)]);
   return {epk:{x:ej.x,y:ej.y},iv:b64(iv),ct:b64(ct)};
 }
-async function unwrapMine(map,base,e){ // try every wrap with this device's key, then with the account key; the epoch's salt first, then the old one
+async function unwrapMine(map,base,e,want){ // try every wrap with this device's key, then with the account key; the epoch's salt first, then the old one (up to epoch 31: no wrap above it was ever made with it); want: only a secret it passes (verifiedAdmin)
   const me=S.me.handle,dev=S.me.dev&&S.me.dev.ecdhPriv?S.me.dev:null;
   const privs=[];if(dev)privs.push([await devKey('e'),dev.id]);privs.push([await myKey('e'),'']);
-  const salts=d=>e===undefined?[wrapSalt(base,undefined,me,d)]:[wrapSalt(base,e,me,d),wrapSalt(base,undefined,me,d)];
+  const salts=d=>e===undefined?[wrapSalt(base,undefined,me,d)]:Number(e)>31?[wrapSalt(base,e,me,d)]:[wrapSalt(base,e,me,d),wrapSalt(base,undefined,me,d)];
   for(const w of Object.values(map||{})){if(!w||!w.epk||!w.iv||!w.ct)continue;
     for(const [priv,d] of privs){let bits;try{bits=await crypto.subtle.deriveBits({name:'ECDH',public:await pubKey(w.epk,'e')},priv,256)}catch{continue} // one agreement per wrap, then each salt
-      for(const salt of salts(d)){try{const k=await aesKeyFrom(bits,salt);return new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(w.iv)},k,unb64(w.ct)))}catch{}}}}
+      for(const salt of salts(d)){let raw;try{const k=await aesKeyFrom(bits,salt);raw=new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(w.iv)},k,unb64(w.ct)))}catch{continue}if(!want||await want(raw))return raw}}}
   return null;
 }
 function convKey(c,e=epochOf(c)){
@@ -202,8 +202,11 @@ function convKey(c,e=epochOf(c)){
     const ck=['dm',S.me.handle,c.id,b64(bits).slice(0,12)].join(':');
     if(!S.chanKeys.has(ck))S.chanKeys.set(ck,aesKeyFrom(bits,c.id).then(key=>({raw:null,key}),()=>null));
     return S.chanKeys.get(ck)})();
-  const open=c.openKeys&&c.openKeys[e],stored=!open&&ksGet(c.id,e),km=!open&&!stored?keyMap(c,e):null;
-  if(!open&&!stored&&!(km&&Object.keys(km).length))return Promise.resolve(null);
+  // the record's openKeys (the server writes them) are read in a channel alone: the record says channel and the address starts with c, which the page gives a channel itself; a one-on-one chat (d) and a group (g) never take a key from the record, whatever it says it is
+  // a private channel takes them only for an epoch this device holds no key of its own for, stored or in a wrap of mine
+  const o=typeOf(c)==='channel'&&String(c.id)[0]==='c'&&c.openKeys&&c.openKeys[e],pv=!!o&&typeOf(c)==='channel'&&c.visibility!=='public',st=ksGet(c.id,e);
+  const open=pv&&(st||Object.keys(keyMap(c,e)||{}).length)?null:o,stored=!open&&st,km=!open&&!stored?keyMap(c,e):null;
+  if(!open&&!stored&&!(km&&Object.keys(km).length))return walkable(c,e)?walkTo(c,e):Promise.resolve(null);
   const ck=[S.me.handle,c.id,e,open?'o'+open:stored?'k'+stored.slice(0,16):'w'+Object.keys(km).sort().join(',')].join(':');
   if(!S.chanKeys.has(ck))S.chanKeys.set(ck,(async()=>{try{
     let raw;
@@ -216,28 +219,122 @@ function convKey(c,e=epochOf(c)){
     if(!open)ksPut(c.id,e,b64(raw));
     return {raw,key:await crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt','decrypt'])};
   }catch{return null}})());
-  return S.chanKeys.get(ck);
+  const got=S.chanKeys.get(ck);return km&&(pv||walkable(c,e))?got.then(k=>k||(pv?convKey(Object.assign({},c,{keys:Object.assign({},c.keys,{[e]:null})}),e):walkTo(c,e))):got; // wraps, none of them mine: openKeys, else the key chain
 }
+/* The key chain walked back, lazily: a private channel's older key this device lacks comes from the rows between it and
+   the lowest key held above it, each row's `b` opened under the key above and followed only from a commit that opens and
+   says `full` (rows are authenticated by the key above them, so no signature is checked here). A key that differs from
+   one held stops every walk in the channel (walkBad, "broken key history"). Only once the connection holds the chat:
+   rows need a level, and opening the chat (capsFor) reads older keys itself. */
+const walkable=(c,e)=>typeOf(c)==='channel'&&c.visibility!=='public'&&Number(e)<epochOf(c)&&!!(S.db&&S.db.chatLevel&&S.db.chatLevel(c.id));
+const walks=new Map(),walkBad=new Set(); // per channel: the walk in flight; a broken history
+const walkWait=new Map(); // per channel: until when no walk is tried
+function walkTo(c,e){const cid=c.id;e=Number(e);
+  if(walks.has(cid))return walks.get(cid).then(()=>ksGet(cid,e)?convKey(c,e):walkTo(c,e)); // one at a time: a later caller reads what it stored
+  if(walkBad.has(cid)||(walkWait.get(cid)||0)>Date.now())return Promise.resolve(null);
+  const job=(async()=>{
+    const held=ksMap()[cid]||{},top=Math.min(...Object.keys(held).filter(x=>/^\d+$/.test(x)&&Number(x)>e).map(Number));if(top===Infinity)return;
+    const ps=[],rows=[];for(let j=e;j<=top;j++)ps.push('channels/'+cid+'/chain/'+j);
+    for(let i=0;i<ps.length;i+=300){if(!S.db.chatLevel(cid))return; // the chat was lost meanwhile (an eviction, a dropped connection): a read would open it again, maybe from inside opening it (capsFor), and wait on itself
+      for(const d of await S.db.mgetChat(cid,ps.slice(i,i+300)))rows.push(d.exists?d.data():null)} // rows[j-e]
+    if(rows.some(Boolean))noteChained(cid);
+    let k=unb64(held[top]),j=top;
+    for(;j>e;j--){const r=rows[j-e],o=r&&r.b?await openCommit(cid,j,k,r.c):null;if(!o||o.m!=='full')break; // a gap, or a row this page doesn't follow
+      const p=await openBack(cid,j,k,r.b),pb=p&&b64(p),was=ksGet(cid,j-1);
+      if(!p||was&&was!==pb||Object.entries(ksMap()[cid]||{}).some(([x,v])=>x!==String(j-1)&&x!=='a'&&x!=='b'&&v===pb)){walkBad.add(cid);return} // differs from a key held, or is one held for another epoch
+      ksPut(cid,j-1,pb);k=p}
+    if(j>e){walkWait.set(cid,Date.now()+30e3);return} // shortcut: the chain ends above it, so every other post below waits 30 s too instead of reading the same rows again; enough until rows are backfilled while a page is open
+    const r=rows[0],h=e>0&&ksGet(cid,e-1);if(r&&r.b&&h){const p=await openBack(cid,e,k,r.b);if(!p||b64(p)!==h)walkBad.add(cid)} // the row of e itself, against a key held below it
+  })().catch(err=>{if(err&&['offline','ratelimit','timeout','denied'].includes(err.code))walkWait.set(cid,Date.now()+30e3)}).finally(()=>walks.delete(cid)); // denied: the rows were refused, so no one else asks again at once
+  walks.set(cid,job);return job.then(()=>ksGet(cid,e)?convKey(c,e):null)}
 /* ---------- room keys (SPEC.md 5.1): what the server needs to see before it lets a connection into a chat ----------
    The member key is worked out from the chat key, so whoever can read a chat can prove it; the admin key from a
    separate secret only admins hold; the owner key from the owner's own account key. The server keeps hashes. */
 async function hkdf(ikm,salt,info){const k=await crypto.subtle.importKey('raw',ikm,'HKDF',false,['deriveBits']);
   return new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt:enc.encode(salt),info:enc.encode(info)},k,256))}
 async function memberCapFrom(cid,e,raw){return b64u(await hkdf(await hkdf(raw,'hush-caproot-v1',cid+'|'+e),'hush-cap-v1','member'))}
+/* The key chain (SPEC.md 5.6 "Key chain"): a private channel's row for epoch e holds `c`, the signed commit of that epoch's
+   key sealed under it, and from epoch 1 `b`, the key before it sealed under a key worked out from this one. So one key
+   opens every key before it, and a joiner needs only the current one. */
+async function subKey(raw,label,info){return crypto.subtle.importKey('raw',await hkdf(raw,label,info),'AES-GCM',false,['encrypt','decrypt'])}
+async function chainRow(cid,e,raw,prev){ // {b,c}; {c} at epoch 0 or without the key before
+  const key=await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt']),H=b64u(await hkdf(raw,'hush-commit-v1',cid+'|'+e));
+  const c=b64(await sealRaw(key,enc.encode('hush-rot-v1|'+cid+'|'+e),enc.encode(JSON.stringify({f:S.me.handle,m:'full',s:await sideSig('hush-rot-v1',[cid,String(e),H,'full'])}))));
+  return Number(e)>0&&prev?{b:b64(await sealRaw(await subKey(raw,'hush-back-v1',cid+'|'+e),enc.encode('hush-back-v1|'+cid+'|'+e),prev)),c}:{c}}
+async function openCommit(cid,e,raw,c){ // {f,m,s}, or null when it doesn't open under this key
+  try{const x=JSON.parse(dec.decode(await openRaw(await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt']),enc.encode('hush-rot-v1|'+cid+'|'+e),unb64(c))));
+    return x&&typeof x.f==='string'&&typeof x.m==='string'&&typeof x.s==='string'?{f:x.f,m:x.m,s:x.s}:null}catch{return null}}
+async function openBack(cid,e,raw,b){ // the key of epoch e-1, or null
+  try{const p=await openRaw(await subKey(raw,'hush-back-v1',cid+'|'+e),enc.encode('hush-back-v1|'+cid+'|'+e),unb64(b));return p.length===32?p:null}catch{return null}}
+/* Before a private channel's current key seals a post, comment, service note or meta, or is handed on in a link or a wrap
+   (sealKey), its row's commit must check out; reactions, votes, read marks, typing dots and member cards are not held back.
+   It opens under that key and names it (H), it is signed by a key of the signer this device hasn't seen change, and the
+   signer is the owner or an admin as this device's roles record counts them now (rolesPass). A missing row passes only on a
+   device that never saw the channel chained, and only while the row before is missing too. The row, the commit and the
+   signature are kept with the keys, so accepting a new security code (acceptKey) checks again; who counts is never kept: it
+   is decided at every call, so a corrected record or a key loaded since takes effect at the next seal with nothing cleared.
+   `strict` (the backfill's replace, ensureChain): no first sight, the owner must be on record. */
+const okKey=(cid,e,raw)=>'ok:'+S.me.handle+':'+cid+':'+e+':'+b64(raw).slice(0,16);
+function headOk(c,e,raw,strict,again){const cid=c.id,k=okKey(cid,e,raw)+(strict?':s':''); // kept apart: a first-sight pass (or keyMade) never stands in for a strict one; again: the row read once more after a refusal (below)
+  if(!S.chanKeys.has(k))S.chanKeys.set(k,(async()=>{
+    const row=async j=>{try{return await S.db.doc('channels/'+cid+'/chain/'+j).get()}catch(err){S.chanKeys.delete(k);throw err}}; // unsure (offline, say): checked again at the next seal
+    const d=await row(e);
+    if(!d.exists)return !(Number(e)>0&&(await row(e-1)).exists)&&!(rolesOf(cid)||{}).ch;
+    noteChained(cid);
+    const o=await openCommit(cid,e,raw,d.data().c);if(!o||o.m!=='full')return false;
+    const H=b64u(await hkdf(raw,'hush-commit-v1',cid+'|'+e)),sd=[cid,String(e),H,'full'];
+    if(typeof keyChanged==='function'&&keyChanged(o.f))return false;
+    if(!(await senderKeys(o.f))){S.chanKeys.delete(k);return false} // the signer's keys could not be read (the profile did not load): unsure, not refused for good; checked again at the next seal
+    let ok=(await sideOk(o.f,o.s,'hush-rot-v1',sd,0,false))===true; // the signer's current key only: never a replaced one ('prev'), nor a pinned one the directory has moved on from
+    // A device removal replaces this account's key before the chat keys: while it runs, a commit under the key it replaced, as
+    // this device itself had it (never the server's history of it), lets the removal change them. Not kept: checked again after.
+    const was=!ok&&o.f===S.me.handle&&S.rekeying&&S.me.prev&&S.me.prev.sig;
+    if(was){try{ok=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(was,'s'),unb64(o.s),enc.encode('hush-rot-v1|'+sd.join('|')))}catch{}if(ok)S.chanKeys.delete(k)}
+    if(!ok)return false;
+    return o.f})()); // the signer whose commit checks out; who counts is decided below, fresh at every call (rolesPass)
+  return S.chanKeys.get(k).then(async f=>{if(typeof f!=='string')return f;if(await rolesPass(c,f,strict)){if((rolesOf(cid)||{}).o)noteHi(cid,e);return true}if(again)return false;S.chanKeys.delete(k);return headOk(c,e,raw,strict,1)})} // a cached signer refused: the row is read once more, since the owner may have signed its commit again meanwhile (Remove admin: setAdmins' sign), then refused for good; a pass with the owner on record raises the mark (hi): a first-sight pass raises none, so a key planted then can't lock the channel afterwards
+// hk, the owner key a record was taken under, is still hers as this device holds it now, and this device hasn't seen her key change without accepting it (verifiedAdmin's rule)
+async function hkNow(r){if(!r.hk||typeof keyChanged==='function'&&keyChanged(r.o))return false;const o=await senderKeys(r.o);return !!o&&r.hk===(o.sig||{}).x}
+// The roles part of a key commit's check (headOk), decided at every call and never kept: the owner always; an admin from a list taken under her key as this
+// device holds it now (hkNow), on her own page, or while this device runs its own removal (S.rekeying); an unsigned record (a copy this device could not verify, or
+// a channel from before release 92 the owner hasn't signed yet) counts no admin (owner decision D1); else the
+// channel's owner part is read once more (a copy under her new key is noted on demand: readMeta, noteRoles) and the record read again; no record: first sight (strict: refused)
+async function rolesPass(c,f,strict){const cid=c.id;for(let n=0;;n++){await rolesQ.get(cid);const r=rolesOf(cid);if(!r||!r.o)return !strict;if(f===r.o)return true;
+  if(!(r.a||[]).includes(f))return false;if(r.o===S.me.handle||S.rekeying||await hkNow(r))return true;
+  if(n||!c.ometa)return false;await readOMeta(c)}}
+const keyMade=(cid,e,raw)=>{noteHi(cid,e);return S.chanKeys.set(okKey(cid,e,raw),Promise.resolve(true))}; // a key this page made, or took from a link (trusted by the way it came); it raises the mark (hi) too
+async function sealKey(c,e,own){ // convKey, for sealing or handing on (SPEC.md 5.6 "Key chain"); own: the owner's part (ometa), which sits at any epoch up to the current one and holds nothing a removed member lacks, so a copy behind the mark seals it all the same
+  if(!own&&Number(e)<hiOf(c))throw Object.assign(new Error('rollback'),{code:'conflict'}); // below the mark (hi): refused before any key is looked up; 'conflict', so a key change redone from a fresh record on it (kickMember, revokeRekey, a removal) reads again first, and a copy merely behind another tab's check goes through then
+  const ck=await convKey(c,e);if(!ck)return null;
+  if(typeOf(c)==='channel'&&c.visibility!=='public'&&Number(e)===epochOf(c)&&!(await headOk(c,e,ck.raw)))throw new Error('badkey');
+  return ck}
 async function adminCapFrom(cid,secret){return b64u(await hkdf(secret,'hush-cap-v1','admin|'+cid))}
 async function ownerCap(cid){return b64u(await hkdf(ownIkm(S.me),'hush-cap-v1','owner|'+cid))}
 async function memberCap(c,e){
   if(typeOf(c)==='dm'&&Number(e)===0){const s=await dmSecret(dmPeer(c));return s?memberCapFrom(c.id,0,s):null}
   const k=await convKey(c,e);return k&&k.raw?memberCapFrom(c.id,e,k.raw):null}
 const adminCache=new Map();
-async function adminSecret(c){ // the admin secret, if this device can unwrap it from the record's current akeys
+async function adminSecret(c){ // the admin secret, if this device can unwrap it from the record's current akeys; a private channel's: the one its owner signed first (verifiedAdmin), any other only for the server's admin key, and never kept
   if(!c.akeys){const kept=ksGet(c.id,'a');return kept?unb64(kept):null}
+  const pc=typeOf(c)==='channel'&&c.visibility!=='public',v=pc&&await verifiedAdmin(c,true);if(v)return v;
   const k=S.me.handle+':'+((S.me.dev&&S.me.dev.id)||'')+':'+c.id+':'+JSON.stringify(c.akeys);
-  if(!adminCache.has(k))adminCache.set(k,unwrapMine(c.akeys,c.id+'#a').then(raw=>{if(raw)ksPut(c.id,'a',b64(raw));return raw},()=>null));
+  if(!adminCache.has(k))adminCache.set(k,unwrapMine(c.akeys,c.id+'#a').then(raw=>{if(raw&&!pc)ksPut(c.id,'a',b64(raw));return raw},()=>null));
+  return adminCache.get(k)}
+// Anyone holding a device's public key can make a wrap that opens for it, so a server can slip a secret of its own into akeys.
+// A private channel's admin secret counts for sealing a link's secret or opening an `as` only when its fingerprint (`ah`) is
+// the one the owner signed into this device's roles record (SPEC.md 5.6 "Key chain"): else null, never another one.
+// held: by the record as this device holds it right now, neither reading c's ometa into it nor waiting for one being noted (adminSecret: it runs while the chat is being opened, capsFor)
+// want: another fingerprint instead, this device's own new one whose signed list hasn't landed (signAdminId)
+const adminId=async(cid,raw)=>b64u(await hkdf(raw,'hush-admin-id-v1',cid));
+async function verifiedAdmin(c,held,want){
+  if(!c||typeOf(c)!=='channel'||c.visibility==='public'||!c.akeys)return null;if(!held){if(c.ometa)await readOMeta(c);await rolesQ.get(c.id)}
+  const r=rolesOf(c.id)||{},o=!want&&r.s&&r.h&&!(typeof keyChanged==='function'&&keyChanged(r.o))&&(held?peerKeys(r.o):await senderKeys(r.o)),h=want||o&&r.hk&&r.hk===(o.sig||{}).x&&r.h;if(!h)return null; // only while the owner key that checked it (hk) is still hers as this device holds it, and not while it has seen her key change without accepting it (rolesOk and headOk refuse her then too): after she replaced it (a device removal), none a lost device of hers signed before, nor the one from before, which it knew (held: her key as already loaded, no fetch)
+  const k='v:'+S.me.handle+':'+((S.me.dev&&S.me.dev.id)||'')+':'+c.id+':'+h+':'+JSON.stringify(c.akeys);
+  if(!adminCache.has(k))adminCache.set(k,unwrapMine(c.akeys,c.id+'#a',undefined,async raw=>(await adminId(c.id,raw))===h).then(raw=>{if(raw)ksPut(c.id,'a',b64(raw));return raw},()=>null));
   return adminCache.get(k)}
 const postData=(cid,p)=>enc.encode([cid,p.from,p.ts,p.iv,p.ct].concat(p.e!=null?[p.e]:[]).concat(p.exp?['x'+p.exp]:[]).join('|'));
 async function sealPost(c,text,ts,exp){
-  const e=epochOf(c),ck=await convKey(c,e);if(!ck)throw new Error('nokey');
+  const e=epochOf(c),ck=await sealKey(c,e);if(!ck)throw new Error('nokey');
   const iv=crypto.getRandomValues(new Uint8Array(12)),t=ts||Date.now();
   const p={from:S.me.handle,ts:t,e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv},ck.key,enc.encode(text)))};
   const x=exp===undefined?(c.ttl?t+c.ttl*1000:0):exp;if(x)p.exp=x;
@@ -302,7 +399,7 @@ async function unsealPost(c,p){ // gives back the message with sender, inner cip
   return Object.assign({},p,v||{from:'',iv:'',ct:'',sig:'bad:'+pid+':'+p.n});
 }
 async function sealSvc(c,kind,v){ // a system note with the name and what changed tucked inside the encryption
-  const e=epochOf(c),ck=await convKey(c,e);if(!ck)throw new Error('nokey');
+  const e=epochOf(c),ck=await sealKey(c,e);if(!ck)throw new Error('nokey');
   const iv=crypto.getRandomValues(new Uint8Array(12)),ts=Date.now();
   const inner=enc.encode(JSON.stringify({f:S.me.handle,k:kind,v:v||0,sg:await sideSig('hush-svc-v1',[c.id,kind,String(v||0),String(ts)])}));
   return {sv:1,ts,e,n:b64(iv),d:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('hush-svc-v1|'+c.id+'|'+ts)},ck.key,inner))};
@@ -320,46 +417,129 @@ async function unsealSvc(c,p){
   return x?Object.assign({},p,x):Object.assign({},p,{svc:'',from:'',_hide:true});
 }
 const unsealAll=(c,a)=>Promise.all((a||[]).map(p=>p&&p.sv===1?unsealSvc(c,p):unsealPost(c,p)));
+/* Member cards (SPEC.md 5.6, release 92): a private channel's subscriber says "I joined by link", "I left" or "my device
+   was removed" with a card an admin's page acts on (rollRun), since a channel takes no posts from subscribers. Every card
+   is the same size, sealed under the epoch's key, and signed inside by its author. */
+const cardAD=(cid,e)=>enc.encode('hush-card-v1|'+cid+'|'+e);
+const actAD=(cid,post,kind)=>enc.encode('hush-act-v3|'+cid+'|'+post+'|'+kind); // a channel's reaction or vote: not the slot, which the page doesn't know before sealing
+const cardData=(cid,x)=>enc.encode(['hush-card-v1',cid,x.k,x.e,x.i,x.ts].join('|'));
+// A link joiner's `m`: from the link's secret, over the channel, the link and the author, so no one without the secret can say
+// someone came by that link. Not over the epoch or time, so the joiner's page can write the same one again later (healCard).
+const joinMac=async(secret,cid,iid,f)=>b64u(await hkdf(secret,'hush-join-mac-v1',[cid,iid,f].join('|')));
+async function sealCard(c,k,i,m){
+  const e=epochOf(c),ck=await convKey(c,e);if(!ck)throw new Error('nokey');
+  const iv=crypto.getRandomValues(new Uint8Array(12)),x={f:S.me.handle,k,e,i:i||'',ts:Date.now()};if(m)x.m=m;
+  x.sg=await sideSig('hush-card-v1',[c.id,k,String(e),x.i,String(x.ts)]);
+  return {e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:cardAD(c.id,e)},ck.key,enc.encode(padNote(x,512))))}}
+async function openCard(c,row){ // the card's fields, or null; its signature is checked only where it would act (cardSigOk)
+  try{const ck=row&&Number.isInteger(row.e)?await convKey(c,row.e):null;if(!ck)return null;
+    const x=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(row.iv),additionalData:cardAD(c.id,row.e)},ck.key,unb64(row.ct))));
+    return x&&HANDLE_RE.test(x.f)&&['join','leave','dev','adm'].includes(x.k)&&x.e===row.e&&typeof x.i==='string'&&/^[A-Za-z0-9]{0,20}$/.test(x.i)&&Number.isFinite(x.ts)&&typeof x.sg==='string'?{f:x.f,k:x.k,e:x.e,i:x.i,ts:x.ts,sg:x.sg,m:typeof x.m==='string'?x.m:''}:null}catch{return null}}
+// By the author's key in the directory as loaded just now (loadDir(…,true)), not a pin: a stale pin would block the card of
+// anyone who replaced a key, and would take a lost device's old one.
+async function cardSigOk(c,x){const d=S.dir[x.f];if(!d||!d.sig)return false;
+  try{return await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await pubKey(d.sig,'s'),unb64(x.sg),cardData(c.id,x))}catch{return false}}
 /* A private group's or channel's name, description and photo are locked with the group's own key, so the
    server only ever stores gibberish ("meta"). Public channels stay readable so people can find them.
    showMeta() makes a separate on-screen copy with the readable values. That copy is never saved back. */
 const metaCache=new Map();
 // `o`: the owner's part only (name, description, photo, owner, admins), kept in `ometa`, which only the owner key may
-// write (SPEC.md 5.3). Its own additional data, so neither blob can be passed off as the other.
-const metaAD=(cid,o)=>enc.encode((o?'hush-ometa-v1|':'hush-meta-v1|')+cid);
+// write (SPEC.md 5.3). Its own additional data, so neither blob can be passed off as the other. Meta with its epoch in the
+// additional data (v2, given `e`) is read from release 92 and written from release 93b, whose go-live step reloads every
+// page that reads only v1 (such a page would show an empty member list, and a group's next join note would rewrite it).
+const metaAD=(cid,o,e)=>enc.encode(o?'hush-ometa-v1|'+cid:e!==undefined?'hush-meta-v2|'+cid+'|'+e:'hush-meta-v1|'+cid);
 const HANDLE_RE=/^[a-z0-9_]{3,20}$/;
 const handleList=a=>Array.isArray(a)?a.filter(h=>typeof h==='string'&&HANDLE_RE.test(h)):[];
 async function sealMeta(cid,e,raw,v,o){ // name, description, photo AND who is in the chat: all locked with the chat key (SPEC.md 5.3)
   const key=await crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt']),iv=crypto.getRandomValues(new Uint8Array(12));
   const x={name:String(v.name||''),desc:String(v.desc||''),photo:v.photo||null,owner:v.owner||'',admins:handleList(v.admins)};
   if(!o)Object.assign(x,{members:handleList(v.members),banned:handleList(v.banned)});
-  return {e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:metaAD(cid,o)},key,enc.encode(JSON.stringify(x))))};
+  else{await rolesQ.get(cid);const r=rolesOf(cid)||{},t=r.t,nh=v._ah!=null,mine=r.hk===S.me.sig.x,ah=nh?v._ah:r.s&&mine&&r.h; // mine: the record's fingerprint was taken under this account's current key; one taken under a key since replaced (a device removal) is neither signed again nor outdone by its `at` (a lost device's, however far ahead, noteRoles); o 'keep': sealed again under a new key (adoptOMeta), at the record's time, only from a signed record (a list this device could not verify is never signed by itself: owner decision D1) and only while the record is the one the copy was read against (_rt, showMeta)
+    if((o==='keep'||o==='next')&&(!r.s||v._rt!==t)||o===true&&rolesHeld(cid))throw new Error('nokey');x.rt=o==='keep'?t:o==='next'?t+1:Math.max(Date.now(),(r.t||0)+2); // 'next': a list the page changes by itself (rollRun's admin step), just after the record's time, so it outranks no later owner change a device kept from this one made; any other: later than any copy this device saw and than a 'next' from it, so one sent again can't undo it (noteRoles), and none while a copy of her list waits here past the date limit (rolesHeld); no record's t or ht was noted more than the date limit ahead (rolesAhead), so these stay near her clock
+    if(ah)Object.assign(x,{ah,at:nh?Math.max(Date.now(),(mine&&r.ht||0)+1):r.ht||0}); // the admin secret's fingerprint and when it was named: a new one only from the page that just made the secret (_ah, never a copy's; '' names none), else the signed record's
+    x.rs=await sideSig('hush-roles-v1',rolesData(cid,e,x))} // the owner's signature over who the owner and admins are, the admin secret, and when
+  return {e,iv:b64(iv),ct:b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:metaAD(cid,o,e)},key,enc.encode(JSON.stringify(x))))};
 }
-async function sealMetaFor(c,v,o){const e=epochOf(c),k=await convKey(c,e);if(!k||!k.raw)throw new Error('nokey');return sealMeta(c.id,e,k.raw,v,o)}
-const sealOMeta=(cid,e,raw,v)=>sealMeta(cid,e,raw,v,true),sealOMetaFor=(c,v)=>sealMetaFor(c,v,true);
+async function sealMetaFor(c,v,o){const e=epochOf(c),k=await sealKey(c,e,!!o);if(!k||!k.raw)throw new Error('nokey');return sealMeta(c.id,e,k.raw,v,o)}
+const sealOMeta=(cid,e,raw,v)=>sealMeta(cid,e,raw,v,true),sealOMetaFor=(c,v,keep)=>sealMetaFor(c,v,keep==='next'?keep:keep?'keep':true);
 async function readMeta(c,raws,o){ // the readable description and member list, or null if this device can't unlock it
   const m=c&&(o?c.ometa:c.meta);if(!m||typeof m.iv!=='string'||typeof m.ct!=='string')return null;
   // Sealed under another epoch than the record's: a stale copy (the server keeps meta re-sealed at every rotation),
   // which would show a member list from before someone was removed and have the next rotation wrap for them again.
   // The owner's part is not re-sealed at rotations: any epoch up to the current one.
   if(o?!(Number.isInteger(m.e)&&m.e>=0&&m.e<=epochOf(c)):Number(m.e)!==epochOf(c))return null;
-  const ck=(o?'o:':'')+c.id+':'+m.e+':'+m.iv;
+  const ck=(o?'o:':'')+(S.me?S.me.handle:'')+':'+c.id+':'+m.e+':'+m.iv; // per account: reading a copy notes it into that account's roles record (noteRoles), so a second account signed in on this page reads each copy again
   if(!metaCache.has(ck))metaCache.set(ck,(async()=>{try{
     let key;
     if(raws&&raws[m.e])key=await crypto.subtle.importKey('raw',unb64(raws[m.e]),{name:'AES-GCM'},false,['decrypt']);
     else{const k=await convKey(c,m.e);if(!k)return null;key=k.key}
-    const v=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(m.iv),additionalData:metaAD(c.id,o)},key,unb64(m.ct))));
+    let pt=null;for(const ad of o?[metaAD(c.id,true)]:[metaAD(c.id,false,m.e),metaAD(c.id,false)])if(!pt)try{pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(m.iv),additionalData:ad},key,unb64(m.ct))}catch{} // meta: v2 first, then v1
+    if(!pt)return null;const v=JSON.parse(dec.decode(pt));
     const x={name:String(v.name||'').slice(0,60),desc:String(v.desc||'').slice(0,200),photo:typeof v.photo==='string'?v.photo:null,owner:HANDLE_RE.test(v.owner||'')?v.owner:'',admins:handleList(v.admins)};
+    if(o&&typeOf(c)==='channel'){if(typeof v.rs==='string')x.rs=v.rs;if(Number.isFinite(v.rt))x.rt=v.rt;if(typeof v.ah==='string')x.ah=v.ah;if(Number.isFinite(v.at))x.at=v.at;noteRoles(c.id,m.e,x,ck)} // not awaited: it may load the owner's profile, and this runs while the chat is being opened (capsFor)
     return o?x:Object.assign(x,{members:handleList(v.members),banned:handleList(v.banned),_unlocked:true});
   }catch{return null}})());
-  const v=await metaCache.get(ck);if(!v)metaCache.delete(ck);return v; // don't remember failures: keys may arrive later
+  const v=await metaCache.get(ck);if(!v||rolesAhead(v))metaCache.delete(ck);return v; // don't remember failures: keys may arrive later; nor a roles copy dated too far ahead, so it is noted once the clock has caught up (rolesAhead)
 }
 const readOMeta=(c,raws)=>readMeta(c,raws,true);
+// What this device keeps per private channel from release 92 (SPEC.md 12.2): the owner `o` and admins `a` as of the ometa
+// of epoch `e` (`s`: once one signed by the owner was seen, `t`: its time, `h`: the admin secret's fingerprint it names, `ht`: when that was named, `hk`: the owner key it was checked under, `n`: narrowed under a later key of hers at its own time), `ch`, and `dk`, each author's account key version the last dev
+// card it acted on came with (rollRun); `p`, on an owner's device: the fingerprint of the admin secret it made last (rotateAdmins), which only it may sign again by itself (signAdminId);
+// `ak`, on an owner's device: each admin's account key version the admin secret last went out to them under (rotateAdmins), so her page replaces it by itself once one has risen (rollRun); `hi`, the highest epoch whose key change it checked or made (hiOf, below)
+const rolesKey=()=>'hush:roles:'+S.me.handle;
+const rolesOf=cid=>ls.get(rolesKey(),{})[cid]||null;
+const noteChained=cid=>{const m=ls.get(rolesKey(),{});if(m[cid]&&m[cid].ch)return;m[cid]=Object.assign({},m[cid],{ch:1});ls.set(rolesKey(),m)}; // `ch`: this device saw a key-chain row of the channel
+// `hi` (release 93b; private channels only, owner decision D7): the highest epoch whose key change this device checked with the owner on record (headOk) or made or took from a link (keyMade).
+// A private channel's record below it is refused for sealing and for a key change (sealKey, 'rollback'): a server serving an older record, or a database restored from before that
+// key change, would otherwise have this device seal under a key someone removed since still holds, and wrap for them again at an epoch already used. Never lowered, so after an honest
+// restore such a channel stays refused on this device (Phase 3's restored mode is the way back); a fresh device, with no mark, is not
+const hiOf=c=>typeOf(c)==='channel'&&c.visibility!=='public'&&(rolesOf(c.id)||{}).hi||0;
+const noteHi=(cid,e)=>{const m=ls.get(rolesKey(),{}),r=m[cid]||{};if((r.hi||0)>=Number(e))return;m[cid]=Object.assign({},r,{hi:Number(e)});ls.set(rolesKey(),m)};
+const noteOwnAh=(cid,p)=>{const m=ls.get(rolesKey(),{});m[cid]=Object.assign({},m[cid],{p});ls.set(rolesKey(),m)}; // before its akeys go out (rotateAdmins)
+// From release 92 ometa carries `rs`, the owner's signature over who the owner and admins are, `ah`, the admin secret's
+// fingerprint (adminId) with `at`, when it was named, and `rt`, when: the one thing about them a server, or someone removed who still holds an old key, can't make
+const rolesData=(cid,e,x)=>[cid,String(e),String(x.rt),x.owner,[...x.admins].sort().join(',')].concat(x.ah?[x.ah,String(x.at)]:[]); // ah and at last, only when the copy names one
+async function rolesOk(cid,e,x){return typeof x.rs==='string'&&!(typeof keyChanged==='function'&&keyChanged(x.owner))&&(await sideOk(x.owner,x.rs,'hush-roles-v1',rolesData(cid,e,x),0,false))===true}
+// The date limit: a copy dated more than five minutes ahead of this device's clock is not noted now; it is noted by itself once
+// this clock has caught up when that is at most another five minutes away (rolesLater, after loading her profile again), else
+// read again later (readMeta); her pages date by their clocks, so no list, a lost device's included, can be dated so far ahead
+// that her later changes (rt: max(now, the record's + 2)) never outrank it
+const ROLES_SKEW=5*60e3,rolesAhead=x=>{const n=Date.now()+ROLES_SKEW;return x.rt>n||x.at>n},rolesLater=new Map(); // per copy waiting so: whether it holds this account's owner changes (rolesHeld)
+// On her page a copy of her own list, signed with her key and dated past the limit (another device of hers whose clock is fast),
+// waits to be noted: a change of hers dated by this clock would rank below it and be undone everywhere once it is, so her owner
+// changes that take a new rt are refused meanwhile (nokey: try again); sealing her list again ('keep', 'next') never is, a removal's included
+const rolesHeld=cid=>[...rolesLater].some(([k,v])=>v&&k.startsWith(S.me.handle+':'+cid+':'));
+const rolesQ=new Map(); // per channel: the last noteRoles queued, which a check (headOk) waits for
+function noteRoles(cid,e,x,ck){ // an ometa that opened, into the owner and admins this device checks key commits against (SPEC.md 5.6 "Key chain"); ck: readMeta's cache key for the copy
+  const me=S.me,job=(rolesQ.get(cid)||Promise.resolve()).then(async()=>{if(!x||!x.owner)return;
+    if(rolesAhead(x)){const w=Math.max(x.rt||0,x.at||0)-Date.now()-ROLES_SKEW,k=me.handle+':'+cid+':'+x.rs;if(w<=ROLES_SKEW&&!rolesLater.has(k)){rolesLater.set(k,x.owner===me.handle&&await rolesOk(cid,e,x));setTimeout(()=>loadDir([x.owner],true).catch(()=>{}).then(()=>{rolesLater.delete(k);if(S.me===me)noteRoles(cid,e,x)}),w+1e3)}return} // the date limit (above); a copy of this account's own list, signed with its key, holds its owner changes until then (rolesHeld); her profile loaded again first, so a copy under a key she has replaced meanwhile (a device removal) is checked against her new one, never noted under the old
+    const kx=(((await senderKeys(x.owner))||{}).sig||{}).x,ok=await rolesOk(cid,e,x); // kx: the owner's signing key as this device holds it, taken first, so one accepted meanwhile leaves `h` tied to the older key (fail closed)
+    if(S.me!==me)return; // another account came in meanwhile: its record is not this one's
+    const ids=ls.get('hush:ids',[]),mine=Array.isArray(ids)&&ids.find(i=>i&&i.handle===me.handle);if(x.owner===me.handle&&mine&&mine.sig&&mine.sig.x!==me.sig.x)return; // another tab replaced this account's keys (a device removal) and this one hasn't reloaded yet (the storage handler): it would check its own lists against the key replaced, into the record both tabs share, which her new key's page would then sign again
+    const m=ls.get(rolesKey(),{}),r=m[cid]||{};
+    if(ck&&!ok&&typeof x.rs==='string')metaCache.delete(ck); // a signed copy that didn't check out here (read before this device had her new key, or her directory entry missing, say) is not remembered as read, at first sight too: the next read, a key check's own included (rolesPass), notes it under the key held then
+    if(r.o&&r.o!==x.owner)return; // another owner: nothing changes
+    const nh=ok&&!!x.ah&&x.rt===r.t&&x.at>(r.ht||0)&&[...x.admins].sort().join()===[...(r.a||[])].sort().join(); // of the record's own time and list, an admin secret named later: one an owner's page replaced by itself (rotateAdmins' keep)
+    if(!r.o)Object.assign(r,{e,o:x.owner,a:x.admins,s:ok?1:0,t:ok?x.rt:0,h:ok?x.ah:undefined,ht:ok?x.at:0,hk:ok?kx:undefined}); // first sight: the owner is fixed from here on; `h`, the admin secret's fingerprint, only from a signed copy, as the list, with `hk`, the owner key that checked it (verifiedAdmin)
+    else if(ok&&x.rt>(r.t||0))Object.assign(r,{e,a:x.admins,s:1,t:x.rt,h:x.ah,ht:x.at,hk:kx,n:0}); // signed, and later by its time whatever its epoch (the owner's change may be sealed under a key below one the list was sealed again under meanwhile): the whole list, so a record narrowed below (n) is whole again; a copy from before sent again changes nothing
+    else if(ok&&x.rt<=r.t&&(r.hk!==kx||r.n)&&(x.rt===r.t||x.rt>1)){ // at or before the record's time, under the owner's key as this device holds it now, while the record was taken under one she has since replaced (a device removal) or is already so narrowed (n): only the admins in both lists (never one added), the key the record counts under moves, its time stays; so her removal's own copy (keep, at her record's rt) undoes any admin a lost device of hers named at a later rt, whatever date it chose, and a 'next' from another of her devices that missed a drop brings no admin who left back; not a copy at rt 1 (a re-seal by a device with no signed record: adoptOMeta) against a record above 1, so a lost device's list such a device first read can't come back under her new key
+      const a=(r.a||[]).filter(h=>x.admins.includes(h)),sub=x.admins.every(h=>(r.a||[]).includes(h)), // sub: the copy names no admin outside the record's
+            take=sub&&(r.hk!==kx||x.at>(r.ht||0)||x.ah===r.h),same=r.hk===kx&&a.length===(r.a||[]).length; // the fingerprint: the copy's when its list is within the record's and the key flipped, it was named later, or it is the record's own named again (a 'next' drop); under the same key kept only while the list did not shrink; else none, until a later rt
+      Object.assign(r,{e:Math.max(e,r.e||0),a,s:1,h:take?x.ah:same?r.h:undefined,ht:take?x.at:same?r.ht:0,hk:kx,n:1})}
+    else if(ok&&x.rt===r.t&&(e>r.e||nh)){if(e>r.e)r.e=e;if(nh)Object.assign(r,{h:x.ah,ht:x.at})} // the same time sealed again under a later key (adoptOMeta): only the epoch moves, so a list of that time naming others changes nothing; for the same list a fingerprint named later is taken, never one from before sent again
+    else if(!r.s&&e>=r.e)r.a=(r.a||[]).filter(h=>x.admins.includes(h)); // unsigned (a page from before release 92): it only takes admins away, never from an older epoch, and only until a signed one was seen
+    else return;
+    m[cid]=r;ls.set(rolesKey(),m)}).catch(()=>{});
+  rolesQ.set(cid,job);return job}
 /* invite links carry a secret in the part after #, which never reaches the server */
 async function inviteKey(secret,cid,iid){const ikm=await crypto.subtle.importKey('raw',secret,'HKDF',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt:enc.encode(cid+':'+iid),info:enc.encode('hush-invite-v1')},ikm,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
 // Proof of holding an invite link, worked out from the link's secret. The server only keeps its fingerprint.
 async function joinProof(secretB64u,cid,iid){return b64u(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode('hush-join-v1:'+cid+':'+iid+':'+secretB64u))))}
+// A channel link's secret sealed under the admin secret (`as`, SPEC.md 5.3), so any admin's device can show the link and carry it across a leave
+async function sealAs(adminRaw,cid,iid,secret){return b64(await sealRaw(await subKey(adminRaw,'hush-inv-as-v1',cid+'|'+iid),enc.encode('hush-inv-as-v1|'+cid+'|'+iid),secret))}
+async function openAs(adminRaw,cid,iid,as){ // the link's 16-byte secret, or null
+  try{const s=await openRaw(await subKey(adminRaw,'hush-inv-as-v1',cid+'|'+iid),enc.encode('hush-inv-as-v1|'+cid+'|'+iid),unb64(as));return s.length===16?s:null}catch{return null}}
 /* ===== HUSH MEDIA BEGIN ===== */
 /* Media encryption, version 2 (SPEC.md 7.7). Every file gets its own random key, carried inside the sealed message
    with the file's other facts (type, name, size, duration, preview); the server sees none of them. The file is cut
@@ -374,11 +554,14 @@ async function newMediaKey(){const raw=crypto.getRandomValues(new Uint8Array(32)
   return {k:b64std(raw),key:await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt','decrypt'])}}
 async function mediaKeyOf(k){const raw=Uint8Array.from(atob(String(k)),ch=>ch.charCodeAt(0));if(raw.length!==32)throw new Error('mediakey');
   return crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt'])}
-async function sealPiece(key,i,n,plain){const iv=crypto.getRandomValues(new Uint8Array(12));
-  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:mediaAad(i,n)},key,plain));
+// AES-GCM with any associated data, as iv followed by the ciphertext: media pieces, and the key chain's rows (chainRow)
+async function sealRaw(key,ad,plain){const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:ad},key,plain));
   const out=new Uint8Array(12+ct.length);out.set(iv,0);out.set(ct,12);return out}
-async function openPiece(key,i,n,body){
-  return new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:body.subarray(0,12),additionalData:mediaAad(i,n)},key,body.subarray(12)))}
+async function openRaw(key,ad,body){
+  return new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:body.subarray(0,12),additionalData:ad},key,body.subarray(12)))}
+async function sealPiece(key,i,n,plain){return sealRaw(key,mediaAad(i,n),plain)}
+async function openPiece(key,i,n,body){return openRaw(key,mediaAad(i,n),body)}
 const pieceHash=async plain=>new Uint8Array(await crypto.subtle.digest('SHA-256',plain));
 async function mediaRoot(hashes){const all=new Uint8Array(hashes.length*32);hashes.forEach((h,i)=>all.set(h,i*32));
   return b64std(new Uint8Array(await crypto.subtle.digest('SHA-256',all)))}
@@ -516,7 +699,7 @@ const gated=new Map();
 async function boxLoc(login,x){const t=await loginTag(login),k=t+'|'+x;
   if(!gated.has(k))gated.set(k,S.db.loginGate(t,x).catch(e=>{gated.delete(k);throw e}));return gated.get(k)}
 async function moveBox(x,g,d){
-  try{await S.db.doc('accounts/'+g).set({iv:d.iv,ct:d.ct})}catch(e){if(!(e&&e.code==='exists'))throw e}
+  try{await S.db.doc('accounts/'+g).set({iv:d.iv,ct:d.ct})}catch(e){if(e&&(e.code==='full'||e.code==='ratelimit'))return;if(!(e&&e.code==='exists'))throw e} // no room or no allowance for a new row today: log in with the old box and move it next time
   await S.db.doc('accounts/'+x).delete().catch(()=>{})}
 async function findBox(login,x){ // the box for this login and stretched password, wherever it is, or null
   const g=await boxLoc(login,x),s=await S.db.doc('accounts/'+g).get();if(s.exists)return s.data();
@@ -607,7 +790,7 @@ async function healLogin(id){
     for(const [l,x] of Object.entries(boxes)){const o=await S.db.doc('accounts/'+x).get();if(o.exists)await moveBox(x,await boxLoc(l,x),o.data())}
   }catch{loginHealed.delete(h)}
 }
-async function rememberPw(login,pw){ // offers to save it in iCloud Keychain / Google Password Manager; Hush itself never stores it
+async function rememberPw(login,pw){ // Chrome and Edge only (PasswordCredential): offers to save it in Google Password Manager; Safari and the iPhone app save through the login form itself; Hush never stores it
   try{if(window.PasswordCredential&&navigator.credentials)await navigator.credentials.store(new PasswordCredential({id:login,password:pw,name:login}))}catch{}}
 /* ===== HUSH AUTH END ===== */
 /* ===== HUSH REKEY BEGIN ===== */
@@ -642,6 +825,11 @@ async function ownTokFor(cid,p){ // the token for one of my messages: one sealed
   const k=p.on||0,pid=p._id||p.id;
   for(const id of [S.me,S.me.prev&&S.me.prev.own?{own:S.me.prev.own,sigPriv:S.me.prev.sigPriv}:null].filter(Boolean)){const t=await ownTokAs(id,cid,pid,k);if(!p.oh||await ownHash(t)===p.oh)return t}
   return ownTokAs(S.me,cid,pid,k)}
+// The token for one of my files, kept nowhere: a member deletes the pieces of their own messages with it (X-Hush-Ot), the
+// server holds only its hash from the upload (X-Hush-Oh). One per media id under its own salt, so two files of one person, or
+// a file and a message, stay unlinkable on the server.
+async function mediaTokAs(id,cid,mid){return b64u(await hkdf(ownIkm(id),'hush-media-own-v1',cid+'|'+mid))}
+async function mediaTok(cid,mid){return mediaTokAs(S.me,cid,mid)}
 async function vaultPathOf(id){ // the vault address any identity {handle,ecdhPriv,ecdh} gives; vaultPath caches S.me's
   const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH',public:await pubKey(id.ecdh,'e')},await crypto.subtle.importKey('jwk',id.ecdhPriv,EC,false,['deriveBits']),256));
   const h=await crypto.subtle.digest('SHA-256',new Uint8Array([...bits,...enc.encode('hush-vault-id:'+id.handle)]));
@@ -711,6 +899,14 @@ function parseLinkCode(text,ver=3){ // {secret, fp} (16 bytes each; version 4: {
   for(const x of v.slice(0,k)){acc=(acc<<5)|x;bits+=5;if(bits>=8){if(n<out.length)out[n++]=(acc>>(bits-8))&255;bits-=8}acc&=(1<<bits)-1}
   if(acc!==0)return null; // the spare bits (four; two in version 4) are always zero
   return ver===4?{secret:out}:{secret:out.slice(0,16),fp:out.slice(16)};
+}
+// Version 5 (SPEC.md 14.14, release 58): the code the NEW device shows, a QR only, since nothing is typed in this direction:
+// its 128-bit secret, which names its ask, and the first 128 bits of linkFp over both of its keys, so the device that scans
+// it lets in exactly the keys on the screen it scanned, not ones a server swapped into the ask.
+const linkQr5=(secret,fp)=>'hush-link:5:'+b64u(secret)+':'+b64u(unb64u(fp).slice(0,16));
+function parseLinkQr5(text){ // {secret, fp} (16 bytes each), or null
+  const m=/^hush-link:5:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{22})$/.exec(String(text||'').trim());if(!m)return null;
+  const secret=unb64u(m[1]),fp=unb64u(m[2]);return secret.length===16&&fp.length===16?{secret,fp}:null;
 }
 // A new device's own key as one string, for the fingerprints below; '-' when a request carries none.
 const devkStr=dk=>dk&&typeof dk==='object'?[dk.id,dk.x,dk.y,dk.sx,dk.sy].map(v=>String(v)).join('|'):'-';

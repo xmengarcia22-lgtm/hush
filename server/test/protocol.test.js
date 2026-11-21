@@ -162,7 +162,7 @@ test('frame rate limit and query rate limit', async () => {
     await c.ok('ping');                                 // 2
     await c.ok('query', { p: `channels/${CID}/posts`, l: 1 });   // 3
     assert.equal((await c.call('query', { p: `channels/${CID}/posts`, l: 1 })).e, 'ratelimit'); // 4: query bucket empty
-    assert.equal((await c.call('ping')).e, 'ratelimit');          // 5: frame bucket empty
+    assert.equal((await c.call('get', { p: 'directory/alice' })).e, 'ratelimit');   // 5: frame bucket empty (a ping would be answered: allowance-ping.test.js)
     await c.close();
   } finally { await T.stop(); }
 });

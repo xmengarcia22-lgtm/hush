@@ -34,7 +34,7 @@ function createHushAdapter(url,opts){
   // The server's sign-in challenge lasts two minutes. A connection that sat idle longer (a new device waiting for approval, a login screen
   // left open) is replaced by a fresh one before signing in, and if the server still calls the challenge expired, once more.
   const NONCE_FRESH_MS=opts.nonceFreshMs||90e3;
-  const calls=new Map(),subs=new Map(),waiting=[];
+  const calls=new Map(),subs=new Map(),waiting=[];let era=0; // era: one account's time on the adapter (dropSubs)
   const opened=new Map(),opening=new Map(); // chats this connection holds a level for, and opens in progress
   const api={flat:true,addr:url,online:false,proven:null,error:'',identityError:null,badges:{},now:()=>Date.now()+clockOffset};
   api.ready=new Promise(r=>{readyRes=r});
@@ -58,7 +58,12 @@ function createHushAdapter(url,opts){
     for(const sub of subs.values())if(sub.pending.size){sub.pending.clear();emit(sub)}
     scheduleReconnect()}
   // Spread out over a few seconds: after a server restart every page would otherwise be back at the same moment.
-  function scheduleReconnect(){if(closed||reconnectT)return;const d=backoff+Math.random()*Math.max(backoff*0.3,4000);backoff=Math.min(backoff*2,30000);reconnectT=setTimeout(connect,d)}
+  // Not when the user has just come back or opened a chat (present): that reconnect goes at once, one per time it was said.
+  let eagerAt=0;
+  api.present=()=>{if(!live()&&reconnectT)connect();else eagerAt=Date.now()};   // a reconnect is waiting: now; otherwise the one a close heard within 5 s starts
+  // Only an attempt the adapter makes by itself lengthens the next wait: one the user asked for (at once here, or a waiting one brought forward) does not.
+  function scheduleReconnect(){if(closed||reconnectT)return;const eager=Date.now()-eagerAt<5000;eagerAt=0;
+    reconnectT=eager?setTimeout(connect,0):setTimeout(()=>{backoff=Math.min(backoff*2,30000);connect()},backoff+Math.random()*Math.max(backoff*0.3,4000))}
   function reconnectNow(){const s=ws;ws=null;if(s){try{s.close()}catch{}}setOnline(false);stopPing();proven=null;api.proven=null;opened.clear();tickets.clear();work=null;rejectCalls();clearTimeout(reconnectT);reconnectT=null;connect()}
   // ---- room keys (SPEC.md 5.2): before touching anything inside a chat, open it with the best key the app holds ----
   const chatOf=p=>{const m=/^channels\/([^/]+)/.exec(p||'');return m?m[1]:null};
@@ -66,11 +71,11 @@ function createHushAdapter(url,opts){
   const openFail=new Map(); // cid → why the last open failed: 'denied' (every key refused, or none to try), 'offline', 'ratelimit', or the server's other answer
   async function ensureOpen(cid,force){ // true once the connection holds a level for the chat
     if(!opts.caps)return false;let job=opening.get(cid);
-    if(!job){job=(async()=>{let caps=null,why='denied';try{caps=await opts.caps(cid)}catch(e){if(!online||(e&&e.code==='offline'))why='offline'}
+    if(!job){const g=era;job=(async()=>{let caps=null,why='denied';try{caps=await opts.caps(cid)}catch(e){if(!online||(e&&e.code==='offline'))why='offline'}
       const list=[...new Set((Array.isArray(caps)?caps:[caps]).filter(Boolean))]; // one key, or several to try in order (a DM after an account key change, SPEC.md 12)
       if(!list.length){openFail.set(cid,why);return false}const cur=opened.get(cid);if(cur&&list.includes(cur.cap)&&!force)return true;
       for(const cap of list){
-        try{const r=await call('chat.open',{cid,cap});opened.set(cid,{cap,level:r.level,epoch:r.epoch});openFail.delete(cid);busy.delete(cid);if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
+        try{const r=await call('chat.open',{cid,cap},g);opened.set(cid,{cap,level:r.level,epoch:r.epoch});openFail.delete(cid);busy.delete(cid);if(r.held&&opts.onPower)opts.onPower(cid,r.held);return true}
         catch(e){if(e&&e.code==='denied')continue; // this key doesn't open it: the next may
           const code=(e&&e.code)||'denied';if(code!=='offline')opened.delete(cid);if(code==='ratelimit'||code==='timeout')busy.add(cid);openFail.set(cid,code==='timeout'?'ratelimit':code);return false}}
       opened.delete(cid);openFail.set(cid,'denied');return false})().finally(()=>{opening.delete(cid)});
@@ -80,7 +85,7 @@ function createHushAdapter(url,opts){
   // A live view of a chat we cannot open yet (a one-on-one chat before its first message, say) shows as empty
   // and goes live by itself once the chat can be opened.
   function retryDeferred(cid){for(const sub of [...subs.values()])if(sub.deferred&&!sub.dead&&inChat(sub,cid)){sub.deferred=false;sendSub(sub)}}
-  async function chatCall(op,fields){const cid=chatOf(fields.p);if(cid)await ensureOpen(cid);return call(op,fields)}
+  async function chatCall(op,fields){const cid=chatOf(fields.p),g=era;if(cid)await ensureOpen(cid);return call(op,fields,g)}
   async function onEvict(cid){ // our level was revoked: a rotation, an admin change, or we were removed
     opened.delete(cid);if(opts.onEvict){try{await opts.onEvict(cid)}catch{}}
     const ok=await ensureOpen(cid,true);
@@ -99,7 +104,17 @@ function createHushAdapter(url,opts){
   api.rebaseChat=async(cid,cap)=>{await needOpen(cid);return call('chat.rebase',{cid,cap})}; // a DM's base key after an account key change (release 21)
   api.setOwner=async(cid,cap)=>{await needOpen(cid);return call('chat.owner',{cid,cap})}; // the owner key, from the owner's new account secret
   api.banChat=async(cid,h,on)=>{await needOpen(cid);return call('chat.ban',{cid,h,on:!!on})}; // block a username from a group or channel, or let it back in: the server refuses a blocked member key
+  api.card=async(cid,e,iv,ct)=>{await needOpen(cid);return call('chat.card',{cid,e,iv,ct})}; // this account's member card in a private channel (SPEC.md 5.6): one per account, a newer one replaces it
+  api.act=async(cid,post,kind,e,iv,ct)=>{await needOpen(cid);return call('chat.act',{cid,post,kind,e,iv,ct})}; // a channel's reaction or vote (SPEC.md 5.4): the server files it under a slot only it works out, one per account, post and kind
+  api.mine=async(cid,posts)=>{await needOpen(cid);return (await call('chat.mine',{cid,posts})).ids}; // the ids of the rows this account's own reactions and votes sit under on these posts, answered to this connection alone
+  api.chain=async(cid,e,b,c)=>{await needOpen(cid);return call('chat.chain',b===undefined?{cid,e,c}:{cid,e,b,c})}; // a channel's key-chain row, backfilled or replaced (admin level, SPEC.md 5.6)
+  api.slots=async(cid,cap,hs)=>{await needOpen(cid);return (await call('chat.slots',{cid,cap,hs})).tags}; // for each username, the tag its member card sits under in this private channel (admin level with the current member key, else conflict; SPEC.md 5.6): a card counts only in its author's slot
+  // Key-chain rows in one go. A chat this connection holds isn't opened again first: the walk can run inside opening it (capsFor), which would wait on itself.
+  api.mgetChat=async(cid,ps)=>{if(!opened.has(cid))await needOpen(cid);return (await call('mget',{ps})).docs.map(d=>docSnap(d.id,d.d,false))};
   api.report=(cid,pid,reason)=>call('report.send',{cid,pid,reason}); // a public channel's message: the chat, the message id and a reason, nothing else. No chat level needed
+  api.callRelay=async cid=>{await needOpen(cid);return call('call.relay',{cid})}; // a relay (TURN) credential for a call in this one-on-one chat; `unavailable` when the server has no relay
+  api.pushSet=o=>call('push.set',{dev:o.dev,tok:o.tok,env:o.env,kind:o.kind});api.pushClear=o=>call('push.clear',{dev:o.dev,kind:o.kind}); // this iPhone's push addresses (kind voip rings, kind alert says "New message") for a closed app: account ops, no chat to open
+  api.wakeMint=o=>call('wake.mint',{dev:o.dev,n:o.n,k:o.k});api.wakeRevoke=o=>call('wake.revoke',{tk:o.tk}); // the wake tickets it hands its contacts (k: c rings, m nudges), and taking one back
   api.deleteAccount=o=>call('account.delete',{vault:o&&o.vault}); // the whole account, for good: only on a connection proven with the account key; the vault id goes too, since the server can't work it out
   // ---- media over HTTP (SPEC.md 7.7): this connection vouches for a short-lived ticket, then raw encrypted pieces
   // travel over plain HTTP requests. A ticket dies with its connection, so every reconnect starts afresh. ----
@@ -121,13 +136,14 @@ function createHushAdapter(url,opts){
       if(a===0&&(r.status===401||r.status===403)){if(r.status===403){await ensureOpen(cid,true);if(from)await ensureOpen(from,true)}continue}
       throw mkErr(e.e||'http'+r.status,e.m||'The Hush server refused that ('+r.status+')')}}
   const okJson=r=>r.json();
-  api.putPiece=(cid,mid,i,bytes,exp)=>mediaFetch('PUT',cid,mid+'/'+i,bytes,exp?{'x-hush-exp':String(exp)}:null).then(okJson).then(j=>!!j.created);
+  api.putPiece=(cid,mid,i,bytes,exp,oh)=>mediaFetch('PUT',cid,mid+'/'+i,bytes,Object.assign({},exp?{'x-hush-exp':String(exp)}:{},oh?{'x-hush-oh':oh}:{})).then(okJson).then(j=>!!j.created); // oh: the hash of the uploader's media token (release 81)
   api.getPiece=(cid,mid,i)=>mediaFetch('GET',cid,mid+'/'+i).then(r=>r.arrayBuffer()).then(b=>new Uint8Array(b));
-  api.deleteMedia=(cid,mid)=>mediaFetch('DELETE',cid,mid).then(okJson).then(j=>j.n||0);
-  api.copyMedia=(from,fromMid,to,mid,exp)=>mediaFetch('POST',to,mid+'/copy',null,Object.assign({'x-hush-from':from+'/'+fromMid},exp?{'x-hush-exp':String(exp)}:{}),from).then(okJson).then(j=>!!j.copied);
+  api.deleteMedia=(cid,mid,ot)=>mediaFetch('DELETE',cid,mid,null,ot?{'x-hush-ot':ot}:null).then(okJson).then(j=>j.n||0); // ot: the media token, for a member's own file
+  api.copyMedia=(from,fromMid,to,mid,exp,oh)=>mediaFetch('POST',to,mid+'/copy',null,Object.assign({'x-hush-from':from+'/'+fromMid},exp?{'x-hush-exp':String(exp)}:{},oh?{'x-hush-oh':oh}:{}),from).then(okJson).then(j=>!!j.copied);
   api.mediaLimits=()=>{if(!limitsP)limitsP=(async()=>{if(!FETCH)throw mkErr('offline','no fetch');
       const j=await (await FETCH(httpBase+'/media/limits',{credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer'})).json();if(!j||!j.ok)throw mkErr('invalid','no limits');api.limits=j.limits;return j.limits})()
     .catch(e=>{limitsP=null;throw e});return limitsP};
+  api.wake=tk=>FETCH?FETCH(httpBase+'/wake',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tk}),credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer'}).then(()=>{},()=>{}):Promise.resolve(); // rings a contact's closed iPhone with a ticket they gave us: anonymous, and the answer says nothing, so neither does this
   // ---- the sign-up puzzle (SPEC.md 9.4): creating a profile costs a little hashing, done here out of sight. The page
   // asks for it the moment the sign-up screen opens (warmSignup), so it is long finished when the person taps Create;
   // should a create still be refused with `pow` (a fresh connection, say), it is solved then and sent again. ----
@@ -153,13 +169,15 @@ function createHushAdapter(url,opts){
   function setOnline(v){online=v;api.online=v;
     if(v){if(offlineT){clearTimeout(offlineT);offlineT=null}onStatus(true)}
     else if(!offlineT)offlineT=setTimeout(()=>{offlineT=null;if(!online)onStatus(false)},opts.offlineNoticeMs==null?1500:opts.offlineNoticeMs)}
-  function startPing(){stopPing();pingT=setInterval(()=>{if(online)rawCall('ping',{}).catch(()=>{})},pingMs)}
+  function startPing(){stopPing();pingT=setInterval(()=>{if(online)api.probe(callTimeoutMs)},pingMs)} // a ping that fails means the socket is dead: a new connection, not a shrug
+  api.probe=ms=>{if(!live()){if(reconnectT)connect();return}const s=ws,t=setTimeout(()=>{if(s===ws)reconnectNow()},ms);rawCall('ping',{}).then(()=>clearTimeout(t),()=>{clearTimeout(t);if(s===ws)reconnectNow()})}; // a socket that looks open but carries nothing (dead while the app slept): one ping, and a new connection unless it is answered in time; a socket already replaced is left to that reconnect, so two probes or a late failure never reconnect twice
   function stopPing(){if(pingT){clearInterval(pingT);pingT=null}}
   function rawCall(op,fields){return new Promise((resolve,reject)=>{if(!ws||ws.readyState!==1){reject(mkErr('offline','Not connected to the Hush server'));return}
     const i=++nextI;const timer=setTimeout(()=>{calls.delete(i);reject(mkErr('timeout','The Hush server did not answer in time'))},callTimeoutMs);
     calls.set(i,{resolve,reject,timer});ws.send(JSON.stringify(Object.assign({i,op},fields)))})}
   const live=()=>online&&!!ws&&ws.readyState===1;
-  function call(op,fields){if(proofP)return proofP.then(()=>call(op,fields));   // let a sign-in in progress finish first
+  function call(op,fields,g=era){if(g!==era)return Promise.reject(mkErr('offline','Not connected to the Hush server'));   // asked for by an account that has since signed out: never sent on the next one's connection
+    if(proofP)return proofP.then(()=>call(op,fields,g));   // let a sign-in in progress finish first
     if(online&&!live())setOnline(false);   // the socket is closing under us; its close event (and the reconnect) will follow
     if(online)return rawCall(op,fields);if(fatal)return Promise.reject(mkErr('version',fatal));
     if(!offlineWaitMs)return Promise.reject(mkErr('offline','Not connected to the Hush server'));
@@ -181,15 +199,15 @@ function createHushAdapter(url,opts){
       settleProof(e)}}).finally(()=>{proofP=null});return proofP}
   const awaitProof=()=>new Promise((res,rej)=>proofWaiters.push({res,rej}));
   function settleProof(err){for(const w of proofWaiters.splice(0))err?w.rej(err):w.res()}
-  function dropSubs(){for(const sub of subs.values())sub.dead=true;subs.clear()}
+  function dropSubs(){for(const sub of subs.values())sub.dead=true;subs.clear();era++;waiting.length=0;opening.clear()}   // and what the old account still had waiting for a connection is not sent on the next one's, nor does the next account wait on an open the old one began
   // prove(identity): identity is {h, pub:{x,y}, dev, signDev(msg), signAcct(msg)} or null to sign out.
   // Resolves once the server accepts; rejects if it does not. Switching accounts uses a fresh connection
   // and drops the previous account's live subscriptions silently (the app re-subscribes on start).
   api.prove=idn=>{
     if(!idn){if(!identity&&!proven)return Promise.resolve();identity=null;proven=null;api.proven=null;dropSubs();reconnectNow();return Promise.resolve()}
-    const same=!!identity&&identity.h===idn.h;identity=idn;
+    const was=identity,same=!!was&&was.h===idn.h;identity=idn;
     if(same){if(proven===idn.h)return Promise.resolve();if(proofP)return awaitProof()}
-    else if(proven||proofP){dropSubs();reconnectNow();return awaitProof()}
+    else if(was||proven||proofP){dropSubs();reconnectNow();return awaitProof()}   // any change of account, signed in at this moment or not (a lost connection clears the sign-in)
     if(live()&&!proven){const p=awaitProof();if(Date.now()-nonceAt>NONCE_FRESH_MS)reconnectNow();else runProof();return p}
     return awaitProof();   // connecting or offline: the next hello signs in
   };
@@ -279,9 +297,9 @@ function hushServerUrl(){let s=String(HUSH_CONFIG.server||'').trim();
 async function connectServer(){
   const url=hushServerUrl();
   const unreachable=()=>srvDown(url);
-  const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());renderBanner();if(on)checkForUpdate()},
+  const db=createHushAdapter(url,{onStatus:on=>{SRV_ERR=on?'':(db.error||unreachable());if(S.chan&&!S.loaded)renderConv();renderBanner();if(on){pushMark('online');checkForUpdate()}},   // a chat still opening shows or drops its Connecting notice
     caps:cid=>S.me?capsFor(cid):Promise.resolve(null),onPower:(cid,held)=>askPower(cid,held),onEvict:cid=>onChatEvicted(cid),
-    onKv:kv=>{if(S.me&&!S.rekeying&&typeof kv==='number'&&kv>(S.me.kv||1))signedOutHere()}, // proven against newer keys than this device's: another device replaced them (release 21)
+    onKv:kv=>{if(S.me&&!S.rekeying&&typeof kv==='number'&&kv>(S.me.kv||1))keysMovedOn()}, // proven against a newer key version than this device's: the profile is read first (keysMovedOn), and signedOutHere keeps a device whose key the profile still names
     onDenied:()=>keysMovedOn(), // a refused sign-in: see whether the profile's keys moved on without this device
     onClosed:(code,why,was)=>{if(code===4401)keysMovedOn();if(code===4410&&was)accountGone(was)}, // closed by the server for that very reason: look now, not after the next sign-in attempt
     onGone:h=>accountGone(h), // a sign-in refused because the account was deleted
@@ -300,7 +318,7 @@ async function connectServer(){
    about a second of hashing here, one hash to check there. This block has no page dependencies beyond `enc` and
    `hushServerUrl`, so the server's tests lift it out and check it against the real puzzle (test/drops.test.js). */
 const NOTE_PLAIN=1024;
-function padNote(obj){const s=JSON.stringify(obj),n=enc.encode(s).length;if(n>NOTE_PLAIN)throw new Error('toolarge');return s+' '.repeat(NOTE_PLAIN-n)}
+function padNote(obj,n=NOTE_PLAIN){const s=JSON.stringify(obj),m=enc.encode(s).length;if(m>n)throw new Error('toolarge');return s+' '.repeat(n-m)} // n: a member card pads to 512 (sealCard)
 const powZeros=a=>{let n=0;for(const b of a){if(b===0){n+=8;continue}n+=Math.clz32(b)-24;break}return n};
 async function solvePow(to,hour,bits){ // a nonce whose SHA-256 of "hush-pow-v1|to|hour|nonce" starts with `bits` zero bits
   // The search starts from a random point, so two people writing to the same mailbox in the same hour never land on

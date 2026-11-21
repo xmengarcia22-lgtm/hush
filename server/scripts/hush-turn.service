@@ -1,0 +1,39 @@
+# systemd unit for the Hush call relay (SPEC.md 11.2, 16.3): coturn with its own config, apart from hush.service.
+# Install: copy to /etc/systemd/system/hush-turn.service, then
+#   systemctl daemon-reload && systemctl enable --now hush-turn
+# The package's own coturn.service must stay disabled (the install script masks it).
+
+[Unit]
+Description=Hush call relay
+After=network-online.target
+Wants=network-online.target
+# The relay never runs without its firewall table (hush-turn.nft): only its own relay ports on this address.
+Requires=hush-turn-nft.service
+After=hush-turn-nft.service
+
+[Service]
+User=turnserver
+Group=turnserver
+# coturn 4.18 built by scripts/build-coturn.sh; the apt package's 4.6.1 stays at /usr/bin/turnserver for a one-line rollback.
+ExecStart=/usr/local/bin/turnserver -c /etc/hush/turnserver.conf
+RuntimeDirectory=hush-turn
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+# A core file would hold the secret and the live addresses.
+LimitCORE=0
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# Nothing per call is written anywhere: stdout is dropped, stderr (startup errors) goes to the journal.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -32,6 +32,21 @@ test('rejects malformed paths and ids', () => {
   assert.throws(() => parseCollectionPath(`channels/${CID}/media/mABCDEFGHIJKL`), /unknown collection/);
 });
 
+test('release 91: marks take epochs of up to 10 digits; key-chain rows are named by their epoch, member cards by a 43-character tag', () => {
+  assert.equal(parseDocPath(`channels/${CID}/reads/100~${TAG}`).kind, 'reads');
+  assert.equal(parseDocPath(`channels/${CID}/typing/2147483647~${TAG}`).kind, 'typing');
+  for (const e of ['0', '2147483647']) {
+    const p = parseDocPath(`channels/${CID}/chain/${e}`);
+    assert.deepEqual([p.kind, p.backend, p.cid, p.id], ['chain', 'docs', CID, e]);
+  }
+  const r = parseDocPath(`channels/${CID}/roll/${'r'.repeat(43)}`);
+  assert.deepEqual([r.kind, r.backend, r.keyed], ['roll', 'docs', false], 'the store makes the tag; the path is not keyed again');
+  assert.equal(parseCollectionPath(`channels/${CID}/roll`).kind, 'roll');
+  for (const p of [`reads/12345678901~${TAG}`, 'chain/01', 'chain/-1', 'chain/1.5', 'chain/x', 'chain/12345678901', `roll/${'r'.repeat(42)}`, `roll/${'r'.repeat(44)}`]) {
+    assert.throws(() => parseDocPath(`channels/${CID}/${p}`), /bad id/, p);
+  }
+});
+
 test('generated ids match the client pattern and are random', () => {
   const ids = new Set();
   for (let i = 0; i < 200; i++) {

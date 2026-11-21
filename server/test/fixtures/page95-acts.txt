@@ -1,0 +1,36 @@
+async function setAct(c,postId,kind,payload){
+  const e=epochOf(c),ck=await convKey(c,e);if(!ck)throw new Error('nokey');
+  const tag=await memTag(c,e,S.me.handle);if(!tag)throw new Error('nokey');
+  const ref=S.db.doc(`channels/${c.id}/acts/${postId}~${tag}~${kind}`);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const p=JSON.stringify(payload); // the signature travels inside, with exactly what it signs
+  const ct=b64(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(`${c.id}|${postId}|${tag}|${kind}`)},ck.key,enc.encode(JSON.stringify({p,sg:await sideSig('hush-act-v2',[c.id,postId,kind,tag,p])}))));
+  await ref.set({post:postId,kind,e,iv:b64(iv),ct,ts:Date.now()});
+  S.db.doc(`channels/${c.id}/acts/${postId}~${S.me.handle}~${kind}`).delete().catch(()=>{}); // tidy away the old named one
+}
+function openAct(c,v){
+  const key='a:'+S.me.handle+':'+(v._id||'')+':'+v.ct;
+  if(!S.cache.has(key))S.cache.set(key,(async()=>{try{
+    const e=v.e??0;let by=v.by,who=v.by;
+    if(!by){const parts=String(v._id||'').split('~');if(parts.length!==3)throw 0;who=parts[1];
+      by=(await tagMap({...c,members:tagPeople(c)},e))[who];
+      if(!by||(v.sg&&!(await sideOk(by,v.sg,'hush-act-v1',[c.id,v.post,v.kind,who,v.ct]))))throw 0} // a plain signature: left by an app from before release 18
+    const ck=await convKey(c,e);if(!ck)throw 0;
+    let o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(v.iv),additionalData:enc.encode(`${c.id}|${v.post}|${who}|${v.kind}`)},ck.key,unb64(v.ct))));
+    if(!v.by&&!v.sg){if(typeof o.p!=='string'||!(await sideOk(by,o.sg,'hush-act-v2',[c.id,v.post,v.kind,who,o.p])))throw 0;o=JSON.parse(o.p)} // signed inside
+    if(v.kind==='r'&&typeof o.emoji==='string'&&o.emoji.length<=16)return {post:v.post,by,kind:'r',emoji:o.emoji};
+    if(v.kind==='v'&&Array.isArray(o.opts))return {post:v.post,by,kind:'v',opts:[...new Set(o.opts.filter(n=>Number.isInteger(n)&&n>=0&&n<10))]};
+  }catch{}S.cache.delete(key);return null})());
+  return S.cache.get(key);
+}
+async function onActs(docs){
+  const seq=++actSeq,c=curConv();if(!c)return;
+  const list=await Promise.all(docs.map(d=>openAct(c,d)));if(seq!==actSeq)return;
+  const agg=new Map(),seen=new Set(),members=new Set(tagPeople(c));
+  list.forEach(x=>{if(!x||!members.has(x.by))return;const k=x.post+'|'+x.by+'|'+x.kind;if(seen.has(k))return;seen.add(k);
+    const a=agg.get(x.post)||{r:{},myR:null,v:{},myV:null,voters:0};
+    if(x.kind==='r'){a.r[x.emoji]=(a.r[x.emoji]||0)+1;if(x.by===S.me.handle)a.myR=x.emoji}
+    else if(x.opts.length){a.voters++;x.opts.forEach(i=>a.v[i]=(a.v[i]||0)+1);if(x.by===S.me.handle)a.myV=x.opts}
+    agg.set(x.post,a)});
+  S.agg=agg;refreshNodes();
+}

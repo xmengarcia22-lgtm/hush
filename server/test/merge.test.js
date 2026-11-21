@@ -34,6 +34,7 @@ test('validateDoc enforces the nesting limit', () => {
   validateDoc(six);
   const seven = { a: { b: { c: { d: { e: { f: { g: 1 } } } } } } };
   assert.throws(() => validateDoc(seven), /too deeply/);
+  assert.throws(() => validateDoc({ keys: { 0: { lbl: { epk: { x: 'x', y: 'y' }, iv: 'i', ct: { a: { b: { c: { d: { e: 1 } } } } } } } } }), /too deeply/, 'the belt chat.join, chat.rotate and chat.admins wear from release 78');
 });
 
 test('mergePatch follows RFC 7396', () => {

@@ -1,0 +1,56 @@
+# Call relay (coturn 4.6) for Hush (SPEC.md 11.1, 16.2, 16.3). Install as /etc/hush/turnserver.conf, owner root,
+# group turnserver, mode 640. Replace <server address>, <domain> and the secret. scripts/hush-turn.service runs it, after
+# scripts/hush-turn-nft.service has loaded hush-turn.nft (the ports on this server the relay may send to).
+# Calls are end-to-end encrypted; the relay only forwards ciphertext and keeps no log of who connected.
+
+listening-port=3478
+listening-ip=<server address>
+relay-ip=<server address>
+# The relay's UDP ports; the firewall opens exactly this range.
+min-port=49152
+max-port=49651
+
+# Credentials are minted by the Hush server (HUSH_TURN_SECRET), so the relay stores no users.
+use-auth-secret
+static-auth-secret=<long random value, also HUSH_TURN_SECRET in /etc/hush/hush.env>
+realm=<domain>
+stale-nonce=600
+fingerprint
+
+# Plain UDP and TCP on 3478 (TCP is the way through networks that block UDP). 443 belongs to Caddy, so no TLS here.
+# no-dtls is coturn 4.6 only: 4.18 (scripts/build-coturn.sh) has no such option (DTLS is off unless `dtls` is set) and skips the
+# line with a "Bad configuration format" warning; no-cli and no-rfc5780 are deprecated no-ops in 4.18 (both off by default).
+no-tls
+no-dtls
+no-cli
+no-tcp-relay
+no-multicast-peers
+no-rfc5780
+no-software-attribute
+
+# Per account and in all. With use-auth-secret coturn counts user-quota by the username's part after "<expiry>:", which
+# the Hush server makes one name per account per day (protocol.js, call.relay), so this caps one account's allocations.
+# coturn 4.6.1 counts more than one slot per relay allocation: user-quota=4 refused even the first one in testing, 12
+# passes with room to spare. total-quota is above the 500 relay ports (min-port..max-port), so the ports are the real cap.
+# max-bps is bytes per second per session, ten times what a voice call needs.
+user-quota=12
+total-quota=600
+max-bps=64000
+
+# The relay forwards only to itself: both ends of every call hold an allocation on this server, so the one peer address
+# a call ever needs is the server's own, and every other address is denied. coturn checks allowed-peer-ip before
+# denied-peer-ip (ns_turn_server.c, good_peer_addr: a whitelist match returns before the blacklist is read; the example
+# config says "specified as both allowed and denied ... considered to be allowed"). Which ports on this address the
+# relay may reach is left to hush-turn.nft. Ranges (a-b) are the documented form.
+allowed-peer-ip=<server address>
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=::1-::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# No logs: nothing to a file, nothing to the console, and `syslog` stays off.
+log-file=/dev/null
+no-stdout-log
+simple-log
+pidfile=/run/hush-turn/turnserver.pid

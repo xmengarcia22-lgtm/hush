@@ -36,7 +36,7 @@ test('creating a chat records only key hashes; the record itself may carry no na
   assert.match(row.cap_m, /^[0-9a-f]{64}$/, 'hashes, not keys');
 });
 
-test('a key opens a chat at its level; a wrong key does not; the record is trimmed without one', async () => {
+test('a key opens a chat at its level; a wrong key does not; the record is trimmed without one, and a channel\'s lists below admin level', async () => {
   const { caps } = await createChat(A, CID2, channelDoc());
   assert.equal((await B.call('chat.open', { cid: CID2, cap: cap() })).e, 'denied');
   const preview = (await B.ok('get', { p: `channels/${CID2}` })).d;
@@ -46,16 +46,17 @@ test('a key opens a chat at its level; a wrong key does not; the record is trimm
   const m = await B.ok('chat.open', { cid: CID2, cap: caps.m });
   assert.deepEqual(m, { i: m.i, ok: true, level: 'member', epoch: 0 });
   const full = (await B.ok('get', { p: `channels/${CID2}` })).d;
-  assert.ok(full.meta && full.invites, 'members see the whole record');
+  assert.ok(full.invites && full.keys && full.meta === undefined, 'members see the whole record but a channel\'s member and blocked lists, its owner\'s and admins\' (channel-members.test.js)');
   assert.equal((await B.ok('query', { p: `channels/${CID2}/posts`, l: 10 })).docs.length, 0);
   assert.equal((await C.ok('chat.open', { cid: CID2, cap: caps.a })).level, 'admin');
+  assert.ok((await C.ok('get', { p: `channels/${CID2}` })).d.meta, 'an admin reads them');
   assert.equal((await A.ok('chat.open', { cid: CID2, cap: caps.o })).level, 'owner');
 });
 
 test('a read mark or a reaction with its signature in the clear is refused (release 18)', async () => {
-  // B is a member of CID2. The signature must travel sealed inside ct, so nothing stored ties a mark to an account key.
+  // B is a member of CID2, A the owner of the group CID (a channel's reactions come only through chat.act, channel-acts.test.js). The signature must travel sealed inside ct, so nothing stored ties a mark to an account key.
+  assert.equal((await A.call('set', { p: `channels/${CID}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now(), sg: 'c2ln' } })).e, 'invalid');
   for (const [p, d] of [
-    [`channels/${CID2}/acts/${PID}~${TAG}~react`, { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now(), sg: 'c2ln' }],
     [`channels/${CID2}/reads/0~${TAG}`, { ts: Date.now(), sg: 'c2ln' }],
     [`channels/${CID2}/reads/0~${TAG}`, { ts: Date.now(), iv: 'aXY=', ct: 'c2ln', sg: 'c2ln' }],
   ]) assert.equal((await B.call('set', { p, d })).e, 'invalid', JSON.stringify(d));
@@ -65,7 +66,8 @@ test('levels decide who may do what in a channel', async () => {
   // B is a member of CID2, C an admin, A the owner (opened above)
   assert.equal((await B.call('set', { p: `channels/${CID2}/posts/${PID}`, d: post() })).e, 'denied', 'members do not post in channels');
   await C.ok('set', { p: `channels/${CID2}/posts/${PID}`, d: post() });
-  await B.ok('set', { p: `channels/${CID2}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now() } });
+  assert.equal((await B.call('set', { p: `channels/${CID2}/acts/${PID}~${TAG}~react`, d: { post: PID, kind: 'react', e: 0, iv: 'aXY=', ct: 'Y3Q=', ts: Date.now() } })).e, 'denied', 'nor do they write a reaction whole');
+  await B.ok('chat.act', { cid: CID2, post: PID, kind: 'r', e: 0, iv: 'aXZhaXZhaXZhaXZh', ct: Buffer.alloc(80, 1).toString('base64') });
   await B.ok('set', { p: `channels/${CID2}/reads/0~${TAG}`, d: { ts: Date.now(), iv: 'aXY=', ct: 'c2ln' } });
   await B.ok('update', { p: `channels/${CID2}`, d: { ts: 5, last: { ts: 5, sl: 1 } } });
   assert.equal((await B.call('update', { p: `channels/${CID2}`, d: { pins: [PID] } })).e, 'denied', 'pins are an admin matter outside DMs');
@@ -141,6 +143,27 @@ test('joining by link: the proof must match, wraps are added, labels cannot coll
   assert.equal((await C.call('chat.join', { cid: 'gJoin00000001', iid: 'iNvItE000001', proof, wraps: { 3: { [label()]: wrap() } } })).e, 'invalid');
   await C.ok('chat.open', { cid: 'gJoin00000001', cap: caps.m });   // the key came out of the invite blob
   assert.ok((await C.ok('get', { p: 'channels/gJoin00000001' })).d.keys[0][mine]);
+});
+
+test('nothing written under a chat record by chat.join, chat.rotate or chat.admins escapes the checks an update faces: a wrap or meta with a stray field, or a prototype epoch, is refused and the record stays writable', async () => {
+  const cid = 'gPoison000001', { caps } = await createChat(A, cid, groupDoc());
+  const proof = 'proof-' + 'z'.repeat(40);
+  await A.ok('update', { p: 'channels/' + cid, d: { invites: { iNvItE000002: { iv: 'aXY=', ct: 'Y3Q=', ph: sha(proof), ts: Date.now() } } } });
+  const join = (wraps) => C.call('chat.join', { cid, iid: 'iNvItE000002', proof, wraps });
+  assert.equal((await join({ 0: { [label()]: { ...wrap(), 'a b': 1 } } })).e, 'invalid', 'a field with a space in a wrap');
+  assert.equal((await join({ 0: { [label()]: { ...wrap(), epk: { ...wrap().epk, z: '1' } } } })).e, 'invalid', 'a third coordinate');
+  assert.equal((await join({ 0: { [label()]: { ...wrap(), ct: { a: { b: { c: { d: { e: { f: 1 } } } } } } } } })).e, 'invalid', 'ct is a string');
+  assert.equal((await join(JSON.parse(`{"__proto__":{"${label()}":${JSON.stringify(wrap())}}}`))).e, 'invalid', 'a prototype epoch is no epoch');
+  const mine = label();
+  await C.ok('chat.join', { cid, iid: 'iNvItE000002', proof, wraps: { 0: { [mine]: wrap() } } });
+  await C.ok('chat.open', { cid, cap: caps.m });
+  assert.ok((await C.ok('get', { p: 'channels/' + cid })).d.keys[0][mine], 'an exact wrap joins');
+  await A.ok('update', { p: 'channels/' + cid, d: { ts: Date.now() } });   // the record still takes an update
+  assert.equal((await A.call('chat.rotate', { cid, epoch: 1, keys: { [label()]: wrap() }, cap: cap(), meta: { ...sealed(1), junk: 1 } })).e, 'invalid', 'meta is exactly { e, iv, ct }');
+  assert.equal((await A.call('chat.rotate', { cid, epoch: 1, keys: { [label()]: { ...wrap(), x: 1 } }, cap: cap() })).e, 'invalid', 'a rotation\'s wraps too');
+  assert.equal((await A.call('chat.admins', { cid, akeys: { [label()]: { ...wrap(), extra: 'y' } }, cap: cap() })).e, 'invalid', 'and the admin wraps');
+  await A.ok('chat.admins', { cid, akeys: { [label()]: wrap() }, cap: cap() });
+  await A.ok('update', { p: 'channels/' + cid, d: { ts: Date.now() } });
 });
 
 test('public channels: anyone signed in can list and preview them; posting still needs the admin key', async () => {

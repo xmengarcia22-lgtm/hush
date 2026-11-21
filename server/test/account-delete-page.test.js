@@ -19,9 +19,9 @@ test('Settings > Advanced ends with the red Delete account row', () => {
   const el = (tag, cls, text) => ({ tag, cls, text, kids: [], append(...k) { this.kids.push(...k); } });
   const html = (tag, cls, inner) => Object.assign(el(tag, cls), { inner });
   const openDeleteAccount = () => {};
-  const run = new Function('el', 'html', 'I', 'hasRecovery', 'recOld', 'backupOn', 'lsPw', 'lockCfg', 'ls', 'openDeleteAccount', 'openHow', 'openBackup', 'openRestore', 'openAppLock',
+  const run = new Function('el', 'html', 'I', 'hasRecovery', 'recOld', 'backupOn', 'lsPw', 'lockCfg', 'ls', 'openDeleteAccount', 'openHow', 'openBackup', 'openRestore', 'openAppLock', 'appOnly', 'natOk',
     between('function settingsAdvanced(body,me){', 'function openHow(') + '\nreturn settingsAdvanced;')(
-    el, html, new Proxy({}, { get: () => '<svg/>' }), () => true, () => false, () => true, () => null, () => null, { get: () => false }, openDeleteAccount, () => {}, () => {}, () => {}, () => {});
+    el, html, new Proxy({}, { get: () => '<svg/>' }), () => true, () => false, () => true, () => null, () => null, { get: () => false }, openDeleteAccount, () => {}, () => {}, () => {}, () => {}, () => false, () => false);
   const body = el('div');
   run(body, { handle: 'alice' });
   const last = body.kids.at(-1);
@@ -110,18 +110,18 @@ test('a must-step that fails stops the run with nothing on this device wiped', a
 
 // ---- other devices ----
 test('accountGone wipes the account only once its profile says it is gone, and only once', async () => {
-  const make = new Function('S', 'ls', 'closeConv', 'dropUnsealed', 'renderList', 'forgetAccountData', 'start', 'toast', 'updateTitle', 'showOnboard',
-    between('const goneSeen=new Set();', '/* ---------- log out') + '\nreturn {accountGone,goneSeen};');
+  const make = new Function('S', 'ls', 'closeConv', 'dropUnsealed', 'renderList', 'forgetAccountData', 'start', 'toast', 'updateTitle', 'showOnboard', 'callOff',
+    'const renderCalls=()=>{};' + between('const goneSeen=new Set();', '/* ---------- log out') + '\nreturn {accountGone,goneSeen};');
   const run = async (gone, sure) => {
     const log = [], S = { me: { handle: 'alice' }, ids: [{ handle: 'alice' }], db: { doc: () => ({ get: async () => ({ exists: true, data: () => (gone ? { handle: 'alice', gone: 1 } : { handle: 'alice' }) }) }), prove: (x) => log.push('prove ' + x) } };
     const ls = { get: () => null, set: () => {} };
-    const f = make(S, ls, () => {}, () => log.push('drop'), () => {}, async (h) => log.push('forget ' + h), () => {}, () => {}, () => {}, (a, m) => log.push('onboard ' + m));
+    const f = make(S, ls, () => {}, () => log.push('drop'), () => {}, async (h) => log.push('forget ' + h), () => {}, () => {}, () => {}, (a, m) => log.push('onboard ' + m), (sign) => log.push('call off ' + sign));
     await f.accountGone('alice', sure); await f.accountGone('alice', sure);
     return { log, S };
   };
   assert.deepEqual((await run(false)).log, [], 'a close code alone wipes nothing');
   const r = await run(true);
-  assert.deepEqual(r.log, ['prove null', 'drop', 'forget alice', 'onboard This account was deleted.']);
+  assert.deepEqual(r.log, ['call off false', 'prove null', 'drop', 'forget alice', 'onboard This account was deleted.'], 'a live call ends first, here only: the keys are gone');
   assert.equal(r.S.me, null);
   assert.deepEqual(r.S.ids, []);
   assert.deepEqual((await run(false, true)).log.at(-1), 'onboard Your account was deleted.');
@@ -172,7 +172,7 @@ test('a deleted account is "Deleted account" everywhere, even under a contact na
   const dn = displayName(S);
   assert.equal(dn('bob'), 'Deleted account');
   assert.equal(dn('carol'), 'Carol');
-  assert.equal(dn('dave'), 'Dave (work)');
+  assert.equal(dn('dave'), 'D', 'a name once saved for a contact changes nothing (step E)');
   assert.equal(dn('erin'), 'erin');
 });
 

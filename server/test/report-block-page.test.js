@@ -63,9 +63,15 @@ test('a blocked author\'s posts are hidden from the open chat', () => {
   assert.deepEqual(run(['alice']), ['a', 'b', 'c'], 'my own posts are never hidden');
 });
 
+test('an expired message is purged even when its media delete is refused (a group member, since release 78)', () => {
+  const purge = between('async function purgePost(c,p){', '\n  }catch{}\n}');
+  assert.match(purge, /for\(const m of o\.media\|\|\[\]\)await dropMedia\(c\.id,m\.id\);/, 'the pieces go through dropMedia (release 81), which never throws: a refused piece delete is not a failure of the purge');
+  assert.match(purge, /await dropMedia\(c\.id,m\.id\);[^\n]*\n\s*await S\.db\.doc\(`channels\/\$\{c\.id\}\/posts\/\$\{p\._id\}`\)\.delete\(\);/, 'the post delete follows whatever the piece deletes did');
+});
+
 test('a blocked author\'s messages count toward neither unread nor @mentions', async () => {
   const body = line(/^const mentionsMe=.*;$/m) + '\n' + between('async function computeUnread(){', 'async function notifyNew(');
-  const make = new Function('S', 'lastRead', 'unsealAll', 'typeOf', 'openPost', 'renderList', 'updateTitle', 'isBlocked', body + '\nreturn computeUnread;');
+  const make = new Function('S', 'lastRead', 'unsealAll', 'typeOf', 'openPost', 'renderList', 'updateTitle', 'isBlocked', 'const noteCalls=()=>{};' + body + '\nreturn computeUnread;');
   const now = Date.now();
   const rows = [{ from: 'bob', text: 'hi @alice', ts: now - 3 }, { from: 'carol', text: 'hey @alice', ts: now - 2 }, { from: 'carol', text: 'x', ts: now - 1 }];
   const run = async (blocked) => {

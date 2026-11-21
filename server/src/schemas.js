@@ -12,16 +12,19 @@ const KB = 1024, MB = 1024 * KB;
 export const MAX_BYTES = Object.freeze({
   directory: 256 * KB, search: 4 * KB, presence: 1 * KB, phones: 1 * KB, logins: 1 * KB, recovery: 1 * KB, secure: 1 * KB,
   accounts: 2 * MB, linkreqs: 64 * KB, vault: 2 * MB, backup: 2 * MB,
-  channels: 2 * MB, posts: 64 * KB, comments: 64 * KB, acts: 64 * KB, reads: 4 * KB, typing: 4 * KB,
-  chunks: 256 * KB, inbox: 4 * KB,
+  channels: 2 * MB, posts: 64 * KB, comments: 64 * KB, acts: 64 * KB, reads: 4 * KB, typing: 4 * KB, call: 16 * KB,
+  chunks: 256 * KB, inbox: 4 * KB, chain: 2 * KB, roll: 2 * KB,
 });
 
 const DAY = 86_400_000;
 export const POST_TS_PAST_MS = 30 * DAY;
 export const POST_TS_FUTURE_MS = 400 * DAY;
+// An epoch is a 31-bit integer (release 91): a channel's key changes have no cap; a group's and a DM's stop at 31 (store.js).
+export const EPOCH_MAX = 2 ** 31 - 1;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
+export const DEV_ID = /^[a-zA-Z0-9]{6,20}$/;   // a device id in `devs` (identity.js keeps its own copy for the sign-in proof)
 export const XY = (v) => isPlain(v) && str(v.x, 1, 128) && str(v.y, 1, 128);
 
 const str = (v, min = 0, max = Infinity) => typeof v === 'string' && v.length >= min && v.length <= max;
@@ -58,7 +61,7 @@ function directory(ctx, d) {
   if (d.devs !== undefined) {
     if (!isPlain(d.devs)) bad(w, 'devs');
     for (const [id, e] of Object.entries(d.devs)) {
-      if (!/^[a-zA-Z0-9]{6,20}$/.test(id) || !isPlain(e)) bad(w, 'devs');
+      if (!DEV_ID.test(id) || !isPlain(e)) bad(w, 'devs');
       for (const f of ['x', 'y', 'sx', 'sy', 's']) if (!str(e[f], 1, 256)) bad(w, 'devs');
       if (e.by !== undefined && !str(e.by, 0, 20)) bad(w, 'devs');
       if (e.ts !== undefined && !num(e.ts)) bad(w, 'devs');
@@ -119,15 +122,16 @@ function box(what) {
 function linkreqs(ctx, d) {
   const w = 'linkreqs';
   only(d, new Set(['state', 'pub', 'ts', 'dev', 'devk', 'epub', 'iv', 'ct', 'cf', 'h', 'n']), w); need(d, ['state'], w);
-  if (!['offer', 'wait', 'ok', 'no'].includes(d.state)) bad(w, 'state');
+  if (!['offer', 'wait', 'ok', 'no', 'ask'].includes(d.state)) bad(w, 'state');
   if (d.h !== undefined && !ID.HANDLE.test(d.h)) bad(w, 'h');                    // a link offer's account and name (SPEC.md 14.14)
   if (d.n !== undefined && !(str(d.n, 43, 43) && ID.ADDR43.test(d.n))) bad(w, 'n');
   if (d.state === 'offer') need(d, ['ts', 'h', 'n'], w);
+  if (d.state === 'ask') { only(d, new Set(['state', 'ts', 'n', 'pub', 'devk', 'dev']), w); need(d, ['ts', 'n', 'pub', 'devk'], w); }   // written before signing in, so nothing unbounded (every field here is capped: under 1 KB)
   if (d.ts !== undefined && !num(d.ts)) bad(w, 'ts');
   if (d.dev !== undefined && !str(d.dev, 0, 80)) bad(w, 'dev');
   if (d.pub !== undefined && !XY(d.pub)) bad(w, 'pub');
   if (d.epub !== undefined && !XY(d.epub)) bad(w, 'epub');
-  if (d.devk !== undefined && !isPlain(d.devk)) bad(w, 'devk');
+  if (d.devk !== undefined && !(isPlain(d.devk) && DEV_ID.test(d.devk.id) && ['x', 'y', 'sx', 'sy'].every((f) => str(d.devk[f], 1, 128)) && Object.keys(d.devk).length === 5)) bad(w, 'devk');
   if (d.iv !== undefined && !str(d.iv, 1, 64)) bad(w, 'iv');
   if (d.ct !== undefined && !str(d.ct, 1)) bad(w, 'ct');
   if (d.cf !== undefined && !(str(d.cf, 43, 43) && ID.ADDR43.test(d.cf))) bad(w, 'cf');   // the new device's proof for a shown code (SPEC.md 14.10)
@@ -139,12 +143,13 @@ function linkreqs(ctx, d) {
 // ---- chats --------------------------------------------------------------------
 
 const CHANNEL_KEYS = new Set(['type', 'visibility', 'epoch', 'keys', 'akeys', 'openKeys', 'meta', 'ometa', 'invites', 'ts', 'last',
-  'pins', 'ttl', 'closed', 'reactions', 'comments', 'name', 'desc', 'photo', 'owner', 'admins']);
+  'pins', 'ttl', 'closed', 'reactions', 'comments', 'name', 'desc', 'photo', 'owner', 'admins', 'n']);
 const NAMES_NEVER = ['members', 'banned', 'from', 'by', 'to', 'req'];
 const NAMES_PUBLIC_ONLY = ['owner', 'admins', 'name', 'desc', 'photo'];
 
-// One wrapped key: an ECDH wrap to one device (or account) key, under a random label.
-const WRAP = (w) => isPlain(w) && XY(w.epk) && str(w.iv, 1, 64) && str(w.ct, 1, 512);
+// One wrapped key: an ECDH wrap to one device (or account) key, under a random label. Exactly what the page makes
+// (crypto.js wrapTo) and no other field, so nothing unchecked is ever stored under a chat record.
+const WRAP = (w) => isPlain(w) && Object.keys(w).length === 3 && XY(w.epk) && Object.keys(w.epk).length === 2 && str(w.iv, 1, 64) && str(w.ct, 1, 512);
 export function labelMap(v, what) {   // { [label]: wrap }
   if (!isPlain(v)) bad(what, 'wraps');
   for (const [label, wrap] of Object.entries(v)) if (!ID.LABEL.test(label) || !WRAP(wrap)) bad(what, 'wraps');
@@ -153,12 +158,12 @@ function wrapMap(v, what, nested) {
   if (!isPlain(v)) bad(what, nested ? 'keys' : 'akeys');
   if (!nested) { labelMap(v, what); return; }
   for (const [k, x] of Object.entries(v)) {
-    if (!int(Number(k), 0, 31)) bad(what, 'keys');
+    if (!int(Number(k), 0, EPOCH_MAX)) bad(what, 'keys');
     labelMap(x, what);
   }
 }
 export function sealedMeta(m, what, f = 'meta') {
-  if (!isPlain(m) || !int(m.e, 0, 31) || !str(m.iv, 1, 64) || !str(m.ct, 1, 262144)) bad(what, f);   // a photo of 320 px is far less
+  if (!isPlain(m) || Object.keys(m).length !== 3 || !int(m.e, 0, EPOCH_MAX) || !str(m.iv, 1, 64) || !str(m.ct, 1, 262144)) bad(what, f);   // exactly { e, iv, ct }; a photo of 320 px is far less
 }
 
 function channels(ctx, d) {
@@ -169,7 +174,7 @@ function channels(ctx, d) {
   const pub = d.visibility === 'public';
   if (d.visibility !== undefined && !['private', 'public'].includes(d.visibility)) bad(w, 'visibility');
   if (!pub) for (const k of NAMES_PUBLIC_ONLY) if (k in d) fail('invalid', `${w}: "${k}" belongs in sealed meta for private chats`);
-  if (d.epoch !== undefined && !int(d.epoch, 0, 31)) bad(w, 'epoch');
+  if (d.epoch !== undefined && !int(d.epoch, 0, EPOCH_MAX)) bad(w, 'epoch');
   if (d.ts !== undefined && !num(d.ts)) bad(w, 'ts');
   if (d.last !== undefined && d.last !== null) {
     if (!isPlain(d.last)) bad(w, 'last');
@@ -179,18 +184,34 @@ function channels(ctx, d) {
   if (d.akeys !== undefined) wrapMap(d.akeys, w, false);
   if (d.openKeys !== undefined) {
     if (!isPlain(d.openKeys)) bad(w, 'openKeys');
-    for (const [k, v] of Object.entries(d.openKeys)) if (!int(Number(k), 0, 31) || !str(v, 40, 48)) bad(w, 'openKeys');
+    for (const [k, v] of Object.entries(d.openKeys)) if (!int(Number(k), 0, EPOCH_MAX) || !str(v, 40, 48)) bad(w, 'openKeys');
   }
+  // Only a channel is public, and an address says what it holds: d a one-on-one chat, g a group, c a channel. A record from
+  // before these rules (release 107) keeps taking writes: one marked public already, one made at another kind's address.
+  if (pub && d.type !== 'channel' && !(ctx.prev && ctx.prev.visibility === 'public')) fail('invalid', `${w}: only a channel can be public`);
+  if (!ctx.prev && d.type !== { d: 'dm', g: 'group', c: 'channel' }[String(ctx.id)[0]]) fail('invalid', `${w}: this address is for another kind of chat`);
+  // A published key belongs to a public channel alone: the page reads it before a key of the device's own, so in any other
+  // record no write adds or changes one. One already there stays (a channel made private again keeps its public time's).
+  if (d.openKeys !== undefined && !(d.type === 'channel' && pub)) {
+    const had = ctx.prev && isPlain(ctx.prev.openKeys) ? ctx.prev.openKeys : {};
+    for (const [k, v] of Object.entries(d.openKeys)) if (had[k] !== v) fail('invalid', `${w}: only a public channel publishes a key`);
+  }
+  // A private channel's page still reads one for a key number the device holds no key of its own for, and a public channel's owner
+  // publishes what she likes: so none for the current key number or a later one is left when a channel is made private. It is the
+  // record after the write that counts, whatever the write, and a record with no key number is at 0.
+  if (!pub && d.type === 'channel' && Object.keys(d.openKeys || {}).some((k) => Number(k) >= (d.epoch || 0))) fail('invalid', `${w}: a private channel keeps no published key for its current epoch or a later one`);
   if (d.meta !== undefined) sealedMeta(d.meta, w);
   if (d.ometa !== undefined) sealedMeta(d.ometa, w, 'ometa');   // the owner's part of the description (SPEC.md 5.3)
   if (d.invites !== undefined) {
     if (!isPlain(d.invites)) bad(w, 'invites');
     for (const [iid, inv] of Object.entries(d.invites)) {
       if (!ID.ITEM_ID.test(iid) || !isPlain(inv) || !str(inv.iv, 1, 64) || !str(inv.ct, 1, 8192) || !HEX64.test(inv.ph || '') || !num(inv.ts)) bad(w, 'invites');   // 32 keys need about 2 KB
+      if (inv.as !== undefined && !str(inv.as, 1, 256)) bad(w, 'invites');   // the link's secret sealed under the admin secret (release 91)
     }
   }
   if (d.pins !== undefined && !(Array.isArray(d.pins) && d.pins.length <= 20 && d.pins.every((p) => ID.ITEM_ID.test(p)))) bad(w, 'pins');
   if (d.ttl !== undefined && !int(d.ttl, 0, 365 * 86400)) bad(w, 'ttl');
+  if (d.n !== undefined && (pub || d.type !== 'channel' || !int(d.n, 0, 100000))) bad(w, 'n');   // a private channel's subscriber count (SPEC.md 5.3), far more than a sealed list holds; store.js drops a public one's
   if (d.closed !== undefined && !isPlain(d.closed)) bad(w, 'closed');
   if (d.comments !== undefined && !bool(d.comments)) bad(w, 'comments');
   if (d.reactions !== undefined) {
@@ -227,7 +248,7 @@ function sealedPost(ctx, d, what, extra = new Set()) {
     if (d.del !== undefined && !bool(d.del)) bad(what, 'del');
   }
   if (!num(d.ts)) bad(what, 'ts');
-  if (!int(d.e, 0, 31)) bad(what, 'e');
+  if (!int(d.e, 0, EPOCH_MAX)) bad(what, 'e');
   if (!str(d.n, 0, 64)) bad(what, 'n');
   if (!str(d.d, 0)) bad(what, 'd');
   if (ctx.op !== 'update') {
@@ -251,14 +272,34 @@ function acts(ctx, d) {
   const [post, , kind] = ctx.id.split('~');
   if (d.post !== post) bad(w, 'post');
   if (d.kind !== kind) bad(w, 'kind');
-  if (d.e !== undefined && !int(d.e, 0, 31)) bad(w, 'e');
+  if (d.e !== undefined && !int(d.e, 0, EPOCH_MAX)) bad(w, 'e');
   if (!str(d.iv, 1, 64) || !str(d.ct, 1) || !num(d.ts)) bad(w, 'fields');
 }
 
-function sideRow(what) {
+// A reaction or vote in a channel (SPEC.md 5.4), written by chat.act alone: no author, tag, signature or time, and `an` marks it. Its
+// plaintext is padded to 64 bytes before sealing, so the server that files it learns nothing about the pick from its length.
+const ACT_BYTES = 64 + 16;           // plus the AES-GCM tag
+const IV12 = /^[A-Za-z0-9+/]{16}$/;  // 12 bytes
+export function slottedAct(d) {
+  const w = 'chat.act';
+  if (!str(d.post)) bad(w, 'post');   // its shape is the act id's (store.js)
+  if (d.kind !== 'r' && d.kind !== 'v') bad(w, 'kind');
+  if (!int(d.e, 0, EPOCH_MAX)) bad(w, 'e');
+  if (!str(d.iv) || !IV12.test(d.iv)) bad(w, 'iv');
+  if (!str(d.ct, 1, 2 * ACT_BYTES) || !B64.test(d.ct) || Buffer.from(d.ct, 'base64').length !== ACT_BYTES) bad(w, 'ct');
+}
+
+// A call record (SPEC.md 16.2) is a side row sized for a sealed, signed SDP offer or answer: a browser's audio-only
+// description with its relay candidates runs 1.5 to 5 KB and a full audio+video one (every codec, two bundled m= sections)
+// about 6 KB, which seals to about 1.56x in base64, 9.3 KB measured (R0, 2026-10-26); 16000 leaves room for a browser with
+// more codecs or more relay addresses and nothing much beyond. The page caps the raw description at 10000 characters, which
+// seals to about 15.3 KB. The whole {ts, iv, ct} document is ct plus about 52 bytes (100 with the longest iv the validator
+// takes), and MAX_BYTES.call (16 KB) is checked first (store._checkSize), so the two caps must move together.
+export const CALL_CT_MAX = 16000;
+function sideRow(what, max = 512) {
   return (ctx, d) => {
     only(d, new Set(['ts', 'iv', 'ct']), what); need(d, ['ts', 'iv', 'ct'], what);   // the signature is sealed inside ct (release 18)
-    if (!num(d.ts) || !str(d.iv, 1, 64) || !str(d.ct, 1, 512)) bad(what, 'fields');
+    if (!num(d.ts) || !str(d.iv, 1, 64) || !str(d.ct, 1, max)) bad(what, 'fields');
   };
 }
 
@@ -283,13 +324,39 @@ function inbox(ctx, d) {
   if (Buffer.from(d.ct, 'base64').length !== NOTE_BYTES) bad(w, 'size');
 }
 
+// A member card (SPEC.md 5.6, release 91): its plaintext is padded to CARD_PLAIN bytes before sealing, so every card is one
+// size and its length says nothing about its kind. `ts` is the server's.
+export const CARD_PLAIN = 512;
+export const CARD_BYTES = CARD_PLAIN + 16;   // plus the AES-GCM tag
+function roll(ctx, d) {
+  const w = 'card';
+  only(d, new Set(['e', 'iid', 'iv', 'ct', 'ts']), w); need(d, ['iv', 'ct', 'ts'], w);
+  if ((d.e === undefined) === (d.iid === undefined)) bad(w, 'e');   // a member's card names its epoch, a join request its link
+  if (d.e !== undefined && !int(d.e, 0, EPOCH_MAX)) bad(w, 'e');
+  if (d.iid !== undefined && !(typeof d.iid === 'string' && ID.ITEM_ID.test(d.iid))) bad(w, 'iid');   // a regex test would take ["…"] as its string
+  if (!str(d.iv, 1, 64) || !str(d.ct, 1, 2 * CARD_BYTES) || !num(d.ts)) bad(w, 'fields');
+  if (Buffer.from(d.ct, 'base64').length !== CARD_BYTES) bad(w, 'size');
+}
+
+// A key-chain row (SPEC.md 5.6, release 91): `c`, the sealed signed commit of this epoch's key, and from epoch 1 `b`, the key
+// before it sealed under this one; base64 the server can't open. Only a writer at owner level for the channel (`ctx.level`, its
+// connection's own) may leave `b` out above epoch 0 (release 93): the owner's repair, a fresh key chained to no key before it.
+function chain(ctx, d) {
+  const w = 'chain row', e = Number(ctx.id), keys = e === 0 ? ['c'] : ['b', 'c'];
+  only(d, new Set(keys), w); need(d, ctx.level === 'owner' ? ['c'] : keys, w);
+  if (!int(e, 0, EPOCH_MAX)) bad(w, 'epoch');
+  if (d.b !== undefined && !(str(d.b, 1, 256) && B64.test(d.b))) bad(w, 'b');
+  if (!(str(d.c, 1, 1024) && B64.test(d.c))) bad(w, 'c');
+}
+
 const VALIDATORS = {
-  directory, search, presence, phones, logins, recovery, secure, linkreqs, channels, posts, comments, acts, chunks, inbox,
+  directory, search, presence, phones, logins, recovery, secure, linkreqs, channels, posts, comments, acts, chunks, inbox, roll, chain,
   accounts: box('account box'), vault: box('vault'), backup: box('backup'),
-  reads: sideRow('read mark'), typing: sideRow('typing mark'),
+  reads: sideRow('read mark'), typing: sideRow('typing mark'), call: sideRow('call record', CALL_CT_MAX),
 };
 
-// Validates a complete document of `kind`. ctx: { id, cid?, mid?, now, op: 'set'|'add'|'update', prev }.
+// Validates a complete document of `kind`. ctx: { id, cid?, mid?, now, op: 'set'|'add'|'update', prev, level? }; `level`, the
+// writer's level for the chat, is set by chat.rotate and chat.chain for a key-chain row (store.js).
 export function validateForKind(kind, ctx, doc) {
   const v = VALIDATORS[kind];
   if (!v) fail('invalid', 'unknown collection');

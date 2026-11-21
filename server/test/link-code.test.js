@@ -11,7 +11,7 @@ const a = src.indexOf('/* ===== HUSH LINKCODE BEGIN ===== */'), b = src.indexOf(
 assert.ok(a > 0 && b > a, 'link-code markers present in app/crypto.js');
 const unb64u = (s) => new Uint8Array(Buffer.from(s, 'base64url'));
 const b64u = (u) => Buffer.from(u).toString('base64url');
-const { linkCode, parseLinkCode, linkFp, devShort, linkConfirm } = new Function('unb64u', 'enc', 'b64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode, linkFp, devShort, linkConfirm };')(unb64u, new TextEncoder(), b64u);
+const { linkCode, parseLinkCode, linkFp, devShort, linkConfirm, linkQr5, parseLinkQr5 } = new Function('unb64u', 'enc', 'b64u', src.slice(a, b) + '\nreturn { linkCode, parseLinkCode, linkFp, devShort, linkConfirm, linkQr5, parseLinkQr5 };')(unb64u, new TextEncoder(), b64u);
 
 const fresh = () => ({ secret: new Uint8Array(randomBytes(16)), fp: randomBytes(32).toString('base64url') });
 
@@ -109,4 +109,81 @@ test('the proof is bound to the request, its fingerprint and what it is for', as
   const unlabelled = createHmac('sha256', Buffer.from(secret)).update(tag + '|' + ts + '|' + fp).digest('base64url');
   assert.notEqual(unlabelled, cf, 'the label is part of it, so the same HMAC can’t stand for anything else');
   assert.equal(createHmac('sha256', Buffer.from(secret)).update('hush-link-confirm-v3|' + tag + '|' + ts + '|' + fp).digest('base64url'), cf, 'it is exactly the labelled HMAC');
+});
+
+// ---- release 58: the code the NEW device shows (version 5), a QR only ----
+
+test('the version 5 QR carries the secret and the first half of the fingerprint, and reads back to exactly them', async () => {
+  for (let n = 0; n < 100; n++) {
+    const { secret, fp } = fresh(), qr = linkQr5(secret, fp), got = parseLinkQr5(qr);
+    assert.match(qr, /^hush-link:5:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{22}$/);
+    assert.ok(got, qr);
+    assert.deepEqual([...got.secret], [...secret]);
+    assert.deepEqual([...got.fp], [...unb64u(fp).slice(0, 16)]);
+  }
+  const fp = await linkFp(PUB, DEVK), qr = linkQr5(new Uint8Array(16), fp);
+  assert.deepEqual([...parseLinkQr5(qr).fp], [...unb64u(fp).slice(0, 16)], 'the real fingerprint, cut the same way the scanning side cuts it');
+});
+
+test('a version 5 QR of the wrong shape is refused, and the other codes stay what they were', () => {
+  const { secret, fp } = fresh(), qr = linkQr5(secret, fp), [, , s, f] = qr.split(':');
+  assert.ok(parseLinkQr5(' ' + qr + '\n'), 'surrounding whitespace is fine');
+  assert.equal(parseLinkQr5('hush-link:5:' + s.slice(1) + ':' + f), null, 'a short secret');
+  assert.equal(parseLinkQr5('hush-link:5:' + s + 'A:' + f), null, 'a long secret');
+  assert.equal(parseLinkQr5('hush-link:5:' + s + ':' + f.slice(1)), null, 'a short fingerprint');
+  assert.equal(parseLinkQr5('hush-link:5:' + s + ':' + f + ':' + f), null, 'a third part');
+  assert.equal(parseLinkQr5('hush-link:5:' + s), null, 'no fingerprint');
+  assert.equal(parseLinkQr5('hush-link:4:' + s), null, 'the code a signed-in device shows is not one');
+  assert.equal(parseLinkQr5('hush-link:5:' + s.replace(/./, '+') + ':' + f), null, 'not base64url');
+  assert.equal(parseLinkQr5(''), null); assert.equal(parseLinkQr5(undefined), null);
+  assert.equal(parseLinkCode(qr, 4), null, 'nor is the QR a typed code');
+  const v4 = linkCode(secret, null, 4);
+  assert.deepEqual([...parseLinkCode(v4, 4).secret], [...secret], 'version 4 still reads');
+  assert.deepEqual([...parseLinkCode(linkCode(secret, fp)).secret], [...secret], 'and version 3');
+});
+
+test('the scanning side lets the new device in only after the ask is fresh, unanswered and carries the keys the code fingerprints', () => {
+  const ui = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
+  const a = ui.indexOf('async function approveAsk('), b = ui.indexOf('function linkedDev(', a);
+  assert.ok(a > 0 && b > a, 'approveAsk in app/ui.js');
+  const fn = ui.slice(a, b), at = (s) => { const i = fn.indexOf(s); assert.ok(i >= 0, s); return i; };
+  assert.ok(at("d.state!=='ask'") < at('approveLink('), 'the state is checked first');
+  assert.ok(at('S.db.now()-d.ts<5*60e3') < at('approveLink('), 'and the age, by the server clock both sides stamp');
+  assert.ok(at('linkFp(d.pub,d.devk)') < at('approveLink(') && at("throw new Error('swapped')") < at('approveLink('), 'and the fingerprint over both keys');
+  assert.ok(!/update\(|\.set\(/.test(fn.slice(0, fn.indexOf('approveLink('))), 'nothing is written before the checks pass');
+  const o = ui.indexOf('function openLinkScanner('), oe = ui.indexOf('async function approveAsk(', o);
+  assert.ok(!/Let it in|yes\.onclick/.test(ui.slice(o, oe)), 'no question is asked after the scan: the scan is the approval');
+});
+
+// ---- release 58: the new device takes the answer only from the account it asked for ----
+// Whoever photographs the new device's code can answer it first from an account of their own. awaitLink (app/ui.js) runs
+// with real keys here, against a stand-in row: an answer from another account is refused before any of it is kept.
+test('awaitLink refuses an answer from another account before anything of it is kept, and takes the account asked for', async () => {
+  const ui = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
+  const lift = (s, from, to) => { const a = s.indexOf(from), b = s.indexOf(to, a); assert.ok(a > 0 && b > a, from); return s.slice(a, b); };
+  const kept = [], ls = { get: (k, d) => d, set: (k) => kept.push(k) }, idFromBundle = (o) => ({ handle: o.handle, name: o.name });
+  const { awaitLink, linkKey } = new Function('unb64u', 'b64u', 'enc', 'dec', 'ls', 'S', 'idFromBundle', 'scheduleBackup',
+    lift(src, 'async function linkKey(', 'const ephemeral=') + lift(ui, 'function awaitLink(', '/* ---------- device removal') + 'return { awaitLink, linkKey };')(unb64u, b64u, new TextEncoder(), new TextDecoder(), ls, {}, idFromBundle, () => {});
+  const ecdh = { name: 'ECDH', namedCurve: 'P-256' }, secret = new Uint8Array(randomBytes(16));
+  const e = await crypto.subtle.generateKey(ecdh, true, ['deriveBits']), a = await crypto.subtle.generateKey(ecdh, true, ['deriveBits']);
+  const jwk = async (k) => { const j = await crypto.subtle.exportKey('jwk', k.publicKey); return { kty: j.kty, crv: j.crv, x: j.x, y: j.y }; };
+  const answer = async (handle) => {   // what approveLink writes: the account bundle sealed to the ask's one-time key and the secret
+    const key = await linkKey(a.privateKey, await jwk(e), secret), iv = new Uint8Array(randomBytes(12)), enc = new TextEncoder();
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode('hush-link-v2') }, key,
+      enc.encode(JSON.stringify({ v: 2, b: { handle, name: handle.toUpperCase() }, d: { by: 'dev0000009', s: 'sig' }, ks: { c000000000001: { 0: 'k' } }, trust: ['dev0000009'] }))));
+    let gone = 0; const row = { state: 'ok', h: handle, epub: await jwk(a), iv: b64u(iv), ct: b64u(ct) };
+    return { ref: { get: async () => ({ exists: true, data: () => row }), delete: async () => { gone++; } }, gone: () => gone };
+  };
+  const dv = { id: 'dev0000001' }, wrong = await answer('mallory');
+  await assert.rejects(awaitLink(wrong.ref, e, secret, dv, async (id) => id.handle === 'alice').done, (err) => err.message === 'other' && err.handle === 'mallory');
+  assert.equal(wrong.gone(), 1, 'the row is cleared');
+  assert.deepEqual(kept, [], 'nothing of the other account was kept');
+  assert.deepEqual(dv, { id: 'dev0000001' }, 'the device key was not signed over to it');
+  const right = await answer('alice'), id = await awaitLink(right.ref, e, secret, dv, async (x) => x.handle === 'alice').done;
+  assert.equal(id.handle, 'alice'); assert.equal(id.dev, dv); assert.equal(dv.by, 'dev0000009'); assert.deepEqual(id.trust, ['dev0000009']);
+  assert.deepEqual(kept, ['hush:ks:alice'], 'its chat keys are kept, under its name');
+  const asked = [], bob = await answer('bob');
+  assert.equal((await awaitLink(bob.ref, e, secret, { id: 'dev0000002' }, async (x) => { asked.push(x.handle); return true; }).done).handle, 'bob', 'with no username typed the device asks, and a yes opens');
+  assert.deepEqual(asked, ['bob']);
+  assert.equal((await awaitLink(bob.ref, e, secret, { id: 'dev0000003' }).done).handle, 'bob', 'the forward flow passes no check and is as before');
 });

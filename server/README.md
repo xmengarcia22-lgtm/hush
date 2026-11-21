@@ -144,7 +144,7 @@ Every chat is a record under a random id. The server stores:
 - its type (one-on-one, group or channel), whether it is public, and its key epoch;
 - the hashes of up to three room keys: member, admin, owner (one-on-one chats have a member key only, plus a base key derived from the two account keys so either side can always get back in);
 - key wraps: one sealed copy of the chat key per member device, each under a random label, so the server sees roughly how many devices can read but not whose they are;
-- a sealed blob holding the name, description, photo, owner, admins, member list and ban list;
+- a sealed blob holding the name, description, photo, owner, admins, member list and ban list; in a channel the name, description, photo, owner and admins also sit in a second sealed blob, the owner's part, and the server hands the first blob only to the owner's and admins' connections, so everyone else gets the channel without the member list and ban list;
 - posts (sealed, no sender), reactions and read marks under per-chat pseudonyms;
 - media pieces: opaque encrypted bytes, with per media id only its total size and, for a disappearing message, when it may be swept. Nothing says whether it is a photo, a video, a voice message or a document; that, the file name and the file's own key live inside the sealed message;
 - for public channels only: name, description, photo, owner and admins in the clear.
@@ -163,7 +163,19 @@ chat list) are kept until they delete them. A mailbox over 500 notes loses its
 oldest, other people's first.
 
 What a live observer at the server can still see: which connection, proven as
-which username, opened which chat ids, and when. Nothing durable records it.
+which username, opened which chat ids, and when. From release 93 that includes
+the usernames an owner's or admin's page asks `chat.slots` about for a channel
+(the page does so from release 93b), which are only the authors of the cards
+that would act, not every card the page read; they exist only while the
+request runs. Nothing durable records any of it. From a channel it does not run,
+a page takes only the owner and the admins: it loads their profiles and asks
+their presence, never the other subscribers', so what it asks says nothing about
+who else is in the channel (SPEC.md 5.3). That includes the profiles it loads
+to check a read mark, reaction or vote: in such a channel it names only those of
+the owner, the admins and itself (SPEC.md 5.7). A page from before this rule
+still loads the profile of any subscriber whose read mark, reaction or vote it
+checks, until it reloads, while the server still sends it the member list and
+the read marks (SPEC.md 5.3 and 5.4).
 
 ## How the room keys work
 
@@ -172,7 +184,7 @@ which username, opened which chat ids, and when. Nothing durable records it.
 - The admin key comes from a separate secret wrapped only for admins; the owner key from a secret the account made at sign-up and keeps in its login and recovery boxes (accounts from before stage 7 derive it from their signing key), so it survives a lost phone.
 - Joining by link: the link's secret unlocks the chat's key history, the server checks a hash of a proof derived from the secret, and the joiner files their own key wraps. The joiner then posts a sealed "joined" note; an admin's client writes them into the sealed member list.
 - Leaving posts a sealed "left" note; an admin's client rotates the key when it sees it.
-- Public channels publish their chat key, so anyone can derive the member key and read; posting still needs the admin key.
+- Public channels publish their chat key, so anyone can derive the member key and read; posting still needs the admin key, and the read marks are for the owner and the admins only.
 - Media over HTTP: a connection that has opened a chat asks for a ten-minute media ticket over the socket and sends it with each HTTP request. The server checks that connection's level for the chat on every request, so a rotation, a removal or a closed socket ends access at once; keys never travel over HTTP.
 
 ## How sign-in works now
@@ -244,11 +256,13 @@ is ever added, the same command puts its hash in the Content-Security-Policy.)
 | File | Role |
 |---|---|
 | `src/index.js` | Entry point. Reads the environment, refuses to start without `HUSH_AUTHZ`, listens, shuts down cleanly. |
-| `src/server.js` | HTTP server (health check, `POST /drop`, `/media/*`, optional app files for development), WebSocket endpoint at `/ws`, origin check, background timers. |
+| `src/server.js` | HTTP server (health check, `POST /drop`, `POST /wake`, `/media/*`, optional app files for development), WebSocket endpoint at `/ws`, origin check, background timers. |
 | `src/media.js` | Media over HTTP: tickets, piece upload and download, delete, copy for forwards, the disk guard. |
 | `src/drops.js` | `POST /drop`: anonymous mailbox notes and proof of work. |
+| `src/wake.js` | `POST /wake`: a wake ticket rings the iPhone that issued it, answered the same whatever the ticket's state. |
+| `src/apns.js` | The Apple push sender for those wake-ups (HTTP/2, an ES256 provider token); a stub without a key. |
 | `src/protocol.js` | One connection: hello handshake, frame parsing, rate limits, idle timeout, dispatch, acknowledgements. |
-| `src/store.js` | Documents in SQLite (`hush.db`), media pieces and per-media sizes in SQLite (`media.db`), presence and typing in memory. |
+| `src/store.js` | Documents in SQLite (`hush.db`), media pieces and per-media sizes in SQLite (`media.db`), presence, typing and call records in memory. |
 | `src/subs.js` | Live subscriptions: turns store changes into `set` / `del` pushes. |
 | `src/schemas.js` | Shape rules per collection, size limits, the "no names on private chats" rule, sealed-post ownership tokens. |
 | `src/paths.js` | The path grammar and id patterns shared with the client. |
@@ -260,7 +274,7 @@ is ever added, the same command puts its hash in the Content-Security-Policy.)
 | `scripts/dev.mjs` | `npm run dev`: the local app setup. |
 | `scripts/csp-hash.mjs` | `npm run csp`: pins every file the page loads (integrity attributes in `index.html`). |
 | `scripts/devcert.mjs` | The self-signed certificate for `npm run dev:lan`. |
-| `scripts/Caddyfile.example`, `scripts/hush.service` | Deployment examples for the VPS. |
+| `scripts/Caddyfile.example`, `scripts/hush.service`, `scripts/hush-turn.service`, `scripts/turnserver.conf.example`, `scripts/hush-turn.nft`, `scripts/hush-turn-nft.service` | Deployment examples for the VPS. |
 | `test/` | The test suite, including the adapter tests. |
 
 ### The page's files
@@ -298,34 +312,65 @@ All through environment variables. Defaults are safe for local use.
 | Variable | Default | Meaning |
 |---|---|---|
 | `HUSH_AUTHZ` | (none) | `standard` (SPEC.md: proven usernames, room keys for chats) or `open` (no checks, tests only). The server exits otherwise. |
-| `HUSH_STATIC` | (none) | Folder containing `index.html`. When set, the server serves `/`, `/index.html`, `/app/*.js`, `/app/*.css` and `/vendor/*.js` from it and nothing else. Development only. |
+| `HUSH_STATIC` | (none) | Folder containing `index.html`. When set, the server serves `/`, `/index.html`, `/app/*.js`, `/app/*.css`, `/app/*.png` and `/vendor/*.js` from it and nothing else. Development only. |
 | `HUSH_HOST` | `127.0.0.1` | Bind address. Keep it local; Caddy is the public face. |
 | `HUSH_PORT` | `8080` | Bind port. |
 | `HUSH_DATA_DIR` | `server/data` | Where the databases live. |
 | `HUSH_ADDR_KEY` | `<data dir>/addr.key` | Secret for keyed blind addresses. Created on first start. Back it up separately from the databases. |
-| `HUSH_ORIGINS` | (none) | Comma-separated `Origin` values allowed on the WebSocket, `POST /drop` and `/media/*`, on top of the one always allowed: a page served from the same host the request came to. Unset means that one only. `*` turns the check off (tests and non-browser clients only). `npm run dev` lists the two local names. |
+| `HUSH_ORIGINS` | (none) | Comma-separated `Origin` values allowed on the WebSocket, `POST /drop`, `POST /wake` and `/media/*`, on top of the one always allowed: a page served from the same host the request came to. Unset means that one only. Any other `Origin` is refused at the WebSocket (403, a missing one too) and on `POST /drop` and `POST /wake` (403 `denied`, `null` included), while a request to those two with no `Origin` is processed; `/media/*` only withholds its CORS headers from another origin. `*` turns the check off (tests and non-browser clients only). `npm run dev` lists the two local names. |
 | `HUSH_TRUST_PROXY` | `0` | `1` reads the client address from `X-Forwarded-For`; set it behind Caddy (the unit file does) and nowhere else, since a client reaching Node directly could forge the header. Either way the address is used only for an in-memory salted rate-limit tag. |
 | `HUSH_LOG` | on | `off` silences all logging. |
 | `HUSH_LIMITS` | `{}` | JSON overriding any value in `src/limits.js`. |
 | `HUSH_BADGES` | (none) | Who carries a badge next to their name, as a JSON object of username to badge, for example `{"Alice":"founder"}`. Badges: `founder`, `verified`. The list goes to every page at connection time; a profile cannot carry one, so nobody can give themselves a badge. |
+| `HUSH_TURN_URLS` | (none) | The call relay (TURN), comma-separated, for example `turn:relay.example.com:3478?transport=udp`. Calls always go through it; without it `call.relay` answers `unavailable` and the page says calls aren't available. Set with `HUSH_TURN_SECRET`. Two relays may be listed, grouped by host, as IP literals: the first host is the default, the second serves the Americas (a caller in an `America/*` or `Pacific/Honolulu` time zone picks it; the person called follows the caller's; SPEC.md 16.2). |
+| `HUSH_TURN_SECRET` | (none) | The secret shared with the relay (coturn's `static-auth-secret`), at least 16 characters. Relay credentials are `base64(HMAC-SHA1(secret, "<expiry>:<name>"))`, `name` being the account's name for the day (SPEC.md 7.1, `call.relay`). |
+| `HUSH_TURN_TTL` | `900` | Seconds a relay credential can start relay allocations (60 to 86400). An allocation outlives its credential, so this does not limit a call's length. |
+| `HUSH_APNS_KEY` | (none) | Path of the Apple push key (`.p8`) that rings a closed iPhone on `POST /wake`; readable by the service user only. Without it no push is sent. Set with `HUSH_APNS_KEY_ID` and `HUSH_APNS_TEAM_ID`, or none of the three; a key that can't be read stops the server at start. |
+| `HUSH_APNS_KEY_ID` | (none) | That key's 10-character id. |
+| `HUSH_APNS_TEAM_ID` | (none) | The 10-character Apple team id. |
+| `HUSH_APNS_TOPIC` | `com.hushappofficial.hush.voip` | The app's VoIP push topic. |
+| `HUSH_APNS_HOST` | `api.push.apple.com` | Apple's push host; `api.sandbox.push.apple.com` for Xcode builds. |
 | `HUSH_TLS_PORT` | (none) | Also listen with HTTPS on this port; `npm run dev:lan` sets 8443. Development only. |
 | `HUSH_TLS_HOST` | `0.0.0.0` | Bind address for the HTTPS listener. |
 | `HUSH_TLS_DIR` | `server/devcert` | Folder with `key.pem` and `cert.pem`. |
 
+## Call relay (coturn)
+
+Calls go through a TURN relay so no caller's address reaches the other side. It is coturn, its own service
+(`scripts/hush-turn.service`) with its own config (`scripts/turnserver.conf.example`, installed as
+`/etc/hush/turnserver.conf`). Ports: 3478 UDP and TCP, and UDP 49152-49651 for the relayed media; 443 stays Caddy's.
+Hush and the relay share one secret: `HUSH_TURN_SECRET` here is coturn's `static-auth-secret`, and `HUSH_TURN_URLS`
+lists the relay's addresses (both in `/etc/hush/hush.env`). The install script generates the secret, writes the config
+and the unit, and appends the two variables; the ports are opened in a second step. The relay keeps no logs: the log file
+is `/dev/null`, syslog is off, and the unit drops stdout.
+The relay forwards only to itself: both ends of a call hold an allocation on this server, so `allowed-peer-ip` is the
+server's address and every other address is denied. On that address it may reach only its own relay ports:
+`scripts/hush-turn.nft` (installed as `/etc/hush/turn.nft`, with the same address) drops any other UDP the `turnserver`
+user sends there, Caddy's HTTP/3 on udp/443 included, and `scripts/hush-turn-nft.service` loads it before the relay starts.
+
 ## What the server will and will not do yet
 
 - Accepts every op in SPEC.md section 7. `mail.*` answers `invalid`: it was never needed (notes are watched with `sub` and written with `POST /drop`).
-- `POST /drop { to, blob, pow? }`: files a sealed, fixed-size note into a mailbox with no session; 429 `pow` with `{ bits, hour }` when proof of work is needed.
+- `POST /drop { to, blob, pow? }`: files a sealed, fixed-size note into a mailbox with no session; 429 `pow` with `{ bits, hour }` when proof of work is needed; 403 `denied` when the `Origin` header is present and not allowed, before anything is read or counted (a request with no `Origin` is processed as before).
+- `POST /wake { tk }`: with no session; 204 for any well-formed ticket, whatever its state (400 `invalid` for a bad ticket or body, 413 `toolarge` over 256 bytes, 429 `ratelimit` for the address bucket, the only refusal said out loud). A call ticket (`wake.mint`) sends one VoIP push (a random mark, nothing else) to the iPhone that minted it, 3 a minute and 20 an hour per ticket. A message ticket (kind `m`, release 65) sends one "New message" alert push (no name, text, chat or badge) to the phone's alert token, 6 a minute and 60 an hour per ticket. From release 93 a phone's call rings are also capped at 4 a minute and 30 an hour, whichever tickets ring it; nudges are not counted, and a refusal is silent (204, no push). Every kind spends the address bucket, 300 an hour per address (60 before release 65), before the ticket is read. 403 `denied` when the `Origin` header is present and not allowed, before anything is read or counted; with no `Origin` the request is processed as before (curl gets 204).
 - `/media/*` (SPEC.md 7.7): `GET /media/limits`; `PUT` and `GET /media/<cid>/<mid>/<i>` for one encrypted piece (written once; the same bytes again are accepted, different bytes are refused); `DELETE /media/<cid>/<mid>`; `POST /media/<to>/<mid>/copy` for forwards. Refusals: 401 no or expired ticket, 403 no level, 409 piece already stored, 413 too large, 429 slow down, 507 `full` (the chat's allowance or the disk). Media pieces are no longer written over the socket.
 - Sweeps a disappearing message's media once its time is up, along with the message.
 - Under the standard policy, applies the ownership rules of SPEC.md 4.2, the blind-address rules of 4.3 and the room-key levels of 5.4.
+- In a channel, hands the sealed member and blocked lists (`meta`) only to a connection at owner or admin level, by `get`, `mget`, a watch's first answer and every change it pushes (an owner or admin key held at member level for an unsecured account counts). Every other connection gets the record without them, and is not refused for it. The public listing carries no `meta` (SPEC.md 5.3, 5.5, 7.4).
+- A private channel's record may carry a subscriber count `n`: a whole number from 0 to 100000, changed at admin level or above, and sent to every subscriber with the record (below admin level too), never in a preview or the public listing. A public channel keeps none: `set`, `update` and `chat.create` drop it, never refuse it, so Make public works with one stored. A group's or a one-on-one chat's record with an `n` is `invalid` (SPEC.md 5.3). Live since release 96. Release 93a's server refuses the field, and most later writes of a record that carries one (`update`, `set`, `chat.join`, `chat.rotate`), so a rollback of this code strips `n` first.
+- In a channel, answers reads of the read marks below admin level as if there were none (no document, an empty list, a watch that never fires), never with `denied`. A whole mark (`set`) is still written at member level. `update` and `delete` of any path under a chat, and of `secure/<h>`, first run the check a `get` of the path runs, before anything stored is read. Below the level that may read the path, that check's answer is the answer, whether or not a document is there: `denied` for a connection with no level for the chat, for a member card below admin level, for a channel's read marks below admin level, for a call row outside a one-on-one chat and for `secure/<h>`, and `unauth` for one not signed in (SPEC.md 4.6, 5.4). Live since release 96. Release 93a's server answered by what is stored.
+- The public listing of channels is a query only: a `sub` on it is refused at every level (SPEC.md 7.4).
+- Since release 97: in a channel, reactions and votes go through `chat.act` (SPEC.md 5.7) under a slot only the server can work out, and `chat.mine` tells an account which rows are its own. `set`, `update` and `delete` of acts in a channel are refused at every level with one answer, and rows from before read as none and go with their post. Groups and one-on-one chats do not change.
+- Since release 100: over the frame allowance, the page's keep-alive, `{"i":N,"op":"ping"}` byte for byte and after `hello`, is still answered `{ ok, now }`, so a page that spent its frames on a long chat list no longer takes a refused ping for a dead socket. The `ratelimit` refusal from the two frame allowances carries `retry`, the milliseconds before asking again is any use, and the `hello` reply's `limits` include `framesPerMin`. No limit is loosened (SPEC.md 9.4).
+- Since release 110: while more than 1 MB is unsent to a connection (`sendBufferBytes`), its frames wait unread until it drains; a frame it did not ask for (a watch's change, `evict`) that finds more than 32 MB unsent (`sendBufferMaxBytes`) closes it (`not reading`), never a reply or a watch's first load; and one answer's documents (`mget`, `query`, a watch's first load) are at most 24 MB (`answerBytes`), counted as they are read (a chat record as much of it as is answered; a channel's reactions and votes from before release 97 are read whole, answered as none and not counted, an `mget` 4 bytes each), past which the request is refused `toolarge` and what was counted is taken from an allowance of its own (50 MB a minute), below which the connection's `mget`, `query` and `sub` are refused `ratelimit` and its other frames go on; the public listing of channels takes `visibility == public` and nothing else, comes in id order through its own index and is answered with the records that fit (SPEC.md 7.4, 9.4); and a `set` or `update` of a chat record is refused before the record is read when the connection does not hold the chat, and so is a `delete` when the chat's row in `chats` is there; with no row the record, if any, is read first, as before 110, so a `delete` of a chat that is gone answers ok, as before.
+- Since release 107: a chat record takes a new or changed published key (`openKeys`) only while it is a public channel, by `set`, `update`, `chat.create` and `chat.rotate` alike; a channel that is not public holds no published key for its current key number or a later one after any of these writes or a `chat.join`, so one whose record holds published keys is made private only once its key number is past every one of them (the page changes the key first, publishing nothing), and the key of a key change made while public, or one published ahead, keeps the channel public until then; only a channel is made public or marked public; and a record is made only at an address of its own kind (`d` one-on-one, `g` group, `c` channel). Each is refused with `invalid`, where the level check has not already answered `denied`. A record from before keeps taking every other write: one that already holds such a key below its current key number or outside a channel (the key stays, and the owner of a group or channel can take it out), a group already marked public, a record at another kind's address. Not so a private channel's record that already holds a published key for its current key number or a later one: it takes none of these writes while the key would stay there (not the latest-message mark, not a join by link), only a key change that passes it, its owner taking it out, or its owner making the channel public. The rule reads what the record holds, not what it held: a published key taken out of a public channel's record no longer keeps the channel from being made private at that key number. None of this holds a writer to the database (SPEC.md 5.3).
 - Validates every document against SPEC.md sections 7.3, 9.1, 9.2 and 9.3, including the rule that private chat records never carry a name.
 - Enforces sealed-post ownership: edits and deletes of a message need the one-time token whose hash is stored, or the admin level.
 - Deletes expired messages on its own, once a minute.
-- Keeps presence and typing in memory only.
+- Keeps presence, typing and call records (SPEC.md 16.2) in memory only.
 - Stores account, login, phone, vault, backup and link-request addresses as keyed hashes.
 - Logs lifecycle events and error codes only. No request logging, no addresses.
-- Rate limits of SPEC.md 9.4, all in `src/limits.js`: per address, lookups of account boxes, logins, link requests and phone entries (20 a minute, and 60 an hour per address looked up) and invite lookups; per connection, profile reads (600 a minute, every path of an `mget` counted), searches (30 a minute), new chats (200 a day), posts (60 a minute), reactions, read and typing marks (120 a minute), plus the frame, query, drop and media limits.
+- Rate limits of SPEC.md 9.4, all in `src/limits.js`: per address, lookups of account boxes, logins and phone entries (20 a minute, and 60 an hour per address looked up), link requests, which have an allowance of their own (120 a minute per address and 2,000 an hour per link-request address, `linkReadsPerMinPerAddr` and `linkReadsPerHourPerPath`), and invite lookups; per connection, profile reads (600 a minute, every path of an `mget` counted), searches (30 a minute), new chats (200 a day), posts (60 a minute), reactions, read and typing marks (120 a minute), call records (20 a minute); per address, `call.relay` (10 a minute), and per account (6 a minute, 60 an hour); plus the frame, query, drop and media limits. Since release 97, the frame and byte allowances are taken before a frame is parsed, and over them reads from that socket wait 200 ms (see the release 100 bullet above for the ping and `retry`). `chat.slots` counts one query for every 300 names it is asked, rounded up, at least one (10,000 names count 34).
 - A new account brings proof of work (16 bits over a per-connection salt, `signupPowBits`), which the page solves out of sight while the sign-up form is being filled in; a backstop of 100 new accounts a day per address stays behind it.
 - Compares every key hash and proof hash in constant time, and stores sealed group metadata only when it is sealed under the chat's current epoch.
 - Stage 8 (the lock-down checklist of SPEC.md 16.4 and release transparency) is done and the service is live; stage 9 (backups and monitoring, SPEC.md 16) is still to come.
@@ -342,8 +387,8 @@ The adapter lives in `app/adapter.js` between the markers
 - A write you make appears in your own live views immediately with `hasPendingWrites: true` and settles when the server confirms it.
 - `add` generates the id on the client and sends a `set`, so new messages also show up immediately.
 - Reads of `directory/*` and `presence/*` issued in the same tick are sent as one `mget`.
-- Reconnects with backoff, proves the username again, re-sends every live subscription, and reports the connection state to the page, which shows a banner after 1.5 seconds offline.
-- `prove(identity)` signs the challenge with the device key when the device is listed on the profile and falls back to the account key; `prove(null)` signs out. Switching accounts uses a fresh connection and drops the previous account's live subscriptions silently.
+- Reconnects with backoff, proves the username again, re-sends every live subscription, and reports the connection state to the page, which shows a banner after 1.5 seconds offline. Since release 102: `present()` (the page calls it when the app comes back into view and when a chat is opened) makes the waiting reconnect go at once, or the next one a close starts within 5 seconds; one attempt per call, and such an attempt does not lengthen the automatic wait. A chat opened while there is no connection says "Connecting…" until its first posts arrive.
+- `prove(identity)` signs the challenge with the device key when the device is listed on the profile and falls back to the account key; `prove(null)` signs out. Switching accounts uses a fresh connection and drops the previous account's live subscriptions silently. Since release 102 this holds for every change of account, also one made while disconnected, and the previous account's calls that were waiting for a connection are refused with `offline` instead of being sent.
 - Before any operation under `channels/<cid>`, the adapter asks the page for the best room key it holds (`caps(cid)`) and opens the chat with it; a plain read without a key returns the trimmed preview. On an `evict` push it asks the page to refresh the record (`onEvict`), tries to open again, and either re-sends the chat's live subscriptions or ends them with "no longer in this chat".
 - A watch on a chat record the page cannot open yet still delivers that trimmed preview (`exists: true`, no sealed fields), so the page can tell "no key for this device yet" from "this chat is gone"; content under such a chat shows as empty until it can be opened. The page keeps the inbox pointer for such a chat and looks again every 15 seconds; it only tidies the pointer away when the chat is gone or when this device once held a key and now cannot open it (it was removed).
 - `close()` rejects every call still waiting for a reply, so nothing lingers.

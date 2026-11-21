@@ -13,14 +13,22 @@
 //   HUSH_LIMITS        JSON object overriding limits.js DEFAULT_LIMITS
 //   HUSH_BADGES        JSON object of username to badge, e.g. {"Alice":"founder"}; badges: founder, verified. Default: none
 //   HUSH_OWNERS        comma-separated usernames that may read reports (report.list), e.g. alice,bob. Default: none
+//   HUSH_TURN_URLS     the call relay (TURN), comma-separated, e.g. turn:relay.example.com:3478?transport=udp. Default: none, and calls are unavailable
+//   HUSH_TURN_SECRET   the secret shared with the relay (coturn's static-auth-secret); set with HUSH_TURN_URLS or not at all
+//   HUSH_TURN_TTL      seconds a relay credential lasts  default 900
 //   HUSH_TLS_PORT      also listen with HTTPS on this port (development over the local network; unset = off)
 //   HUSH_TLS_HOST      bind address for it         default 0.0.0.0 (every network this PC is on)
 //   HUSH_TLS_DIR       folder holding key.pem and cert.pem (`npm run dev:lan` makes them)
+//   HUSH_APNS_KEY      path of the Apple push key (.p8) that rings a closed iPhone (POST /wake). Default: none, and no pushes are sent
+//   HUSH_APNS_KEY_ID   that key's 10-character id; set with HUSH_APNS_KEY and HUSH_APNS_TEAM_ID or not at all
+//   HUSH_APNS_TEAM_ID  the 10-character Apple team id
+//   HUSH_APNS_TOPIC    the app's VoIP push topic   default com.hushappofficial.hush.voip
+//   HUSH_APNS_HOST     Apple's push host           default api.push.apple.com; api.sandbox.push.apple.com for Xcode builds
 
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, createPrivateKey } from 'node:crypto';
 import { ID } from './paths.js';
 
 export const SERVER_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -63,6 +71,39 @@ export function parseOwners(raw) {
   return out;
 }
 
+// The call relay (SPEC.md 16.2). Calls go through it always, never directly, so without it there are no calls. Credentials
+// follow the TURN REST scheme (protocol.js, call.relay). The relay checks a credential when a call starts, and an allocation
+// made with it outlives it (tested on coturn: a call held 13 minutes on a 120-second credential, over UDP and TCP), so the TTL
+// bounds only how long a leaked credential can start new allocations, not how long a call lasts: hence a short default.
+export function parseTurn(env) {
+  const urls = String(env.HUSH_TURN_URLS || '').split(',').map((s) => s.trim()).filter(Boolean), secret = String(env.HUSH_TURN_SECRET || '');
+  if (!urls.length && !secret) return null;
+  if (!urls.length || !secret) throw new Error('HUSH_TURN_URLS and HUSH_TURN_SECRET are set together or not at all');
+  for (const u of urls) if (!/^turns?:[A-Za-z0-9.:[\]-]+(\?transport=(?:udp|tcp))?$/.test(u)) throw new Error(`HUSH_TURN_URLS: "${u}" is not a turn: or turns: address`);
+  if (secret.length < 16) throw new Error('HUSH_TURN_SECRET is too short: use a long random value');
+  const ttl = intOr(env.HUSH_TURN_TTL, 900);
+  if (ttl < 60 || ttl > 86400) throw new Error('HUSH_TURN_TTL is in seconds, between 60 and 86400');
+  return { urls, secret, ttl };
+}
+
+// Call wake-ups (apns.js). The key file is read and parsed here so a wrong path or a damaged file stops the server at
+// start, not at the first call that should have rung. Returns the createApns options, or {} when pushes are off.
+export function parseApns(env) {
+  const keyFile = String(env.HUSH_APNS_KEY || '').trim(), keyId = String(env.HUSH_APNS_KEY_ID || '').trim(), teamId = String(env.HUSH_APNS_TEAM_ID || '').trim();
+  if (!keyFile && !keyId && !teamId) return {};
+  if (!keyFile || !keyId || !teamId) throw new Error('HUSH_APNS_KEY, HUSH_APNS_KEY_ID and HUSH_APNS_TEAM_ID are set together or not at all');
+  if (!/^[A-Za-z0-9]{10}$/.test(keyId)) throw new Error('HUSH_APNS_KEY_ID is the 10-character id shown next to the key');
+  if (!/^[A-Za-z0-9]{10}$/.test(teamId)) throw new Error('HUSH_APNS_TEAM_ID is the 10-character team id');
+  let pem;
+  try { pem = readFileSync(resolve(keyFile)); } catch { throw new Error(`HUSH_APNS_KEY: cannot read ${keyFile}`); }
+  let key;
+  try { key = createPrivateKey(pem); } catch { throw new Error('HUSH_APNS_KEY is not a private key (the .p8 file from Apple)'); }
+  if (key.asymmetricKeyType !== 'ec') throw new Error('HUSH_APNS_KEY is not an EC key (Apple push keys are P-256)');
+  const host = String(env.HUSH_APNS_HOST || 'api.push.apple.com').trim();
+  if (!/^[A-Za-z0-9.-]+$/.test(host)) throw new Error('HUSH_APNS_HOST is a host name, like api.push.apple.com');
+  return { keyFile: resolve(keyFile), keyId, teamId, topic: String(env.HUSH_APNS_TOPIC || 'com.hushappofficial.hush.voip').trim(), host };
+}
+
 export function loadConfig(env = process.env) {
   let limits = {};
   if (env.HUSH_LIMITS) {
@@ -81,6 +122,8 @@ export function loadConfig(env = process.env) {
     limits,
     badges: parseBadges(env.HUSH_BADGES),
     owners: parseOwners(env.HUSH_OWNERS),
+    turn: parseTurn(env),
+    apnsOpts: parseApns(env),
     tls: env.HUSH_TLS_PORT ? loadTls(env) : null,
   };
 }

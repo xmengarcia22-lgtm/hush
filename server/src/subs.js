@@ -2,14 +2,17 @@
 // one collection (`w`, `o`, `l`) or a fixed set of documents in one collection
 // (`ids`). After `init`, the server pushes `set` for every change that matches
 // and `del` for every removal or change that no longer matches. Ordering and
-// the limit are the client's job after `init`.
+// the limit are the client's job after `init`. What a `set` carries is the
+// document as each watcher's connection may see it when it goes out (`view`).
 
 import { fail } from './errors.js';
 import { matches } from './query.js';
 
 export class SubRegistry {
-  constructor(limits) {
+  // view(conn, evt): the changed document as that connection may see it now (server.js: the store's seenBy).
+  constructor(limits, view = (conn, evt) => evt.d) {
     this.limits = limits;
+    this.view = view;
     this.byParent = new Map();   // parent → Set<sub>
     this.byConn = new Map();     // conn → Map<s, sub>
   }
@@ -70,7 +73,7 @@ export class SubRegistry {
       }
       let frame;
       if (evt.type === 'del') frame = { s: sub.s, t: 'del', id: evt.id };
-      else if (sub.ids || matches(evt.d, sub.w)) frame = { s: sub.s, t: 'set', id: evt.id, d: evt.d };
+      else if (sub.ids || matches(evt.d, sub.w)) frame = { s: sub.s, t: 'set', id: evt.id, d: this.view(sub.conn, evt) };
       else frame = { s: sub.s, t: 'del', id: evt.id };
       sub.conn.send(frame);
       n++;

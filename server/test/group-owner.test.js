@@ -4,6 +4,8 @@
 // `update` or by `set`, and may not publish a key in `chat.rotate`. The owner's part of the description lives in its
 // own sealed field, `ometa`, which only the owner writes and rotations carry unchanged. The page reads the owner part
 // from `ometa` (so what an admin seals into `meta` names no owner), and an owner's page gives an older group one.
+// Since release 107 a published key and the public mark are the owner's in a channel alone: a group is not made public, and
+// no key is published outside a public channel (openkeys-refuse.test.js). An admin is refused both before either rule is asked.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -41,6 +43,9 @@ test('update: an admin is refused every owner-only field of a group and a channe
       const r = await upd(E, cid, { [f]: v });
       assert.equal(r.e, 'denied', `${cid}: an admin may not change "${f}"`);
       assert.match(r.m, /owner access/);
+      // Release 107: the owner publishes no key in a private group or channel, and makes no group public.
+      const no = f === 'openKeys' ? /only a public channel publishes a key/ : f === 'visibility' && cid[0] === 'g' ? /only a channel can be public/ : null;
+      if (no) { const o = await upd(A, cid, { [f]: v }); assert.equal(o.e, 'invalid', `${cid}: the owner may not change "${f}" either`); assert.match(o.m, no); continue; }
       assert.equal((await upd(A, cid, { [f]: v })).ok, true, `${cid}: the owner may change "${f}"`);
       assert.equal((await upd(A, cid, { [f]: f === 'visibility' ? 'private' : null })).ok, true, 'and change it back');
     }
@@ -54,6 +59,7 @@ test('update: an admin is refused every owner-only field of a group and a channe
     assert.equal((await upd(A, pub, { [f]: v })).ok, true, `public: the owner may change "${f}"`);
   }
   assert.equal((await upd(E, pub, { openKeys: { 1: 'k'.repeat(44) } })).e, 'denied', 'nor publish a key');
+  assert.equal((await upd(A, pub, { openKeys: { 0: 'j'.repeat(44) } })).ok, true, 'public: the owner may change a published key');
 });
 
 test('update: admins keep meta, invites and pins; members still may not', async () => {
@@ -115,11 +121,16 @@ test('chat.rotate: an admin rotates, but publishing a key (openKeys) needs the o
   assert.equal((await E.call('chat.rotate', { cid, epoch: 1, keys: { [label()]: wrap() }, cap: cap(), meta: sealed(1) })).ok, true, 'a plain rotation is still an admin\'s');
 });
 
-test('chat.rotate: the owner may publish a key', async () => {
+test('chat.rotate: the owner of a public channel may publish a key; of a private one, not (release 107)', async () => {
   const cid = chid(4);
-  await trio(cid, channelDoc());
+  await trio(cid, channelDoc({ visibility: 'public', name: 'News', desc: 'd', owner: 'alice', admins: ['eve'], meta: undefined, openKeys: { 0: 'k'.repeat(44) } }));
   assert.equal((await A.call('chat.rotate', { cid, epoch: 1, keys: {}, cap: cap(), openKeys: { 1: 'k'.repeat(44) } })).ok, true);
-  assert.deepEqual((await rec(A, cid)).openKeys, { 1: 'k'.repeat(44) });
+  assert.deepEqual((await rec(A, cid)).openKeys, { 0: 'k'.repeat(44), 1: 'k'.repeat(44) });
+  const priv = chid(8);
+  await trio(priv, channelDoc());
+  const r = await A.call('chat.rotate', { cid: priv, epoch: 1, keys: {}, cap: cap(), openKeys: { 1: 'k'.repeat(44) } });
+  assert.equal(r.e, 'invalid'); assert.match(r.m, /only a public channel publishes a key/);
+  assert.deepEqual([(await rec(A, priv)).epoch, (await rec(A, priv)).openKeys], [0, undefined], 'and nothing changed');
 });
 
 test('chat.rotate: a public channel gets a new key only from the owner (its new posts would stop being public)', async () => {
@@ -179,15 +190,15 @@ function page() {
     src + '\nreturn { newIdentity, readMeta, readOMeta, convKey, sealMeta, sealOMeta, sealOMetaFor, ksPut, b64 };');
   const m = new Map();
   const ls = { get: (k, d) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : d), set: (k, v) => { if (v == null) m.delete(k); else m.set(k, JSON.parse(JSON.stringify(v))); } };
-  const S = { me: null, keys: new Map(), chanKeys: new Map(), prefs: null, dir: {}, pins: null, ks: null, ksFor: null, dmPeers: {}, rekeying: false };
+  const S = { me: null, keys: new Map(), chanKeys: new Map(), prefs: null, dir: {}, pins: null, ks: null, ksFor: null, dmPeers: {}, rekeying: false, chatDocs: new Map() };
   const typeOf = (c) => (c && c.type) || 'channel', epochOf = (c) => (c.epoch == null ? 0 : c.epoch);
   const pg = build(S, ls, typeOf, epochOf, (c, e) => (c.keys && c.keys[e]) || null, () => null, (h) => /^[a-z0-9_]{3,20}$/.test(h), async () => false,
     () => S.prefs || (S.prefs = {}), () => {}, () => {}, () => {}, (s) => s, (d, h) => d === h, () => {});
   const ui = readFileSync(new URL('../../app/ui.js', import.meta.url), 'utf8');
   const a = ui.indexOf('async function showMeta('), b = ui.indexOf('async function chatAnd(');
   assert.ok(a > 0 && b > a, 'app/ui.js has showMeta, then chatAnd');
-  const lifted = new Function('S', 'ls', 'typeOf', 'epochOf', 'joinedPublic', 'readMeta', 'readOMeta', 'convKey', 'sealOMetaFor', 'adminSecret', ui.slice(a, b) + '\nreturn { showMeta, adoptOMeta };')(
-    S, ls, typeOf, epochOf, () => false, pg.readMeta, pg.readOMeta, pg.convKey, pg.sealOMetaFor, async () => (S.noAdminSecret ? null : new Uint8Array(32)));
+  const lifted = new Function('S', 'ls', 'typeOf', 'epochOf', 'joinedPublic', 'readMeta', 'readOMeta', 'convKey', 'sealOMetaFor', 'adminSecret', 'convById', ui.slice(a, b) + '\nreturn { showMeta, adoptOMeta };')(
+    S, ls, typeOf, epochOf, () => false, pg.readMeta, pg.readOMeta, pg.convKey, pg.sealOMetaFor, async () => (S.noAdminSecret ? null : new Uint8Array(32)), () => null);
   return Object.assign(pg, lifted, { S });
 }
 async function as(pg, handle) { pg.S.me = { handle, ...(await pg.newIdentity()) }; pg.S.ksFor = null; }

@@ -14,6 +14,9 @@
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(self), microphone=(self), geolocation=(), display-capture=(), payment=(), usb=(), serial=(), bluetooth=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		-Server
@@ -35,6 +38,10 @@
 		not query v=*
 	}
 	header @plainfile Cache-Control "no-cache"
+	# Apple's CDN reads this file to tie the iPhone app to the site, so Apple Passwords can save and fill the Hush
+	# login (SPEC.md 12.2). The file has no extension and the site sends nosniff, so its type must be named here.
+	header /.well-known/apple-app-site-association Content-Type application/json
+	header /.well-known/apple-app-site-association Cache-Control "no-cache"
 	root * /srv/hush/www
 	file_server
 
@@ -43,6 +50,9 @@
 	handle_errors 404 {
 		header {
 			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			Content-Security-Policy "frame-ancestors 'none'"
+			X-Frame-Options "DENY"
+			Permissions-Policy "camera=(self), microphone=(self), geolocation=(), display-capture=(), payment=(), usb=(), serial=(), bluetooth=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()"
 			X-Content-Type-Options "nosniff"
 			Referrer-Policy "no-referrer"
 			-Server
@@ -51,10 +61,23 @@
 		file_server
 	}
 
-	# The API. Caddy adds X-Forwarded-For; the server uses it only for a salted, in-memory rate-limit tag.
-	# /media/* carries encrypted pieces (SPEC.md 7.7): no logging, no caching (the server sends no-store),
+	# Body caps at the edge: a media piece is 1 MiB plus its iv and tag, a drop or wake body under 8 KB, so anything
+	# larger is cut off here instead of being read into the service (SPEC.md 11.3).
+	@media path /media/*
+	request_body @media {
+		max_size 2MB
+	}
+	@small path /drop /wake
+	request_body @small {
+		max_size 16KB
+	}
+
+	# The API. Caddy sets X-Forwarded-For to the peer address it saw and drops a value a public client wrote itself (its default:
+	# no trusted_proxies, so no peer may hand one on; a private-range hop placed in front of Caddy would need its own entry,
+	# or every user would share that hop's address); the server reads the last hop and uses it only for a salted, in-memory
+	# rate-limit tag. /media/* carries encrypted pieces (SPEC.md 7.7): no logging, no caching (the server sends no-store),
 	# and no compression, since ciphertext doesn't compress.
-	@api path /ws /drop /healthz /media/*
+	@api path /ws /drop /wake /healthz /media/*
 	reverse_proxy @api 127.0.0.1:8080 {
 		flush_interval -1
 	}

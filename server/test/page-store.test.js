@@ -89,10 +89,63 @@ test('logging an account out removes its entries and the invite secrets it made;
   const fresh = page(st); await fresh.unlockStore(); assert.deepEqual(fresh.ls.get('hush:ids'), [{ handle: 'carol' }]);
 });
 
-test('what stays plain is exactly the lock settings, the theme and the blob', () => {
+// A stand-in IndexedDB: one database with one 'keys' store in a Map; `broken` makes every open fail, as WebKit does when its
+// connection to the IndexedDB server is lost after a relaunch (bug 277615).
+function fakeIdb(state = { keys: new Map(), broken: false }) {
+  return { state, open() { const req = {}; setTimeout(() => {
+    if (state.broken) { req.error = new Error('UnknownError'); return req.onerror && req.onerror(); }
+    const tx = { objectStore: () => ({ get: (k) => { const g = {}; setTimeout(() => { g.result = state.keys.get(k); g.onsuccess && g.onsuccess(); setTimeout(() => tx.oncomplete && tx.oncomplete()); }); return g; }, put: (v, k) => state.keys.set(k, v) }) };
+    req.result = { createObjectStore() {}, transaction: () => tx, close() {} }; req.onsuccess && req.onsuccess(); }); return req; } };
+}
+const pageIdb = (storage, idb) => build(storage, idb, undefined, new TextEncoder(), new TextDecoder(), b64u, unb64u);
+
+test('a store under the IndexedDB key: a launch whose IndexedDB fails makes no new key and sets nothing aside, and the next launch opens as before', async () => {
+  const st = new FakeStorage(); for (const [k, v] of Object.entries(PLAIN_BEFORE)) st.setItem(k, v);
+  const idb = fakeIdb(); const p = pageIdb(st, idb); await p.unlockStore();
+  assert.deepEqual(Object.keys(st.dump()).sort(), ['hush:lockAfter', 'hush:sealed', 'hush:theme'], 'the key lives in IndexedDB: nothing beside the blob');
+  idb.state.broken = true; const dark = pageIdb(st, idb);
+  await assert.rejects(dark.unlockStore(), /store/, 'no key answers: the boot is told and offers a retry');
+  assert.equal(st.getItem('hush:sealed:old'), null, 'nothing set aside'); assert.equal(st.getItem('hush:devkey'), null, 'no new key');
+  idb.state.broken = false; const again = pageIdb(st, idb); await again.unlockStore();
+  assert.deepEqual(again.ls.get('hush:ids'), IDS, 'the same store, as before');
+  st.setItem('hush:devkey', b64u(globalThis.crypto.getRandomValues(new Uint8Array(32)))); // a key beside the blob left by an earlier fallback, which opens nothing
+  idb.state.broken = true; await assert.rejects(pageIdb(st, idb).unlockStore(), /store/, 'a stale key beside the blob does not turn a failed IndexedDB into a re-key');
+  assert.equal(st.getItem('hush:sealed:old'), null, 'still nothing set aside');
+  idb.state.broken = false; const clean = pageIdb(st, idb); await clean.unlockStore();
+  assert.deepEqual(clean.ls.get('hush:ids'), IDS); assert.equal(st.getItem('hush:devkey'), null, 'the stale key beside the blob is dropped once the store is under the IndexedDB key with nothing set aside');
+});
+
+test('a store set aside at an earlier boot is kept, and comes back once its accounts are signed in here again: the chat keys this store lacks, under whichever key opens it', async () => {
+  const st = new FakeStorage(); for (const [k, v] of Object.entries(PLAIN_BEFORE)) st.setItem(k, v);
+  const idb = fakeIdb(); await pageIdb(st, idb).unlockStore(); // the first store, under the IndexedDB key
+  st.setItem('hush:sealed:old', st.getItem('hush:sealed')); st.removeItem('hush:sealed'); // as a boot that re-keyed left it
+  const fresh = page(st); await fresh.unlockStore(); // no IndexedDB here: the key beside the blob
+  assert.deepEqual(fresh.ls.get('hush:ids', []), [], 'an empty store: the one set aside lists an account not signed in here');
+  assert.ok(st.getItem('hush:sealed:old'), 'and it is kept');
+  fresh.ls.set('hush:ids', [{ handle: 'alice', kv: 1 }]); fresh.ls.set('hush:ks:alice', { gX: { 1: 'new-epoch' } }); await fresh.secSave(); // signed in again: a new device holding the current epoch only
+  const back = pageIdb(st, idb); await back.unlockStore(); // both keys answer now: the blob opens with the one beside it, the set-aside store with the IndexedDB key
+  assert.deepEqual(back.ls.get('hush:ks:alice'), { gX: { 1: 'new-epoch', 0: 'raw-key-base64' } }, 'the old epoch is back');
+  assert.equal(back.ls.get('hush:draft:alice:gX', null), null, 'account records and chat keys come over, nothing else');
+  assert.equal(st.getItem('hush:sealed:old'), null, 'merged and dropped');
+  assert.equal(st.getItem('hush:devkey'), null, 'the blob is back under the IndexedDB key, so the key beside it goes: a copy of localStorage alone opens nothing');
+  const only = pageIdb(st, idb); await only.unlockStore(); assert.deepEqual(only.ls.get('hush:ks:alice'), { gX: { 1: 'new-epoch', 0: 'raw-key-base64' } }, 'and the IndexedDB key alone opens it');
+  const st2 = new FakeStorage(); st2.setItem('hush:sealed:old', 'set-aside-earlier'); st2.setItem('hush:sealed', st.getItem('hush:sealed')); // a blob under a key this device lacks, and one set aside already
+  await page(st2).unlockStore();
+  assert.equal(st2.getItem('hush:sealed:old'), 'set-aside-earlier', 'the first one set aside is never written over'); assert.equal(st2.getItem('hush:sealed:old2'), st.getItem('hush:sealed'), 'the second goes beside it');
+});
+
+test('Settings names a set-aside copy while one is kept, and whether it opens with this device\'s key; nothing is shown otherwise', () => {
+  const at = src.indexOf('function settingsAdvanced('), st = src.slice(at, src.indexOf('\nfunction openHow(', at));
+  assert.match(st, /const old=\[\];try\{for\(const k of \['hush:sealed:old','hush:sealed:old2'\]\)\{const b=localStorage\.getItem\(k\);if\(b\)old\.push\(b\)\}\}catch\{\}/);
+  assert.match(st, /if\(old\.length\)\{const p=el\('p','hint','Set-aside data: checking…'\);/, 'only while a copy is kept');
+  assert.match(st, /unsealBlob\(SECK,b\)/, 'tried with the store\'s own key');
+  assert.match(st, /' does not open on this device':' opens; accounts: '/);
+});
+
+test('what stays plain is exactly the lock settings, the theme, the blob and the device\'s banner choice', () => {
   const p = page(new FakeStorage());
-  assert.deepEqual([...p.PLAIN_KEYS].sort(), ['hush:applock', 'hush:devkey', 'hush:lockAfter', 'hush:lockFails', 'hush:sealed', 'hush:sealed:old', 'hush:theme']);
-  for (const k of ['hush:ids', 'hush:ks:alice', 'hush:inv:gX', 'hush:login:alice', 'hush:phone:alice', 'hush:draft:alice:gX', 'hush:read:alice:gX', 'hush:ptr:alice', 'hush:active', 'hush:serverView']) assert.equal(p.lsSecret(k), true, k);
+  assert.deepEqual([...p.PLAIN_KEYS].sort(), ['hush:applock', 'hush:devkey', 'hush:lockAfter', 'hush:lockFails', 'hush:msgPushDev', 'hush:sealed', 'hush:sealed:old', 'hush:sealed:old2', 'hush:theme']);
+  for (const k of ['hush:ids', 'hush:ks:alice', 'hush:inv:gX', 'hush:login:alice', 'hush:phone:alice', 'hush:draft:alice:gX', 'hush:read:alice:gX', 'hush:ptr:alice', 'hush:active', 'hush:serverView', 'hush:list:alice']) assert.equal(p.lsSecret(k), true, k);
 });
 
 test('an account\'s newer keys are never written over by a stale copy; a removal record is read as pending only while it has a stage', async () => {
@@ -125,4 +178,32 @@ test('mergeSealed: another tab\'s blob brings newer keys, missing chat keys for 
   const again = { 'hush:ids': [{ handle: 'alice', kv: 2 }], 'hush:rekey:alice': { done: 200 } };
   p.mergeSealed(again, { 'hush:ids': [{ handle: 'alice', kv: 2 }], 'hush:rekey:alice': { stage: 'notes', at: 100 } });
   assert.deepEqual(again['hush:rekey:alice'], { done: 200 }, 'an older record never brings a finished removal back');
+});
+
+test('logging an account out takes its cached chat list with it: ownedBy picks hush:list:<handle> for that handle alone', () => {
+  const line = src.match(/^const ownedBy=.*$/m); assert.ok(line, 'ownedBy in app/ui.js');
+  const ownedBy = new Function(line[0] + '\nreturn ownedBy;')();
+  assert.equal(ownedBy('hush:list:alice', 'alice'), true);
+  assert.equal(ownedBy('hush:list:alice', 'al'), false, 'a handle that is a prefix of another');
+  assert.equal(ownedBy('hush:list:alice', 'bob'), false);
+  assert.equal(ownedBy('hush:draft:alice:gX', 'alice'), true, 'as the drafts and read marks already are');
+});
+
+test('another tab replacing this account\'s keys (a device removal) reloads this tab, which still holds the old ones; a write that keeps them reloads nothing, nor does one while this tab runs a removal itself', async () => {
+  const st = new FakeStorage(), on = {}, ids = (x, kv) => [{ handle: 'alice', sig: { x, y: 'y' }, kv }];
+  st.setItem('hush:ids', JSON.stringify(ids('old', 1)));
+  const p = build(st, undefined, (t, f) => { on[t] = f; }, new TextEncoder(), new TextDecoder(), b64u, unb64u); await p.unlockStore();
+  const q = page(st); await q.unlockStore();                                   // the other tab, over the same storage
+  let reloads = 0;
+  globalThis.S = { me: { handle: 'alice', sig: { x: 'old', y: 'y' }, kv: 1 } }; globalThis.location = { reload: () => { reloads++; } };   // what the handler reads of the page
+  const tell = async () => { on.storage({ key: 'hush:sealed', newValue: st.getItem('hush:sealed') }); await new Promise((r) => setTimeout(r, 50)); };
+  try {
+    q.ls.set('hush:draft:alice:gX', 'hello'); await q.secSave(); await tell();
+    assert.equal(reloads, 0, 'a write that keeps this account\'s keys: no reload');
+    q.ls.set('hush:ids', ids('new', 2)); await q.secSave();
+    globalThis.S.rekeying = true; await tell();
+    assert.equal(reloads, 0, 'not while this tab runs a removal itself');
+    globalThis.S.rekeying = false; await tell();
+    assert.equal(reloads, 1, 'its keys replaced in the other tab: this one reloads into them');
+  } finally { delete globalThis.S; delete globalThis.location; }
 });

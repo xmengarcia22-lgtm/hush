@@ -99,5 +99,7 @@ test('no name label in the page is drawn without the badge', () => {
     assert.deepEqual(hits, [], 'a name is drawn without its badge near: ' + hits.join(' || '));
   }
   assert.ok((src.match(/titleNode\('(?:div|span)','t-name',/g) || []).length >= 4, 'chat titles go through titleNode: the search hits, the new-message alert, the chat header, the request list');
-  assert.ok((src.match(/withBadge\(/g) || []).length >= 19, 'the badge is drawn in every place a name is: nineteen sites at the time of writing, and never fewer');
+  // redesign step E: the contact row, the contact card and the side menu's two (its top, its account rows) went with their screens; the Calls row came
+  assert.ok((src.match(/withBadge\(/g) || []).length >= 18, 'the badge is drawn in every place a name is: eighteen sites at the time of writing, and never fewer');
+  assert.ok(src.includes("withBadge(el('div','t-name',g.n>1?name+' ('+g.n+')':name),dmPeer(c))"), 'the name of a Calls row carries the badge');
 });

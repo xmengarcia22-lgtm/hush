@@ -10,7 +10,8 @@ const CID = /^(?:[gc][A-Za-z0-9]{12}|d[A-Za-z0-9_-]{22})$/;
 const ITEM_ID = /^m?[A-Za-z0-9]{12}$/;                                // posts, comments, invites, media, pointers
 const MID = /^m[A-Za-z0-9]{12}$/;
 const ACT_ID = /^[A-Za-z0-9]{12}~[A-Za-z0-9_-]{22}~[A-Za-z0-9_-]{1,24}$/; // post~tag~kind
-const SIDE_ID = /^[0-9]{1,2}~[A-Za-z0-9_-]{22}$/;                     // epoch~tag
+const SIDE_ID = /^[0-9]{1,10}~[A-Za-z0-9_-]{22}$/;                    // epoch~tag; an epoch has up to 10 digits (release 91)
+const EPOCH_ID = /^(?:0|[1-9][0-9]{0,9})$/;                           // a key-chain row: its epoch in decimal, no leading zero
 const CHUNK_I = /^(?:0|[1-9][0-9]{0,4})$/;                            // 0..99999; the real bound is maxPieces (limits.js)
 const ADDR43 = /^[A-Za-z0-9_-]{43}$/;                                 // base64url of 32 bytes
 const VAULT = /^v[A-Za-z0-9_-]{32}$/;
@@ -18,7 +19,7 @@ const BACKUP = /^b[A-Za-z0-9_-]{32}$/;
 const LABEL = /^[A-Za-z0-9_-]{22}$/;                                  // random wrap labels and member tags
 const CAP = /^[A-Za-z0-9_-]{43}$/;                                    // room keys (32 bytes, base64url)
 
-export const ID = Object.freeze({ HANDLE, CID, ITEM_ID, MID, ACT_ID, SIDE_ID, CHUNK_I, ADDR43, VAULT, BACKUP, LABEL, CAP });
+export const ID = Object.freeze({ HANDLE, CID, ITEM_ID, MID, ACT_ID, SIDE_ID, EPOCH_ID, CHUNK_I, ADDR43, VAULT, BACKUP, LABEL, CAP });
 
 // kind → { top: first segment, depth: number of segments in a doc path, id: pattern, backend }
 const KINDS = Object.freeze({
@@ -41,6 +42,9 @@ const KINDS = Object.freeze({
   acts:      { top: 'channels',  depth: 4, sub: 'acts',     id: ACT_ID,  backend: 'docs' },
   reads:     { top: 'channels',  depth: 4, sub: 'reads',    id: SIDE_ID, backend: 'docs' },
   typing:    { top: 'channels',  depth: 4, sub: 'typing',   id: SIDE_ID, backend: 'memory' },
+  call:      { top: 'channels',  depth: 4, sub: 'call',     id: LABEL,   backend: 'memory' },   // call setup (SPEC.md 16.2), one-on-one chats only
+  chain:     { top: 'channels',  depth: 4, sub: 'chain',    id: EPOCH_ID, backend: 'docs' },  // the key chain (SPEC.md 5.6, release 91): members read, chat.rotate and chat.chain write
+  roll:      { top: 'channels',  depth: 4, sub: 'roll',     id: ADDR43,  backend: 'docs' },   // member cards (SPEC.md 5.6, release 91), one per account at a keyed tag
   chunks:    { top: 'channels',  depth: 6, sub: 'media',    id: CHUNK_I, backend: 'media' },
   // Sealed pointers that tell a person which chats they are in (SPEC.md 6; the
   // mailbox of stage 5 delivered over the authenticated connection for now).
@@ -49,7 +53,7 @@ const KINDS = Object.freeze({
 export { KINDS };
 
 // Collections that accept `query` and `sub` with filters (SPEC.md 7.4).
-export const QUERYABLE = new Set(['channels', 'posts', 'acts', 'reads', 'typing', 'comments', 'chunks', 'search', 'inbox']);
+export const QUERYABLE = new Set(['channels', 'posts', 'acts', 'reads', 'typing', 'call', 'comments', 'chunks', 'search', 'inbox', 'roll']);
 
 const SUBS_BY_NAME = new Map(Object.entries(KINDS).filter(([, k]) => k.sub && k.top === 'channels').map(([name, k]) => [k.sub, name]));
 

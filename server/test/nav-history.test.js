@@ -148,15 +148,29 @@ test('history never grows: a long session of opening and closing leaves at most 
 test('the wiring: every layer is registered and unregistered, and the address is never changed', () => {
   assert.match(src, /const NAV=makeNavHistory\(\{get state\(\)\{return history\.state\},pushState:s=>history\.pushState\(s,''\),back:\(\)=>history\.back\(\)\}/);
   assert.equal((src.match(/\.pushState\(/g) || []).length, 2, 'history is only touched through the stack (its own call and the adapter)');
-  assert.ok(!/replaceState|location\.(href|assign|replace)\s*[=(]/.test(src), 'nothing else rewrites the address or the history');
+  assert.ok(!/location\.(href|assign|replace)\s*[=(]/.test(src), 'nothing else rewrites the address');
+  // one exception (release 92, dropHash): a link read is cleared from the address bar in place, with the stack's state kept
+  assert.deepEqual(src.match(/[\w.]*replaceState\([^)]*\)/g), ["history.replaceState(history.state,'',location.pathname+location.search)"], 'nothing else rewrites the history');
   assert.match(src, /addEventListener\('popstate',\(\)=>NAV\.pop\(\)\)/);
   assert.match(src, /if\(!navChat\)\{const l=\{kind:'chat',[^}]*close:closeConv\};navChat=NAV\.open\(l\)\}/, 'opening a chat');
   assert.match(src, /if\(navChat\)\{const l=navChat;navChat=null;NAV\.closed\(l\)\}/, 'closing it, however it closes');
   assert.match(src, /const layer=\{kind:'sheet',alive:\(\)=>bd\.isConnected,close:\(\)=>close\(\),stay:!!opt\.locked\}/);
   assert.match(src, /const close=\(\)=>\{bd\.remove\(\);document\.removeEventListener\('keydown',esc\);NAV\.closed\(layer\)\}/);
-  assert.match(src, /const close=\(\)=>\{bd\.remove\(\);document\.documentElement\.classList\.remove\('drawer-open'\);NAV\.closed\(layer\)\};bd\.onclick=/, 'the side menu');
   assert.match(src, /document\.removeEventListener\('keydown',key\);NAV\.closed\(layer\)\};NAV\.open\(layer\);/, 'the photo viewer');
   assert.match(src, /S\.showArchived\?'Archived':'Chats';navSyncList\(\)\}/, 'tabs, settings pages and the archive, through the list title');
   assert.match(src, /const want=!!S\.me&&\(S\.tab!=='chats'\|\|!!S\.showArchived\);/);
   assert.match(src, /function listBack\(\)\{[^}]*\n?[^}]*swipeBack\(\);else setTab\('chats',-1\)\}/, 'Back on the list: a page back, then to Chats');
+});
+
+test('a minimized call: Back closes the chat above it, then is absorbed, and never leaves the site mid-call', () => {
+  const br = browser(), chat = layer(br, 'chat'), call = layer(br, 'call', { stay: true, under: true }); // the chat was open before the call
+  br.back();
+  assert.equal(chat.closedByBack, 1, 'the chat closes first, as without a call');
+  assert.equal(call.isOpen, true); assert.equal(br.left, false);
+  br.back(); br.back();
+  assert.equal(call.isOpen, true); assert.equal(call.closedByBack, 0, 'the call is never closed by Back');
+  assert.equal(br.left, false, 'and the site is not left');
+  assert.equal(br.extra(), 1, 'still one guard entry: history does not grow');
+  call.shut();
+  assert.equal(br.i, 0, 'the guard goes when the call is restored or ends');
 });

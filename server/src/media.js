@@ -1,10 +1,10 @@
 // Media over HTTP (SPEC.md 7.7). Encrypted pieces travel as raw bytes, not as base64 inside socket frames.
 //
 //   GET    /media/limits                      the media limits (limits.js MEDIA_LIMITS), for the page; no ticket
-//   PUT    /media/<cid>/<mid>/<i>             store one piece, once (body: 12-byte iv, then ciphertext)
+//   PUT    /media/<cid>/<mid>/<i>             store one piece, once (body: 12-byte iv, then ciphertext); X-Hush-Oh: the uploader's token hash
 //   GET    /media/<cid>/<mid>/<i>             read one piece
-//   DELETE /media/<cid>/<mid>                 remove every piece of a media id
-//   POST   /media/<to>/<mid>/copy             copy the media named in X-Hush-From (<cid>/<mid>) to a new id (a forward)
+//   DELETE /media/<cid>/<mid>                 remove every piece of a media id; X-Hush-Ot: the media token (an admin needs none)
+//   POST   /media/<to>/<mid>/copy             copy the media named in X-Hush-From (<cid>/<mid>) to a new id (a forward); X-Hush-Oh: the forwarder's
 //
 // An HTTP request carries no chat level of its own. A connection that has opened a chat with its room key asks
 // for a short-lived ticket over the socket (`media.ticket`) and sends it as `Authorization: Hush <ticket>`. Each
@@ -12,7 +12,6 @@
 // socket ends access at once, and room keys never travel over HTTP. Nothing here is logged per request.
 
 import { randomBytes } from 'node:crypto';
-import { statfsSync } from 'node:fs';
 import { HushError, fail } from './errors.js';
 import { BucketMap, maxPieces, clientAddress } from './limits.js';
 import { log } from './log.js';
@@ -81,25 +80,21 @@ function readBody(req, maxBytes) {
   });
 }
 
-export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = false, originOk = () => true, now = Date.now, diskFree = null, dataDir }) {
+// `disk` is the server-wide storage guard (disk.js): the free-disk floor and the cap on all media together.
+export function createMediaHttp({ store, limits, tickets, tagger, disk, trustProxy = false, originOk = () => true }) {
   const M = limits.media;
   const writes = new BucketMap(M.pieceWritesPerMinPerChat, M.pieceWritesPerMinPerChat / 60);
   const reads = new BucketMap(M.pieceReadsPerMinPerAddr, M.pieceReadsPerMinPerAddr / 60);
-  let disk = { at: -Infinity, ok: true };
-
-  // Refuse new media when the disk is nearly full (SPEC.md 8.6): under minFreeDisk of it free and under
-  // minFreeBytes. Looked at once a minute at most. `diskFree()` (tests) returns { free, total } in bytes.
-  function diskOk() {
-    if (!diskFree && now() - disk.at < 60_000) return disk.ok;
-    let ok = true;
-    try {
-      let free, total;
-      if (diskFree) ({ free, total } = diskFree());
-      else { const s = statfsSync(dataDir); free = Number(s.bavail) * Number(s.bsize); total = Number(s.blocks) * Number(s.bsize); }
-      ok = !(free / Math.max(1, total) < M.minFreeDisk && free < M.minFreeBytes);
-    } catch { /* unknown: allow */ }
-    disk = { at: now(), ok };
-    return ok;
+  const acctBytes = new BucketMap(M.uploadBytesPerDayPerAcct, M.uploadBytesPerDayPerAcct / 86400, 86400_000);
+  const addrBytes = new BucketMap(M.uploadBytesPerDayPerAddr, M.uploadBytesPerDayPerAddr / 86400, 86400_000);
+  // `full` with scope `server` is the disk or the server's media cap, which no delete of the page's own will cure soon;
+  // the store's own `full` (the chat's allowance) reaches the page with scope `chat`.
+  const full = () => { throw Object.assign(new HushError('full', 'the server is out of space for media right now'), { scope: 'server' }); };
+  // Room for `n` more bytes: on the server, then in the account's and the address's daily budgets (SPEC.md 9.4).
+  function admit(n, handle, req) {
+    if (!disk.admit(n)) full();
+    if (!acctBytes.take(handle, n)) fail('ratelimit', 'you have sent a lot of files today; more tomorrow');
+    if (!addrBytes.take(tagger.tagDay(clientAddress(req, trustProxy)), n)) fail('ratelimit', 'a lot of files were sent from here today; more tomorrow');
   }
 
   function cors(req) {
@@ -107,7 +102,7 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
     if (typeof o !== 'string' || !o || !originOk(req)) return {};
     return {
       'access-control-allow-origin': o, 'access-control-allow-methods': 'GET, PUT, POST, DELETE',
-      'access-control-allow-headers': 'authorization, content-type, x-hush-exp, x-hush-from, x-hush-from-ticket',
+      'access-control-allow-headers': 'authorization, content-type, x-hush-exp, x-hush-from, x-hush-from-ticket, x-hush-oh, x-hush-ot',
       'access-control-max-age': '600', vary: 'origin',
     };
   }
@@ -120,6 +115,18 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
     if (v === undefined || v === '') return 0;
     if (typeof v !== 'string' || !/^[0-9]{1,16}$/.test(v)) fail('invalid', 'media: bad X-Hush-Exp');
     return Number(v);
+  };
+  // The uploader's media token hash (SPEC.md 7.7): 64 hex, kept with the media id so its holder may delete the file.
+  // shortcut: optional in release 80 so a page from before it still uploads; require it once that page release is out.
+  const ohOf = (v) => {
+    if (v === undefined || v === '') return '';
+    if (typeof v !== 'string' || !/^[0-9a-fA-F]{64}$/.test(v)) fail('invalid', 'media: bad X-Hush-Oh');
+    return v.toLowerCase();
+  };
+  const otOf = (v) => {
+    if (v === undefined || v === '') return undefined;
+    if (typeof v !== 'string' || v.length > 128) fail('invalid', 'media: bad X-Hush-Ot');
+    return v;
   };
 
   async function serve(req, res, m, extra) {
@@ -135,26 +142,27 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
       return;
     }
     if (req.method === 'PUT' && last !== undefined && last !== 'copy') {
-      const exp = expOf(req.headers['x-hush-exp']);
+      const exp = expOf(req.headers['x-hush-exp']), oh = ohOf(req.headers['x-hush-oh']);
       if (!writes.take(cid)) fail('ratelimit', 'too many media writes in this chat; slow down');
-      if (!diskOk()) fail('full', 'the server is out of space for media right now');
+      if (!disk.ok()) full();                              // before the body is read: nothing to do with it
       const body = await readBody(req, M.pieceBytes + 28);
       if (conn.closed) fail('unauth', 'the connection behind this ticket closed');   // its level was revoked while the body arrived
-      const r = store.mediaPut({ cid, mid, i: last, body, exp }, actor);
+      admit(body.length, actor.handle, req);
+      const r = store.mediaPut({ cid, mid, i: last, body, exp, oh }, actor);
       json(res, r.created ? 201 : 200, { ok: true, created: r.created }, extra);
       return;
     }
     if (req.method === 'DELETE' && last === undefined) {
-      json(res, 200, { ok: true, n: store.mediaDelete({ cid, mid }, actor) }, extra);
+      json(res, 200, { ok: true, n: store.mediaDelete({ cid, mid, ot: otOf(req.headers['x-hush-ot']) }, actor) }, extra);
       return;
     }
     if (req.method === 'POST' && last === 'copy') {
       const fm = /^([A-Za-z0-9_-]{13,23})\/(m[A-Za-z0-9]{12})$/.exec(String(req.headers['x-hush-from'] || ''));
       if (!fm) fail('invalid', 'media: X-Hush-From must be <cid>/<mid>');
       const src = tickets.resolve(req.headers['x-hush-from-ticket'], fm[1]);
-      const exp = expOf(req.headers['x-hush-exp']);
-      if (!diskOk()) fail('full', 'the server is out of space for media right now');
-      const r = store.mediaCopy({ from: fm[1], fromMid: fm[2], to: cid, mid, exp }, src.actor(), actor);
+      const exp = expOf(req.headers['x-hush-exp']), oh = ohOf(req.headers['x-hush-oh']);
+      admit(store.mediaIdBytes(fm[1], fm[2]), actor.handle, req);   // 0 for a missing source, which the copy then refuses
+      const r = store.mediaCopy({ from: fm[1], fromMid: fm[2], to: cid, mid, exp, oh }, src.actor(), actor);
       json(res, r.copied ? 201 : 200, { ok: true, copied: r.copied }, extra);
       return;
     }
@@ -162,7 +170,7 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
   }
 
   // Returns true when the request was a media request (answered or being answered).
-  return function handle(req, res) {
+  function handle(req, res) {
     const url = (req.url || '').split('?')[0];
     if (url !== '/media/limits' && !url.startsWith('/media/')) return false;
     const extra = cors(req);
@@ -175,11 +183,15 @@ export function createMediaHttp({ store, limits, tickets, tagger, trustProxy = f
     const m = ROUTE.exec(url);
     const fault = (e) => {
       if (!(e instanceof HushError)) log.error('media.failed', e);
-      if (!res.headersSent) json(res, statusOf(e), { ok: false, e: e instanceof HushError ? e.code : 'internal', m: e instanceof HushError ? e.message : 'internal error' }, extra);
+      const out = { ok: false, e: e instanceof HushError ? e.code : 'internal', m: e instanceof HushError ? e.message : 'internal error' };
+      if (out.e === 'full') out.scope = e.scope || 'chat';
+      if (!res.headersSent) json(res, statusOf(e), out, extra);
       if (req.readableEnded === false) req.resume();       // drain an unread body so the reply goes out
     };
     if (!m) { fault(new HushError('notfound', 'no such media address')); return true; }
     serve(req, res, m, extra).catch(fault);
     return true;
-  };
+  }
+  handle.prune = () => { writes.prune(); reads.prune(); acctBytes.prune(); addrBytes.prune(); };
+  return handle;
 }

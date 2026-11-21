@@ -10,9 +10,10 @@ const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
 const a = src.indexOf('/* ===== HUSH SWIPE NAV BEGIN ===== */'), b = src.indexOf('/* ===== HUSH SWIPE NAV END ===== */');
 assert.ok(a > 0 && b > a, 'swipe nav markers present in app/ui.js');
 const block = src.slice(a, b);
-const { SWIPE, swipeAxis, swipeVelocity, swipeCommits, tabStep, swipePlan } =
-  new Function(block + '\nreturn { SWIPE, swipeAxis, swipeVelocity, swipeCommits, tabStep, swipePlan };')();
-const TABS = ['chats', 'contacts', 'profile'];
+const { SWIPE, swipeAxis, swipeVelocity, swipeCommits, swipePlan } =
+  new Function(block + '\nreturn { SWIPE, swipeAxis, swipeVelocity, swipeCommits, swipePlan };')();
+const TABS = ['chats', 'calls', 'profile'];
+const setup = src.slice(src.indexOf('function setupSwipeNav('), src.indexOf('\n}\n', src.indexOf('function setupSwipeNav(')));
 
 test('the rules are pure: no page, server or storage is touched to decide a swipe', () => {
   assert.ok(!/document|window|\$\(|S\.|localStorage|fetch\(/.test(block));
@@ -43,14 +44,11 @@ test('a swipe counts past about a third of the screen, or as a fling; a fling ba
   assert.equal(swipeCommits(300, 390, -0.6), false, 'flung back the way it came');
 });
 
-test('tabs: a swipe left brings the next tab, a swipe right the one before, and the ends stop', () => {
-  assert.equal(tabStep(TABS, 'chats', -1), 'contacts');
-  assert.equal(tabStep(TABS, 'contacts', -1), 'profile');
-  assert.equal(tabStep(TABS, 'profile', 1), 'contacts');
-  assert.equal(tabStep(TABS, 'contacts', 1), 'chats');
-  assert.equal(tabStep(TABS, 'chats', 1), null);
-  assert.equal(tabStep(TABS, 'profile', -1), null);
-  assert.equal(tabStep(TABS, 'nowhere', -1), null);
+test('no swipe moves between the tabs (step E): on a list with nothing to go back from, a sideways swipe does nothing', () => {
+  for (const tab of TABS) for (const dir of [1, -1]) for (const edge of [true, false]) for (const nearLeft of [true, false])
+    assert.equal(swipePlan({ dir, edge, nearLeft, layer: null, blocked: false, chat: false, onList: true, sub: false, tab, tabs: TABS }), null, `${tab} ${dir} ${edge} ${nearLeft}`);
+  assert.ok(!/tabStep/.test(src) && !/kind:'tab'|kind:'end'|kind==='tab'|kind==='end'/.test(block + setup), 'neither the step from tab to tab nor the small give at the ends is left');
+  assert.ok(!/setTab\(/.test(setup), 'the swipe code never changes the tab');
 });
 
 const base = { dir: 1, edge: false, layer: null, blocked: false, chat: false, onList: true, sub: false, tab: 'chats', tabs: TABS };
@@ -80,52 +78,37 @@ test('sheets close with a swipe right from the edge; one that cannot be dismisse
   assert.equal(plan({ layer: 'locked', edge: true }), null);
 });
 
-test('the side menu closes with a swipe left', () => {
-  assert.deepEqual(plan({ layer: 'drawer', dir: -1 }), { kind: 'drawer' });
-  assert.deepEqual(plan({ layer: 'drawer', dir: -1, blocked: true }), { kind: 'drawer' });
-  assert.equal(plan({ layer: 'drawer', dir: 1 }), null);
-});
-
-test('on the list: swipes move between tabs, and a sub-page (settings page, archive) goes back first', () => {
-  assert.deepEqual(plan({ dir: -1 }), { kind: 'tab', to: 'contacts' });
-  assert.deepEqual(plan({ dir: -1, tab: 'contacts' }), { kind: 'tab', to: 'profile' });
-  assert.deepEqual(plan({ dir: 1, tab: 'profile' }), { kind: 'tab', to: 'contacts' });
-  assert.deepEqual(plan({ dir: 1, tab: 'chats' }), { kind: 'end' }, 'nothing to the left of Chats: a small give, then back');
-  assert.deepEqual(plan({ dir: -1, tab: 'profile' }), { kind: 'end' });
+test('on the list: a sub-page (settings page, archive) goes back with a swipe right, and that is all a swipe does there', () => {
   assert.deepEqual(plan({ dir: 1, tab: 'profile', sub: true }), { kind: 'sub' }, 'Privacy back to Settings');
   assert.deepEqual(plan({ dir: 1, tab: 'chats', sub: true }), { kind: 'sub' }, 'Archived back to Chats');
-  assert.deepEqual(plan({ dir: -1, tab: 'chats', sub: true }), { kind: 'tab', to: 'contacts' });
-  assert.equal(plan({ dir: -1, blocked: true }), null, 'the search box and the like keep their drag');
+  assert.equal(plan({ dir: -1, tab: 'chats', sub: true }), null, 'to the left there is nothing');
+  assert.equal(plan({ dir: 1, sub: true, blocked: true }), null, 'the search box and the like keep their drag');
+  assert.deepEqual(plan({ dir: 1, sub: true, blocked: true, edge: true }), { kind: 'sub' }, 'the edge always works');
   assert.equal(plan({ onList: false }), null);
+  assert.equal(plan({ onList: false, sub: true }), null);
 });
 
-test('the side menu comes out with a swipe right on the Chats list, from the left part, not only the very edge', () => {
-  assert.deepEqual(plan({ nearLeft: true }), { kind: 'menu' }, 'a little in from the edge, where iPhone Safari does not take it');
-  assert.deepEqual(plan({ nearLeft: true, edge: true }), { kind: 'menu' }, 'and from the edge itself where the browser allows');
-  assert.deepEqual(plan({ nearLeft: false }), { kind: 'end' }, 'from the right side of the list: just the small give');
-  assert.deepEqual(plan({ nearLeft: true, dir: -1 }), { kind: 'tab', to: 'contacts' }, 'to the left is still the next tab');
-  assert.equal(plan({ nearLeft: true, blocked: true }), null, 'not from the search box');
-  assert.ok(390 * SWIPE.menuZone > SWIPE.edge * 4, 'on a phone the zone reaches well past the strip Safari keeps');
+test('the side menu is gone (step E): no key, no swipe that pulls it out, no code that draws it', () => {
+  for (const o of [{ nearLeft: true }, { nearLeft: true, edge: true }, { nearLeft: false }]) assert.equal(plan(o), null, 'a swipe right on the Chats list: ' + JSON.stringify(o));
+  assert.ok(!/drawer|openDrawer|menuBtn|menuZone|nearLeft|kind:'menu'|kind==='menu'/.test(src), 'app/ui.js names neither the menu, its key nor its swipe');
+  assert.ok(!/menuBtn|Open menu/.test(html), 'index.html has no menu key');
 });
 
-test('wherever a swipe right goes back, back wins over the side menu', () => {
+test('a swipe right goes back from an open chat, a sub-page and a sheet, wherever on the left it starts', () => {
   const near = { nearLeft: true, edge: true };
   assert.deepEqual(plan({ ...near, chat: true, onList: false }), { kind: 'chat' }, 'an open chat');
   assert.deepEqual(plan({ ...near, sub: true }), { kind: 'sub' }, 'the archive');
   assert.deepEqual(plan({ ...near, tab: 'profile', sub: true }), { kind: 'sub' }, 'a settings page');
-  assert.deepEqual(plan({ ...near, tab: 'contacts' }), { kind: 'tab', to: 'chats' }, 'Contacts steps back to Chats');
-  assert.deepEqual(plan({ ...near, tab: 'profile' }), { kind: 'tab', to: 'contacts' });
   assert.deepEqual(plan({ ...near, layer: 'sheet' }), { kind: 'sheet' }, 'a sheet');
-  assert.equal(plan({ ...near, layer: 'drawer' }), null, 'the menu is already out');
   for (const layer of ['viewer', 'cover', 'locked']) assert.equal(plan({ ...near, layer }), null, layer);
 });
 
-test('the bottom bar shows the same three tabs, in the same order, as the swipe steps through', () => {
+test('the bottom bar shows the three tabs the page knows, in the same order', () => {
   const nav = html.slice(html.indexOf('<nav class="tabs"'), html.indexOf('</nav>'));
   const order = [...nav.matchAll(/data-tab="([a-z]+)"/g)].map((m) => m[1]);
   assert.deepEqual(order, TABS);
   for (const btn of nav.match(/<button[^>]*>/g)) assert.ok(!/hidden|display:none/.test(btn), 'no tab is hidden: ' + btn);
-  assert.match(src, /const TABS=\['chats','contacts','profile'\]/);
+  assert.match(src, /const TABS=\['chats','calls','profile'\]/);
   assert.match(src, /b\.setAttribute\('aria-selected',String\(b\.dataset\.tab===t\)\)/, 'the tab shown is the tab lit');
 });
 
@@ -137,9 +120,9 @@ test('one controller: the old half-working handlers are gone and the new one sta
   assert.match(src, /addSwipe\(wrap,\{dir:-1,/, 'swipe-to-reply goes left, the opposite way to back');
 });
 
-test('the wiring: dismissable sheets and the menu expose their close, the viewer and covers are seen, a swipe is not a tap', () => {
+test('the wiring: dismissable sheets expose their close, the viewer and covers are seen, a swipe is not a tap', () => {
   assert.match(src, /document\.addEventListener\('keydown',esc\);bd\._close=close\}/, 'only a dismissable sheet gets _close');
-  assert.match(src, /bd\.onclick=e=>\{if\(e\.target===bd\)close\(\)\};bd\._close=close;/, 'the side menu');
+  assert.match(src, /return bd\._close\?\{kind:'sheet',bd,node:bd\.querySelector\('\.sheet'\)\|\|bd\.firstElementChild\}:\{kind:'locked'\};/, 'a layer with a close is a sheet, one without stays');
   assert.match(src, /querySelector\('\.lock,\.onboard'\)\)return \{kind:'cover'\}/);
   assert.match(src, /querySelector\('\.lightbox'\)\)return \{kind:'viewer'\}/);
   assert.match(src, /\{passive:false,capture:true\}/, 'touchmove can stop the page scrolling under a swipe');
@@ -148,13 +131,12 @@ test('the wiring: dismissable sheets and the menu expose their close, the viewer
   for (const s of ['input', 'textarea', '[contenteditable="true"]', '.vbars', '.recbar', '.seg', 'video']) assert.ok(own.includes(s), s);
 });
 
-test('the wiring for the menu swipe: where it may start, and it follows the finger out or goes away again', () => {
-  assert.match(src, /nearLeft:k\.x0-lr\.left<=lr\.width\*SWIPE\.menuZone\}/, 'measured from the left of the list pane');
-  assert.match(src, /else if\(plan\.kind==='menu'\)\{[^}]*openDrawer\(\);const D=swipeLayer\(\);if\(!D\|\|D\.kind!=='drawer'\)return null;/);
-  assert.match(src, /plan\.node\.style\.animation='none';plan\.node\.style\.transform='translateX\(-100%\)'/, 'starts shut, without its own slide-in');
-  assert.match(src, /if\(p\.kind==='menu'\)\{p\.node\.style\.transform=`translateX\(\$\{Math\.min\(0,d-p\.width\)\}px\)`/);
-  assert.match(src, /if\(p\.kind==='menu'\)\{if\(go\)\{[^}]*\}else p\.bd\._close\(\);tidy\(p\);return\}/, 'let go early and it closes, through the same close as a tap');
-  assert.match(src, /\$\('#menuBtn'\)\.onclick=\(\)=>\{haptic\(\);openDrawer\(\)\};/, 'the menu button still opens it, with a light tap');
+test('the wiring of the three back swipes is what it was: what moves under the finger, and what a finished swipe does', () => {
+  assert.ok(setup.includes("onList:!L&&!inChat&&list.contains(k.target),sub:S.tab==='profile'?isSettingsPage():S.tab==='chats'&&!!S.showArchived});"), 'a sub-page is a settings page or the archive');
+  assert.ok(setup.includes("if(plan.kind==='chat'){plan.node=chat;plan.under=list;app.classList.add('sw-back')}\n    else if(plan.kind==='sheet'){plan.node=L.node;plan.bd=L.bd}\n    else{plan.node=tabView();list.classList.add('sw-clip')}"), 'the chat over the list, the sheet over its backdrop, the sub-page in its list');
+  assert.ok(setup.includes("p.node.style.transform=`translateX(${d}px)`;\n    if(p.kind==='chat')p.under.style.transform=`translateX(${-25*(1-f)}%)`;\n    else if(p.kind==='sheet')p.bd.style.backgroundColor=`rgba(10,8,25,${.45*(1-f)})`;\n    else p.node.style.opacity=String(1-f*.5)};"), 'each follows the finger as before');
+  assert.ok(setup.includes("if(p.kind==='chat'){app.classList.add('sw-quiet');tidy(p);closeConv();requestAnimationFrame(()=>requestAnimationFrame(()=>app.classList.remove('sw-quiet')))}\n      else if(p.kind==='sheet'){p.bd.style.visibility='hidden';(p.bd._close||(()=>p.bd.remove()))();tidy(p)}\n      else{tidy(p);swipeBack()}"), 'and ends as its Back button does');
+  assert.ok(setup.includes("settle(k.plan,e.type==='touchend'&&swipeCommits(d,k.plan.width,swipeVelocity(k.pts)*k.plan.dir))};"), 'a swipe counts by the same rule');
 });
 
 test('the back step a swipe takes matches the Back buttons', () => {

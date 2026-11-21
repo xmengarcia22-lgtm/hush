@@ -14,15 +14,17 @@ test('the sweep removes link requests older than 10 minutes, keeps fresh ones an
   let t = 1_000_000_000_000;
   const store = new Store({ dataDir: dir, now: () => t }).open();
   try {
-    const old = 'linkreqs/' + 'A'.repeat(43), fresh = 'linkreqs/' + 'B'.repeat(43), dir1 = 'directory/alice';
+    const old = 'linkreqs/' + 'A'.repeat(43), ask = 'linkreqs/' + 'C'.repeat(43), fresh = 'linkreqs/' + 'B'.repeat(43), dir1 = 'directory/alice';
     store.set(old, { state: 'wait', ts: t + 365 * 86400e3 });   // a client's own clock is not believed
+    store.set(ask, { state: 'ask', ts: t, n: 'N'.repeat(43), pub: { x: 'x', y: 'y' }, devk: { id: 'dev0000001', x: 'a', y: 'b', sx: 'c', sy: 'd' } });   // a new device's ask (release 58) ages like the rest
     store.set(dir1, { handle: 'alice', ecdh: { x: 'x', y: 'y' }, sig: { x: 'x', y: 'y' } });
     t += 9 * 60_000;
     store.set(fresh, { state: 'wait', ts: 0 });
     assert.equal(store.sweepLinkreqs(), 0, 'nothing is 10 minutes old yet');
     t += 2 * 60_000;
-    assert.equal(store.sweepLinkreqs(), 1);
+    assert.equal(store.sweepLinkreqs(), 2);
     assert.equal(store.get(old).d, null);
+    assert.equal(store.get(ask).d, null);
     assert.ok(store.get(fresh).d, 'a 2-minute-old request stays');
     assert.ok(store.get(dir1).d, 'other collections are untouched, however old');
     t += 60 * 60_000;

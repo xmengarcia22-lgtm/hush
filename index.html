@@ -2,36 +2,35 @@
 <html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob: ws://127.0.0.1:8080 http://127.0.0.1:8080 wss://hushappofficial.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob: wss://hushappofficial.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Hush</title>
 <meta name="description" content="Hush: private messaging with end-to-end encryption.">
-<meta name="theme-color" content="#D7E5F1" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#111C28" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F2F2F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="icon" type="image/png" sizes="32x32" href="app/icon-32.png">
 <link rel="apple-touch-icon" href="app/icon-180.png">
-<link rel="stylesheet" href="app/styles.css?v=3b1e4c540291" integrity="sha256-Ox5MVAKRI2W6V7ht+fiCfPbk7jg5n9d04eG1+FPSPag=">
+<link rel="stylesheet" href="app/styles.css?v=5398de885637" integrity="sha256-U5jeiFY3fAYuiI3Lr8DyGgUTTjm+R5bfBb7VeM8NKmg=">
 </head>
 <body>
 <div id="app">
   <section class="pane pane-list">
     <div class="bar top">
-      <button class="icon-btn" id="menuBtn" aria-label="Open menu"></button>
       <h1 class="list-title" id="listTitle">Chats</h1>
       <span class="net" id="netStatus" aria-live="polite"></span>
     </div>
     <div class="searchrow"><label class="search"><span id="searchIc"></span><input id="q" placeholder="Search chats" autocomplete="off" enterkeyhint="search"></label></div>
     <div id="banner"></div>
     <div id="threads"></div>
-    <div id="contacts" hidden></div>
+    <div id="calls" hidden></div>
     <div id="profileView" hidden></div>
     <button class="fab" id="newBtn" aria-label="New message"></button>
     <nav class="tabs" role="tablist">
       <button class="tab" data-tab="chats" role="tab" aria-selected="true"><span class="tab-ic" id="tabChatsIc"></span><span>Chats</span><span class="tab-n" id="tabN" hidden></span></button>
-      <button class="tab" data-tab="contacts" role="tab" aria-selected="false"><span class="tab-ic" id="tabContactsIc"></span><span>Contacts</span></button>
-      <button class="tab" data-tab="profile" role="tab" aria-selected="false"><span class="tab-ic" id="tabProfileIc"></span><span>Profile</span></button>
+      <button class="tab" data-tab="calls" role="tab" aria-selected="false"><span class="tab-ic" id="tabCallsIc"></span><span>Calls</span><span class="tab-n red" id="tabCallsN" hidden></span></button>
+      <button class="tab" data-tab="profile" role="tab" aria-selected="false"><span class="tab-ic" id="tabProfileIc"></span><span>Settings</span></button>
     </nav>
   </section>
   <section class="pane pane-chat" id="chatPane">
@@ -41,8 +40,8 @@
 
 <script src="vendor/qrcode.min.js?v=164fc2c1c9ea" integrity="sha256-Fk/Cwcnq8KA6qN/bhV6C5BpcaSL7rYuzI4EWIH4mvvc="></script>
 <script src="app/config.js?v=a099cab4098e" integrity="sha256-oJnKtAmOK7oDkUkmauvad8AiFwVTVRMNpTh/jkZxaBo="></script>
-<script src="app/crypto.js?v=e67a1946f034" integrity="sha256-5noZRvA07Yajq5B7t6Rx2fZFvbHOJT1odnapoxivfcc="></script>
-<script src="app/adapter.js?v=a21db4d366ba" integrity="sha256-oh2002a61xRtOkm5oseObVloWH6dYIQcs67P7vpV+uY="></script>
-<script src="app/ui.js?v=e657a0165a8b" integrity="sha256-5legFlqL/5BPvap+nn1sSwLMTUc+dOEBSFhUtMZ59kI="></script>
+<script src="app/crypto.js?v=5ddcc74c8af9" integrity="sha256-XdzHTIr5aq9c8aFEw4BPXAvCj3kAXLqoVKEcK4NnhD4="></script>
+<script src="app/adapter.js?v=b93be34cb3af" integrity="sha256-uTvjTLOvTKqrz8+DFJZ7eSleOTeN+qOJRgL6MDw7Tgo="></script>
+<script src="app/ui.js?v=6c764fb835cf" integrity="sha256-bHZPuDXPuPk/Wr7U5tslx2PFznwJkA3oHfA7/+YLeZc="></script>
 </body>
 </html>

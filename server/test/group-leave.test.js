@@ -1,7 +1,8 @@
-// A leave-and-rejoin loop can't use up a group's epochs (SPEC.md 5.6 "Leave"). A chat has epochs 0 to 31 for its
+// A leave-and-rejoin loop can't use up a group's epochs (SPEC.md 5.6 "Leave"). A group or DM has epochs 0 to 31 for its
 // whole life, and any member can make admins' pages rotate by posting "leave", getting back in and leaving again.
-// The server refuses a rotation marked `why: "leave"` past `leaveRotateMaxEpoch` (23), so the last epochs stay for
-// removals an admin chooses; the page then drops the leaver from the sealed member list without a new key.
+// The server refuses a group's rotation marked `why: "leave"` past `leaveRotateMaxEpoch` (23), so the last epochs stay for
+// removals an admin chooses; the page then drops the leaver from the sealed member list without a new key. A channel has no
+// epoch cap and a time-based leave limit instead (release 91, channel-keys.test.js).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -125,11 +126,11 @@ const createHushAdapter = new Function(lift('/* ===== HUSH ADAPTER BEGIN ===== *
 const PAGE = [
   lift('const metaOf=', '\n'), lift('const epochOf=', '\n'),
   lift('async function rotateTo(', 'const dmEpochBusy='),
-  lift('async function freshChan(', '\n'), lift('async function chatAnd(', '\n'),
+  lift('const chatRec=', '\nconst dmPeer='), lift('async function freshChan(', '\n'), lift('async function chatAnd(', '\n'),
   lift('async function kickMember(', 'async function rotateAdmins('),
   lift('const reconciled=new Set();', 'function noteAccepted('),
 ].join('\n');
-const STUBS = ['S', 'typeOf', 'isAdmin', 'isOwner', 'loadDir', 'wrapAll', 'sealMeta', 'sealMetaFor', 'showMeta', 'memberCapFrom', 'ksPut', 'b64', 'ls', 'convById', 'rotateAdmins'];
+const STUBS = ['S', 'typeOf', 'isAdmin', 'isOwner', 'loadDir', 'wrapAll', 'sealMeta', 'sealMetaFor', 'showMeta', 'memberCapFrom', 'ksPut', 'b64', 'ls', 'convById', 'rotateAdmins', 'ksMap'];
 const page = new Function(...STUBS, PAGE + '\nreturn { reconcileSvc, kickMember, chatAnd };');
 
 const proofOf = (id) => ({ h: id.handle, pub: id.sig, dev: '', signDev: null, signAcct: (m) => signText(id.sigKey, m) });
@@ -155,10 +156,10 @@ async function alicePage(limits, members, fn) {
       async (raw, hs) => Object.fromEntries(hs.map(() => [label(), wrap()])),
       async (c, e, raw, v) => seal(e, v), async (c, v) => seal(c.epoch || 0, v), async (c) => ({ ...c, ...dec64(c.meta) }),
       async (c, e, raw) => Buffer.from(raw).toString('base64url'), () => {}, (b) => Buffer.from(b).toString('base64'),
-      { get: () => null, set: () => {} }, () => null, async () => {}));
+      { get: () => null, set: () => {} }, () => null, async () => {}, () => ({})));
     t.record = async () => ({ id: cid, ...(await realDoc('channels/' + cid).get()).data() });
     t.server = async () => { const d = await t.record(); return { epoch: d.epoch, meta: d.meta, ...dec64(d.meta) }; };
-    t.conv = async () => ({ id: cid, type: 'group', visibility: 'private', owner: 'alice', ...(await t.server()) });
+    t.conv = async () => ({ id: cid, type: 'group', visibility: 'private', owner: 'alice', ...(await t.server()), _unlocked: true });   // the list copy, its list read (showMeta)
     await fn(t);
   } finally { db.close(); await P.stop(); }
 }
@@ -225,7 +226,7 @@ test('the page: when another admin rotated first, the leave is redone once from 
       await X.ok('chat.open', { cid, cap: t.caps.a });
       // The other admin blocked Dave (epoch 1) before Alice's page saw Carol's "left".
       await X.ok('chat.rotate', { cid, epoch: 1, keys: { [label()]: wrap() }, cap: cap(), meta: { e: 1, iv: 'aXY=', ct: enc64({ owner: 'alice', admins: [], members: ['alice', 'bob', 'carol'], banned: ['dave'] }) } });
-      await reconcileSvc({ id: cid, type: 'group', visibility: 'private', owner: 'alice', epoch: 0, members: ['alice', 'bob', 'carol', 'dave'] }, [note('leave', 'carol', 'r1')]);
+      await reconcileSvc({ id: cid, type: 'group', visibility: 'private', owner: 'alice', epoch: 0, _unlocked: true, members: ['alice', 'bob', 'carol', 'dave'] }, [note('leave', 'carol', 'r1')]);
       assert.deepEqual(refusals, ['conflict'], 'the stale rotation lost the race');
       assert.deepEqual(rot, ['leave', 'leave'], 'and was redone once, from the fresh record, still marked as a leave');
       assert.equal(ups.length, 0, 'no list-only fallback while leaves may still rotate');
@@ -236,7 +237,7 @@ test('the page: when another admin rotated first, the leave is redone once from 
       // The other admin already handled Bob's "left": nothing more to do.
       await X.ok('chat.open', { cid, cap: t.caps.a });            // Alice's page re-keyed it: the other admin opens it again
       await X.ok('chat.rotate', { cid, epoch: 3, keys: { [label()]: wrap() }, cap: cap(), meta: { e: 3, iv: 'aXY=', ct: enc64({ owner: 'alice', admins: [], members: ['alice'], banned: ['dave'] }) } });
-      await reconcileSvc({ id: cid, type: 'group', visibility: 'private', owner: 'alice', epoch: 0, members: ['alice', 'bob'] }, [note('leave', 'bob', 'r2')]);
+      await reconcileSvc({ id: cid, type: 'group', visibility: 'private', owner: 'alice', epoch: 0, _unlocked: true, members: ['alice', 'bob'] }, [note('leave', 'bob', 'r2')]);
       assert.equal(ups.length, 0, 'no update');
       s = await t.server();
       assert.deepEqual([s.epoch, s.members], [3, ['alice']]);

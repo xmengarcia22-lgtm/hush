@@ -214,7 +214,7 @@ const kickSrc = cut('async function kickMember(', 'async function rotateAdmins('
 const unbanSrc = cut('async function unban(', 'const reconciled=');
 
 test('an admin page keeps a blocked author and a join note from before the last key change out of the member list', async () => {
-  const metas = [], conv = { id: G, type: 'group', visibility: 'private', epoch: 3, owner: 'alice', admins: [], members: ['alice', 'bob'], banned: ['mallory'] };
+  const metas = [], conv = { id: G, type: 'group', visibility: 'private', epoch: 3, owner: 'alice', admins: [], members: ['alice', 'bob'], banned: ['mallory'], _unlocked: true };   // a list the page read (showMeta)
   const S = { me: { handle: 'alice' }, db: { doc: () => ({ update: async (d) => { metas.push(d.meta); } }) } };
   const reconcileSvc = new Function('S', 'typeOf', 'isAdmin', 'chatAnd', 'sealMetaFor', 'kickMember', [epochSrc, metaOfSrc, reconcileSrc, 'return reconcileSvc;'].join('\n'))(
     S, (c) => c.type, () => true, async () => [conv, conv], async (_c, v) => v, async () => { throw new Error('nobody left'); });
@@ -245,7 +245,7 @@ function kickPage(chat, shown, o = {}) {
 
 test('blocking asks the server before the key changes, unblocking lets them back, and a new key is never wrapped for someone blocked', async () => {
   const chat = { id: G, type: 'group', visibility: 'private', epoch: 1 };
-  const shown = { ...chat, owner: 'alice', admins: [], members: ['alice', 'bob', 'mallory'], banned: [] };
+  const shown = { ...chat, owner: 'alice', admins: [], members: ['alice', 'bob', 'mallory'], banned: [], _unlocked: true };
   let p = kickPage(chat, shown);
   await p.kickMember(G, 'mallory');
   assert.deepEqual(p.calls, [['ban', 'mallory', true], ['wrap', ['alice', 'bob']], ['seal', ['alice', 'bob'], ['mallory']], ['rotate', 2]]);
