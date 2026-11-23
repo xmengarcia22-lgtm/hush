@@ -76,6 +76,10 @@ export const DEFAULT_LIMITS = Object.freeze({
   boxBytesPerDayPerAcct: 20e6,  // name no owner, so nothing else could ever clear them
   socketsPerAddr: 40,           // WebSocket connections open at once per address (a fixed tag): a phone on a flaky network keeps
                                 // dead sockets counted until idleMs, and carrier NAT puts several people behind one IPv4
+  frameMsPerMinPerAddr: 3000,   // server time the frames of one address may take a minute, and at once, over all its connections
+                                // (release 112): an honest minute measured 0.2 to 0.7 s for one or two pages starting with 250 chats
+  unsentBytesPerAddr: 64 << 20, // unsent to one address over all its connections past this, its frames wait, and a push to one of them
+                                // that holds more than sendBufferBytes closes it (release 112)
   chatCreatesPerDay: 200,       // per account
   bansPerChat: 1000,            // usernames blocked from one group or channel (chat.ban, SPEC.md 5.6)
   searchPerMin: 30,             // per connection
@@ -168,6 +172,14 @@ export class BucketMap {
     const b = this.map.get(key);
     return b ? b.peek(now) : true;
   }
+  // Takes n whatever is left, below zero if need be: for what is only known once it is spent (bytes counted, time taken). Never below
+  // minus the capacity, so whoever took from it is at most one capacity's refill from being served again, however much they took: a
+  // flood that goes on being refused would otherwise keep its address out long after it ends.
+  spend(key, n, now = Date.now()) {
+    this.take(key, 0, now);
+    const b = this.map.get(key);
+    b.tokens = Math.max(b.tokens - n, -this.capacity);
+  }
   tokensLeft(key, now = Date.now()) {
     const b = this.map.get(key);
     if (!b) return this.capacity;
@@ -201,7 +213,8 @@ export class AddressTagger {
   rotateDay() { this.daySalt = randomBytes(32); }
   tag(address) { return createHmac('sha256', this.salt).update(netOf(address)).digest('base64url').slice(0, 22); }
   // A tag under a salt made once and never turned, for a count of what is open right now (sockets): a count keyed by a
-  // turning tag would start over at every turn while the old sockets kept their old key. Still never written anywhere.
+  // turning tag would start over at every turn while the old sockets kept their old key. Since release 112 it also keys the address's
+  // server time and refusal allowance, which outlast its sockets by up to a little over an hour (server.js). Still never written anywhere.
   tagFixed(address) { return createHmac('sha256', this.fixedSalt).update(netOf(address)).digest('base64url').slice(0, 22); }
   // A second tag under a salt that turns once a day, for the limits that must hold across the hour (sign-ups, anonymous
   // boxes, upload budgets). Like the hourly tag it is never written anywhere and cannot be turned back into the address.
@@ -212,11 +225,15 @@ export class AddressTagger {
 
 // Reads the client address for tagging only. Behind Caddy the LAST value of X-Forwarded-For is the client: Caddy appends
 // the peer it saw (and, with trusted_proxies set, drops whatever a client sent itself), while the first value is whatever
-// the client wrote. Without a proxy, or when the last field is empty, the socket's remote address.
+// the client wrote. Without a proxy, or when the last field is empty, the socket's remote address. The header counts only from
+// a peer on this machine, where the proxy is (release 112): anyone else reaching Node could write any address into it, and
+// every per-address limit is keyed on what this returns.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 export function clientAddress(req, trustProxy) {
-  if (trustProxy) {
+  const peer = (req.socket && req.socket.remoteAddress) || '';
+  if (trustProxy && LOOPBACK.has(peer)) {
     const h = req.headers && req.headers['x-forwarded-for'];
     if (typeof h === 'string') { const last = h.split(',').pop().trim(); if (last) return last; }
   }
-  return (req.socket && req.socket.remoteAddress) || '';
+  return peer;
 }

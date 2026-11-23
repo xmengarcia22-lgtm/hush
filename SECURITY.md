@@ -34,8 +34,12 @@ bounty.
   database, can still read new messages in private groups and one-on-one chats once it has planted a key (the
   first of the known limits below).
 - **Chat keys are wrapped per device.** Each wrap uses a fresh one-time key.
-- **No address logs.** IP addresses are only ever used in a keyed hash, under a key kept in memory and
-  replaced every hour. Logs hold no addresses, usernames, chat ids or message content.
+- **No address logs.** IP addresses are only ever used in keyed hashes, under keys kept in memory and never
+  written anywhere: one replaced every hour, one every day (for limits that must hold across the hour, such as
+  sign-ups and uploads), and one made when the server starts and kept until it stops. Under that last one the
+  server counts an address's open connections and, since release 112, its server time, its refusal allowance and
+  what is unsent to it; that hash is kept while the address has a connection open and for up to a little over an
+  hour after. Logs hold no addresses, usernames, chat ids or message content.
 - **Recovery words are made on your device** and never sent anywhere. Since release 24 there are 12 of them
   (120 bits), and each account's username is mixed into the stretching, so a stolen database has to be
   attacked one account at a time. Sets of 6 made before release 24 keep working until you replace them. The
@@ -607,6 +611,20 @@ What stays open:
   - message and file sizes (no padding)
   - mailbox counts by the hour
   - while running: who sends each message, which chats each connection opens, and contact lists
+- **The list of public channels can be crowded.** The app lists up to 100 public channels and searches only those.
+  Until release 112 the server gave the first 100 by id, and whoever makes a channel picks its id, so 100 channels
+  made at the lowest ids hid every other one. Since release 112 each request gets 100 of all public channels picked
+  at random. Hiding is now only crowding: with 1,000 public channels a given one is in one list in ten, and anyone
+  can make public channels (200 a day for each account). Channels with very large records can also end one list
+  early, because one answer holds at most 24 MB. A search by name on the server would be the real fix; it needs an
+  app change and is not built.
+- **Limits per network address are shared.** The server counts open connections, server time and unsent data per
+  network address (`SPEC.md` 9.4). People behind one address, as on a mobile carrier, an office network or a VPN
+  exit, share those budgets. Heavy use by one of them can have the others refused for a while. Someone at that
+  address who means to can keep the others out for as long as they go on: by using up the server time, or with a
+  few connections that ask for large answers and never read them, which has every other connection of the address
+  wait unanswered. The server time fits one or two people starting the app at once: about twelve starts a minute
+  for a whole address. Each of them can also tell roughly how much of a budget the others have used.
 - **Search.** Typing your exact username finds you, whatever your settings. Only search by display name or
   part of a username is opt-in.
 - **Our own constructions.** Some parts are our own designs built from standard pieces, and have not been

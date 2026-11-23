@@ -3,6 +3,15 @@ import assert from 'node:assert/strict';
 
 import { TokenBucket, BucketMap, AddressTagger, clientAddress, netOf, DEFAULT_LIMITS, MEDIA_LIMITS } from '../src/limits.js';
 import { createDiskWatch } from '../src/disk.js';
+
+test('a bucket spent below zero stops at minus its capacity, so whoever took from it is at most one capacity\'s refill from being answered again, however much they took (release 112)', () => {
+  const m = new BucketMap(3000, 50), t0 = 1_000_000;
+  m.spend('a', 500, t0);
+  assert.equal(m.tokensLeft('a', t0), 2500);
+  m.spend('a', 1e9, t0);
+  assert.equal(m.tokensLeft('a', t0), -3000);
+  assert.deepEqual([m.peek('a', t0 + 59_000), m.peek('a', t0 + 60_100)], [false, true]);
+});
 import { log } from '../src/log.js';
 
 test('the limits of release 91 have their defaults', () => {
@@ -132,6 +141,12 @@ test('client address is the last X-Forwarded-For hop, the one the proxy appended
   assert.equal(clientAddress(req, true), '10.0.0.1', 'the last hop: the first value is whatever the client wrote');
   assert.equal(clientAddress(req, false), '127.0.0.1');
   assert.equal(clientAddress({ headers: {}, socket: {} }, true), '');
+});
+
+test('X-Forwarded-For counts only from the proxy on this machine: from any other peer the socket\'s own address is the client, whatever the header says (release 112)', () => {
+  const at = (peer) => clientAddress({ headers: { 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: peer } }, true);
+  for (const peer of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) assert.equal(at(peer), '203.0.113.9', peer);
+  for (const peer of ['198.51.100.7', '::ffff:198.51.100.7', '2001:db8::1', '']) assert.equal(at(peer), peer, peer || 'no peer address');
 });
 
 test('a faked leftmost X-Forwarded-For value is ignored: the proxy-appended hop keys the address buckets', () => {

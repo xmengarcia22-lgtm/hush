@@ -110,11 +110,14 @@ function serveStatic(root, req, res) {
 export function createServer(cfg) {
   const limits = withLimits(DEFAULT_LIMITS, cfg.limits);
   const now = cfg.now || Date.now;
+  const clock = cfg.clock || (() => performance.now());
   const authz = createAuthz(cfg.authz);
   const store = new Store({ dataDir: cfg.dataDir, limits, addrKeyFile: cfg.addrKeyFile, now, authz, mediaMaxPages: cfg.mediaMaxPages }).open();
   const subs = new SubRegistry(limits, (conn, evt) => store.seenBy(evt, conn.actor()));   // each watcher by the level it holds now
   const conns = new Set();
-  store.on('change', (evt) => subs.dispatch(evt));
+  // The time a write's pushes take is kept apart, so that it is left out of what the writer's address is charged (protocol.js, take).
+  const pushed = { ms: 0 };
+  store.on('change', (evt) => { const t = clock(); subs.dispatch(evt); pushed.ms += clock() - t; });
   // A rotation, admin change or deletion: everyone else loses their level and their live views of that chat. A ban names
   // the blocked username (`h`): only that person's connections at member level lose it.
   store.on('evict', ({ cid, keep, h }) => { for (const c of conns) if (c !== keep && (!h || (c.proven === h && (c.chats.get(cid) || {}).level === 'member'))) c.evict(cid); });
@@ -149,7 +152,12 @@ export function createServer(cfg) {
   const daily = (n) => new BucketMap(n, n / 86400, 86400_000);
   const boxes = { anon: daily(limits.anonBoxesPerDayPerAddr), anonBytes: daily(limits.anonBoxBytesPerDayPerAddr), acct: daily(limits.boxesPerDayPerAcct), acctBytes: daily(limits.boxBytesPerDayPerAcct) };
   const creates = daily(limits.chatCreatesPerDay);   // chat.create per account: a new socket is not a new allowance
-  const sockets = new Map();   // fixed address tag → open WebSocket connections, capped at socketsPerAddr
+  const sockets = new Map();   // fixed address tag → its open WebSocket connections (a Set), capped at socketsPerAddr
+  // What one address may take over all its connections, under the same fixed tag (release 112; each connection had its own, so 40
+  // sockets were 40 budgets). Kept here, not with the sockets: an address that closes them all and comes back finds what it left
+  // (one idle for ten minutes is forgotten at the hourly turn below: by then it would be full again, limits.js spend).
+  const refusals = new BucketMap(limits.bytesPerMin, limits.bytesPerMin / 60);                  // what refused answers read (protocol.js, answerOk)
+  const frameMs = new BucketMap(limits.frameMsPerMinPerAddr, limits.frameMsPerMinPerAddr / 60);   // the server time its frames take
   const invites = new BucketMap(limits.invitesPerMinPerAddr, limits.invitesPerMinPerAddr / 60);
   const relays = new BucketMap(limits.relaysPerMinPerAddr, limits.relaysPerMinPerAddr / 60);   // call.relay (SPEC.md 16.2)
   const acctRelays = { min: new BucketMap(limits.relaysPerMinPerAcct, limits.relaysPerMinPerAcct / 60), hour: new BucketMap(limits.relaysPerHourPerAcct, limits.relaysPerHourPerAcct / 3600, 3600_000) };
@@ -240,14 +248,17 @@ export function createServer(cfg) {
     }
     const address = clientAddress(req, trustProxy);
     const addrTag = tagger.tag(address), dayTag = tagger.tagDay(address), fixedTag = tagger.tagFixed(address);   // the address itself goes no further
-    if ((sockets.get(fixedTag) || 0) >= limits.socketsPerAddr) {
+    const open = sockets.get(fixedTag);
+    if (open && open.size >= limits.socketsPerAddr) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       socket.destroy();
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      sockets.set(fixedTag, (sockets.get(fixedTag) || 0) + 1);
-      const conn = new Connection(ws, { store, subs, limits, disk, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, linkAsks, pwMisses, pwRepeats, signups, boxes, creates, invites, relays, acctRelays, turnName, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, owners: cfg.owners || [], turn: cfg.turn || null, onAccountGone, onClose: (c) => { conns.delete(c); tickets.dropConn(c); const n = (sockets.get(fixedTag) || 1) - 1; if (n > 0) sockets.set(fixedTag, n); else sockets.delete(fixedTag); } });
+      const peers = sockets.get(fixedTag) || new Set();
+      sockets.set(fixedTag, peers);
+      const conn = new Connection(ws, { fixedTag, peers, refusals, frameMs, clock, pushed, store, subs, limits, disk, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, linkAsks, pwMisses, pwRepeats, signups, boxes, creates, invites, relays, acctRelays, turnName, tickets, addrTag, dayTag, now, badges: cfg.badges || {}, owners: cfg.owners || [], turn: cfg.turn || null, onAccountGone, onClose: (c) => { conns.delete(c); tickets.dropConn(c); peers.delete(c); if (!peers.size) sockets.delete(fixedTag); } });
+      peers.add(conn);
       conns.add(conn);
     });
   };
@@ -268,7 +279,7 @@ export function createServer(cfg) {
   };
   every(limits.sweepIntervalMs, () => { store.sweep(); store.sweepMedia(); store.sweepLinkreqs(); tickets.prune(); }, 'sweep');   // a disappearing message's media goes with it (SPEC.md 8.6)
   every(Math.max(250, Math.min(5000, limits.typingTtlMs)), () => store.prune(), 'prune');
-  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); linkAsks.prune(); pwMisses.prune(); pwRepeats.prune(); invites.prune(); relays.prune(); acctRelays.min.prune(); acctRelays.hour.prune(); drops.prune(); wakes.prune(); media.prune(); }, 'rotate');
+  every(limits.saltRotateMs, () => { tagger.rotate(); helloBuckets.prune(); proveFails.prune(); openFails.prune(); blindReads.prune(); blindPaths.prune(); linkReads.prune(); linkPaths.prune(); linkAsks.prune(); pwMisses.prune(); pwRepeats.prune(); invites.prune(); relays.prune(); acctRelays.min.prune(); acctRelays.hour.prune(); drops.prune(); wakes.prune(); media.prune(); refusals.prune(); frameMs.prune(); }, 'rotate');
   every(86400_000, () => { tagger.rotateDay(); signups.prune(); for (const b of Object.values(boxes)) b.prune(); creates.prune(); }, 'rotateDay');
   // Notes older than 30 days, reports older than 90 (SPEC.md 8.6); once a day (the tick that falls in UTC hour 0) how much
   // media the server holds (SPEC.md 11.1: two numbers).

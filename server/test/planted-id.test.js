@@ -50,7 +50,8 @@ const newChatBuild = (env) => { env.spy.sheets = []; env.spy.opened = [];
 // The database writer: straight into the store, no rule asked. `capM`: the member key the server then checks for the chat.
 const writer = (w, cid) => { const st = w.T.srv.store, db = st.db;
   return { read: () => JSON.parse(db.prepare('SELECT d FROM docs WHERE path = ?').get('channels/' + cid).d),
-    rec: (d, capM) => { st._write(parseDocPath('channels/' + cid), d, Date.now()); db.prepare('UPDATE chats SET epoch = ?, type = ? WHERE cid = ?').run(d.epoch || 0, d.type || 'channel', cid);
+    rec: (d, capM) => { st._write(parseDocPath('channels/' + cid), d, Date.now()); st._pub(cid, d.visibility === 'public');   // and the server's list of public channels, as the store keeps it (release 112)
+      db.prepare('UPDATE chats SET epoch = ?, type = ? WHERE cid = ?').run(d.epoch || 0, d.type || 'channel', cid);
       if (capM) db.prepare('UPDATE chats SET cap_m = ? WHERE cid = ?').run(createHash('sha256').update(capM).digest('hex'), cid); } }; };
 const srvRec = (w, cid) => writer(w, cid).read();
 

@@ -23,20 +23,25 @@ const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
 export const PROTOCOL_VERSION = 1;
 const OPEN = 1;
 const MAX_BAD_FRAMES = 5;
+const LATER_BYTES = 64 << 10, LATER_FRAMES = 1000;   // a held connection's frames are read on until this much of them waits (hold)
 const HEAD_I = /"i"\s*:\s*(-?\d{1,15})(?![\d.eE])/;   // a frame's i, read from its first bytes: the adapter sends it first
+const PROVE = /^\{"i":\d{1,15},"op":"prove"/;   // the adapter's sign-in, by its first bytes (handleFrame)
 const PING = /^\{"i":(0|[1-9]\d{0,14}),"op":"ping"\}$/;   // the adapter's keep-alive, byte for byte (no leading zero: that is not JSON): the one frame answered over the frame allowance
 
 // Not part of the protocol: notes are watched through `sub` on inbox/<h>/c and written through
 // POST /drop (SPEC.md 6), so the pull-and-ack ops once planned were never needed.
 const NOT_YET = ['mail.pull', 'mail.ack'];
+const PAID = new Set(['mget', 'query', 'sub']);   // the requests answerOk lets in: one that is refused pays what it read (handleFrame)
 
 function takeQuery(c, n = 1) {
   if (!c.queries.take(n)) fail('ratelimit', 'too many queries, slow down');
 }
 // An answer refused for its size was read up to the cap and is paid for (replyError): until it is paid off, the connection's mget, query
 // and sub are refused before anything is read, so refusals can't keep the single thread busy; its other frames go on (release 110).
+// So is one of them refused for any other reason after it read, and what an answered mget read and did not answer (release 112).
+// The allowance is the address's, over all its connections (release 112): a new socket is not a new allowance.
 function answerOk(c) {
-  if (!c.refusals.peek()) fail('ratelimit', 'slow down');
+  if (!c.ctx.refusals.peek(c.fixedTag)) fail('ratelimit', 'slow down');
 }
 
 // The per-path limits of SPEC.md 9.4. Blind addresses (account boxes, login reservations, link requests, phone
@@ -408,13 +413,14 @@ const HANDLERS = {
 for (const op of NOT_YET) HANDLERS[op] = () => fail('invalid', `"${op}" is not part of the protocol; watch inbox/<h>/c and use POST /drop`);
 
 export class Connection {
-  // ctx: { store, subs, limits, disk, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, linkAsks, pwMisses, pwRepeats, signups, boxes, creates, invites, relays, acctRelays, turnName, tickets, addrTag, dayTag, now, badges, owners, turn, onClose, onAccountGone }
+  // ctx: { store, subs, limits, fixedTag, peers, refusals, frameMs, clock, pushed, disk, helloBuckets, proveFails, openFails, blindReads, blindPaths, linkReads, linkPaths, linkAsks, pwMisses, pwRepeats, signups, boxes, creates, invites, relays, acctRelays, turnName, tickets, addrTag, dayTag, now, badges, owners, turn, onClose, onAccountGone }
   constructor(ws, ctx) {
     this.ws = ws;
     this.ctx = ctx;
     this.limits = ctx.limits;
     this.addrTag = ctx.addrTag;
     this.dayTag = ctx.dayTag;
+    this.fixedTag = ctx.fixedTag;   // the key of what its address shares over all its connections: ctx.peers, ctx.refusals, ctx.frameMs
     this.helloed = false;
     this.nonce = null;
     this.nonceAt = 0;
@@ -432,10 +438,10 @@ export class Connection {
     this.badCount = 0;
     this.held = false;         // past sendBufferBytes unsent: frames wait in `later` (hold)
     this.later = [];
+    this.laterBytes = 0;
     const L = this.limits;
     this.frames = new TokenBucket(L.framesPerMin, L.framesPerMin / 60);
     this.bytes = new TokenBucket(L.bytesPerMin, L.bytesPerMin / 60);
-    this.refusals = new TokenBucket(L.bytesPerMin, L.bytesPerMin / 60);   // what answers refused for their size read (answerOk)
     this.queries = new TokenBucket(L.queriesPerMin, L.queriesPerMin / 60);
     this.drops = new TokenBucket(L.dropsPerHour, L.dropsPerHour / 3600);
     this.dirReads = new TokenBucket(L.directoryReadsPerMin, L.directoryReadsPerMin / 60);
@@ -484,36 +490,57 @@ export class Connection {
   send(obj) {
     if (this.ws.readyState !== OPEN) return;
     // What a client asked for (a reply, a watch's first load) only makes its next frames wait (hold); what it did not (a watch's
-    // pushes) is not held back by that, so past the hard limit a client that does not read is closed.
-    if (obj.i === undefined && obj.t !== 'init' && this.ws.bufferedAmount > this.limits.sendBufferMaxBytes) return this.close('not reading');
+    // pushes) is not held back by that, so past the hard limit a client that does not read is closed; and past the soft one while
+    // its address is over its budget, or pushes could fill each of an address's sockets to the hard limit (release 112).
+    const unsent = this.ws.bufferedAmount, L = this.limits;
+    if (obj.i === undefined && obj.t !== 'init' && (unsent > L.sendBufferMaxBytes || (unsent > L.sendBufferBytes && this.addrFull()))) return this.close('not reading');
     this.ws.send(JSON.stringify(obj));
-    if (this.ws.bufferedAmount > this.limits.sendBufferBytes) this.hold();
+    if (this.ws.bufferedAmount > L.sendBufferBytes) this.hold();
   }
 
-  // Past the soft limit the client's frames wait, read or not, until what it has not taken drains below it: a slow reader is only
-  // slowed. ws has no drain event, so it is looked at every 50 ms. Draining counts as not idle (its keep-alive waits unread too); a
-  // client that never drains ends at idleMs as before.
+  // Whether more than unsentBytesPerAddr is unsent to this connection's address, over all its connections (at most socketsPerAddr).
+  addrFull() {
+    let n = 0;
+    for (const c of this.ctx.peers) n += c.ws.bufferedAmount;
+    return n > this.limits.unsentBytesPerAddr;
+  }
+  // Whether this connection's frames wait: for what is unsent to it, or to its address (release 112).
+  full() {
+    return this.ws.bufferedAmount > this.limits.sendBufferBytes || this.addrFull();
+  }
+
+  // Past the soft limit the client's frames wait until what it has not taken drains below it (and what its address has not, below
+  // its budget): a slow reader is only slowed. ws has no drain event, so it is looked at every 50 ms. Draining counts as not idle
+  // (its keep-alive waits too); a client that never drains ends at idleMs as before. The frames that wait are still read, up to
+  // LATER_BYTES or LATER_FRAMES of them (onMessage), so that a close or the end of its socket is seen: it is gone at the next look,
+  // with what it held, where it kept its place among its address's sockets until idleMs (release 112).
   hold() {
     if (this.held || this.closed) return;
     this.held = true;
-    this.ws.pause();
     let last = this.ws.bufferedAmount;
     const t = setInterval(() => {
       if (this.closed) return clearInterval(t);
+      if (this.ws.readyState !== OPEN) return this.ws.terminate();
       const now = this.ws.bufferedAmount;
       if (now < last) this.touch();
       last = now;
-      if (now > this.limits.sendBufferBytes) return;
-      clearInterval(t);
-      this.held = false;
-      while (!this.held && !this.closed && this.later.length) this.take(...this.later.shift());
+      while (this.later.length && !this.closed && !this.full()) {
+        const [data, isBinary] = this.later.shift();
+        this.laterBytes -= data.length;
+        this.take(data, isBinary);
+      }
+      if (!this.later.length && !this.full()) { clearInterval(t); this.held = false; }
       this.readAgain();
     }, 50);
     if (t.unref) t.unref();
   }
 
+  laterFull() {
+    return this.laterBytes > LATER_BYTES || this.later.length > LATER_FRAMES;
+  }
+
   readAgain() {
-    if (!this.waiting && !this.held && !this.closed) this.ws.resume();
+    if (!this.waiting && !this.closed && !(this.held && this.laterFull())) this.ws.resume();
   }
 
   close(reason, code = 1000) {
@@ -552,7 +579,7 @@ export class Connection {
     if (e instanceof HushError) {
       // An answer refused for its size was read up to the cap: it is paid for, below zero if need be, from an allowance of its own
       // (refilled when answerOk let the request in), so an honest page's refused watch never refuses its other frames (release 110).
-      if (e.n) this.refusals.tokens -= e.n;
+      if (e.n) this.ctx.refusals.spend(this.fixedTag, e.n);
       const out = { i, ok: false, e: e.code, m: e.message };
       if (e.code === 'pow') { out.bits = e.bits; out.salt = e.salt; }   // the puzzle to solve, then try again
       return this.send(out);
@@ -562,11 +589,19 @@ export class Connection {
   }
 
   onMessage(data, isBinary) {
-    if (this.held) return void this.later.push([data, isBinary]);   // already read off the socket when it paused: kept, in order
-    this.take(data, isBinary);
+    if (!this.held && this.addrFull()) this.hold();
+    if (!this.held) return this.take(data, isBinary);
+    this.later.push([data, isBinary]);   // kept, in order
+    this.laterBytes += data.length;
+    if (this.laterFull()) this.ws.pause();
   }
 
+  // One frame, and its time charged to the address, below zero if need be (handleFrame refuses the next ones): everything the frame
+  // has the server do before it first waits (release 112), less the time the pushes of its write take (server.js, pushed). How many
+  // watches a chat has is its watchers' to choose (600 a connection, all on one chat if they like): charged to the writer, whoever
+  // watches a chat could have had the people who write in it refused.
   take(data, isBinary) {
+    const { clock, frameMs, pushed } = this.ctx, t = clock(), p = pushed.ms;
     try {
       this.handleFrame(data, isBinary);
     } catch (e) {
@@ -575,6 +610,9 @@ export class Connection {
       log.error('connection.failed', e);
       this.close('internal error');
     }
+    // shortcut: pushes are charged to nobody, as before 112 (about 0.08 ms for each page that has the chat open, for a small message,
+    // SPEC.md 9.4); bound the watches one connection may hold on one chat, and then charge them, before a chat has thousands online.
+    frameMs.spend(this.fixedTag, clock() - t - (pushed.ms - p));
   }
 
   // Over its allowance a socket is not read for a moment, one frame's refill (300 a minute): most of a flood's cost is in reading, unmasking and
@@ -593,7 +631,9 @@ export class Connection {
     const size = data.length;
     // The allowances come before parsing, so large junk frames can't keep the single thread busy, whatever each op charges. Over them only
     // the first bytes are read, for the i a page relies on hearing back; a frame with none there is a bad frame.
-    const framed = this.frames.take();
+    // Before both comes the server time its address's frames have taken (release 112): over it a frame is refused the same way, the
+    // keep-alive answered the same way, and the frame is not counted.
+    const timed = this.ctx.frameMs.peek(this.fixedTag), framed = timed && this.frames.take();
     if (!framed || !this.bytes.take(size)) {
       this.waitToRead();
       const head = isBinary ? '' : Buffer.isBuffer(data) ? data.toString('latin1', 0, 64) : String(data).slice(0, 64);
@@ -604,16 +644,22 @@ export class Connection {
       const ping = !framed && this.helloed && PING.exec(head);
       if (ping) return this.send({ i: Number(ping[1]), ok: true, now: this.ctx.now() });
       const m = HEAD_I.exec(head), L = this.limits;
-      // retry: the milliseconds before asking again is any use, one frame's refill or this frame's bytes'
-      return m ? this.send({ i: Number(m[1]), ok: false, e: 'ratelimit', m: 'slow down', retry: Math.ceil(framed ? size * 60000 / L.bytesPerMin : 60000 / L.framesPerMin) })
-        : this.rejectFrame({ ok: false, e: 'invalid', m: 'frame needs an integer "i" and a string "op"' });
+      // retry: the milliseconds before asking again is any use: the address's time made good (in whole seconds: to the millisecond it
+      // told the asker how long its last frame had kept the server), one frame's refill or this frame's bytes'
+      const retry = !timed ? Math.max(1, Math.ceil((1 - this.ctx.frameMs.tokensLeft(this.fixedTag)) * 60 / L.frameMsPerMinPerAddr)) * 1000 : framed ? size * 60000 / L.bytesPerMin : 60000 / L.framesPerMin;
+      if (m) this.send({ i: Number(m[1]), ok: false, e: 'ratelimit', m: 'slow down', retry: Math.ceil(retry) });
+      else this.rejectFrame({ ok: false, e: 'invalid', m: 'frame needs an integer "i" and a string "op"' });
+      // A sign-in refused for the address's time ends the connection (release 112). The page takes a refused sign-in as final: it would
+      // stay connected and signed out, its keep-alive answered, and never ask again. Closed, it comes back and signs in.
+      if (!timed && PROVE.test(head)) this.close('slow down');
+      return;
     }
     let f;
     try { f = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : String(data)); }
     catch { return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame is not JSON' }); }
     if (isBinary || !f || typeof f !== 'object' || Array.isArray(f)) return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame must be a JSON object' });
     if (!Number.isInteger(f.i) || typeof f.op !== 'string') return this.rejectFrame({ ok: false, e: 'invalid', m: 'frame needs an integer "i" and a string "op"' });
-    const i = f.i;
+    const i = f.i, st = this.ctx.store, counted = st.counted, unanswered = st.unanswered;
     let result;
     try {
       if (!this.helloed && f.op !== 'hello') fail('unauth', 'say hello first');
@@ -621,8 +667,10 @@ export class Connection {
       if (!h) fail('invalid', 'unknown op');
       result = h(this, f);
     } catch (e) {
+      if (e instanceof HushError && PAID.has(f.op)) e.n = Math.max(e.n || 0, st.counted - counted);
       return this.replyError(i, e);
     }
+    if (st.unanswered > unanswered) this.ctx.refusals.spend(this.fixedTag, st.unanswered - unanswered);
     if (result && typeof result.then === 'function') {
       result.then((r) => this.finish(i, r), (e) => this.replyError(i, e));
       return;

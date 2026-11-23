@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds coturn from the upstream release tarball into /usr/local/bin: the apt package stops at 4.6.1, which has open CVEs
-# (HANDOFF.md, the US relay). The apt package is still installed first and kept: it creates the turnserver user, ships
+# (both call relays run this build). The apt package is still installed first and kept: it creates the turnserver user, ships
 # turnutils_*, and its dependencies keep the libevent/libssl runtime libraries from leaving with the build tools at the end.
 # Run with sudo. Idempotent: a box already holding VERSION stops after the version line. On an upstream security release:
 # bump VERSION, download the tarball, hash it, compare with an independent copy (Debian's orig tarball unpacks to the same

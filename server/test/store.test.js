@@ -177,7 +177,7 @@ test('media chunks go to media.db and come back intact', () => {
   assert.throws(() => store.set(base + '/2', { i: 3, iv: 'aXY=', d: 'AA==' }), /"i"/);
   const got = store.get(base + '/1').d;
   assert.equal(Buffer.from(got.d, 'base64').toString(), 'hello media world');
-  const all = store.query(base, { o: ['i', 'asc'], l: 1000 });
+  const all = store.query(base, { l: 1000 });   // by id
   assert.deepEqual(all.map((r) => r.d.i), [0, 1]);
   const mdb = new DatabaseSync(join(dir, 'media.db'), { readOnly: true });
   assert.equal(Number(mdb.prepare('SELECT COUNT(*) AS n FROM chunks').get().n), 2);

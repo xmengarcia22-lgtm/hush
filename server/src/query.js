@@ -1,12 +1,16 @@
 // Query grammar (SPEC.md 7.4): `w` is a list of [field, op, value] with op in
-// ==, <, <=, >, >=; `o` is [field, "asc"|"desc"]; `l` is a required limit.
+// ==, <, <=, >, >=; `o` is ["ts", "asc"|"desc"]; `l` is a required limit.
 // The same comparison rules are applied in SQL (for stored collections) and in
 // JavaScript (for in-memory collections and for live subscription matching).
 
 import { fail } from './errors.js';
 
-const FIELD_RE = /^[A-Za-z0-9_]{1,64}$/;
 const OPS = new Set(['==', '<', '<=', '>', '>=']);
+// The fields a condition may name, by collection: the ones the page asks by, and no other (any other had SQLite read every document
+// of the collection to test it). A condition on ts goes by its index; e is tested over one chat's member cards; h, n and n2 are
+// tested over the search entries one by one (4 KB at most each) until l of them match; visibility is the listing's alone (store.js).
+// An order is by ts alone (release 112).
+const FIELDS = { roll: ['ts', 'e'], search: ['h', 'n', 'n2'], channels: ['visibility'] };
 export const SQL_OP = Object.freeze({ '==': '=', '<': '<', '<=': '<=', '>': '>', '>=': '>=' });
 
 export function validateQuery(q, kind, limits) {
@@ -15,16 +19,14 @@ export function validateQuery(q, kind, limits) {
   for (const c of w) {
     if (!Array.isArray(c) || c.length !== 3) fail('invalid', 'query: each condition is [field, op, value]');
     const [f, op, v] = c;
-    if (typeof f !== 'string' || !FIELD_RE.test(f)) fail('invalid', 'query: bad field');
+    if (!(FIELDS[kind] || ['ts']).includes(f)) fail('invalid', 'query: this collection cannot be asked by that field');
     if (!OPS.has(op)) fail('invalid', 'query: bad operator');
     if (!((typeof v === 'string' && v.length <= 256) || (typeof v === 'number' && Number.isFinite(v)))) fail('invalid', 'query: bad value');
   }
   let o;
   if (q.o !== undefined) {
-    if (!Array.isArray(q.o) || q.o.length !== 2 || typeof q.o[0] !== 'string' || !FIELD_RE.test(q.o[0]) || !['asc', 'desc'].includes(q.o[1])) {
-      fail('invalid', 'query: bad "o"');
-    }
-    o = [q.o[0], q.o[1]];
+    if (!Array.isArray(q.o) || q.o.length !== 2 || q.o[0] !== 'ts' || !['asc', 'desc'].includes(q.o[1])) fail('invalid', 'query: "o" is ["ts", "asc" or "desc"]');
+    o = ['ts', q.o[1]];
   }
   const max = kind === 'search' ? limits.searchLimitMax : limits.queryLimitMax;
   if (!Number.isInteger(q.l) || q.l < 1) fail('invalid', 'query: "l" (limit) is required');

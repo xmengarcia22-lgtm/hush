@@ -4,7 +4,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { fail } from './errors.js';
-import { isPlain, mergePatch, changedKeys } from './merge.js';
+import { isPlain, mergePatch, changedKeys, byteLength } from './merge.js';
 import { ID } from './paths.js';
 
 const KB = 1024, MB = 1024 * KB;
@@ -166,6 +166,13 @@ export function sealedMeta(m, what, f = 'meta') {
   if (!isPlain(m) || Object.keys(m).length !== 3 || !int(m.e, 0, EPOCH_MAX) || !str(m.iv, 1, 64) || !str(m.ct, 1, 262144)) bad(what, f);   // exactly { e, iv, ct }; a photo of 320 px is far less
 }
 
+// Two of the fields of a chat record that any member may write (authz.js: ts, last, closed, wraps in keys) had no size of their own,
+// so a member could grow a record that others then pay to read, or that ends the public listing early: they are kept small (release
+// 112). Each is looked at only when a write changes it: what a record held before stays and the record goes on taking other writes.
+// A marker takes the place of the one before it (store.js, update); a closed already at its size takes no new id until it is cleared.
+const SIDE_BYTES = 64 * KB;
+const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+
 function channels(ctx, d) {
   const w = 'chat';
   for (const k of NAMES_NEVER) if (k in d) fail('invalid', `${w}: field "${k}" would put a name on the server`);
@@ -179,6 +186,8 @@ function channels(ctx, d) {
   if (d.last !== undefined && d.last !== null) {
     if (!isPlain(d.last)) bad(w, 'last');
     if (d.last.from !== undefined && d.last.from !== null) fail('invalid', `${w}: "last.from" would put a name on the server`);
+    // The latest message's marker is that message without its signature (the page's lastOf): a message's size and the marker's few fixed fields.
+    if (byteLength(d.last) > MAX_BYTES.posts + KB && !(ctx.prev && same(ctx.prev.last, d.last))) bad(w, 'last');
   }
   if (d.keys !== undefined) wrapMap(d.keys, w, true);
   if (d.akeys !== undefined) wrapMap(d.akeys, w, false);
@@ -212,7 +221,11 @@ function channels(ctx, d) {
   if (d.pins !== undefined && !(Array.isArray(d.pins) && d.pins.length <= 20 && d.pins.every((p) => ID.ITEM_ID.test(p)))) bad(w, 'pins');
   if (d.ttl !== undefined && !int(d.ttl, 0, 365 * 86400)) bad(w, 'ttl');
   if (d.n !== undefined && (pub || d.type !== 'channel' || !int(d.n, 0, 100000))) bad(w, 'n');   // a private channel's subscriber count (SPEC.md 5.3), far more than a sealed list holds; store.js drops a public one's
-  if (d.closed !== undefined && !isPlain(d.closed)) bad(w, 'closed');
+  if (d.closed !== undefined) {   // the polls that were stopped: what a write adds is a message id set to true
+    if (!isPlain(d.closed)) bad(w, 'closed');
+    const had = ctx.prev && isPlain(ctx.prev.closed) ? ctx.prev.closed : {}, added = Object.entries(d.closed).filter(([k, v]) => !same(had[k], v));
+    if (added.some(([k, v]) => !ID.ITEM_ID.test(k) || v !== true) || (added.length && byteLength(d.closed) > SIDE_BYTES)) bad(w, 'closed');
+  }
   if (d.comments !== undefined && !bool(d.comments)) bad(w, 'comments');
   if (d.reactions !== undefined) {
     if (!isPlain(d.reactions) || !['all', 'some', 'off'].includes(d.reactions.mode)) bad(w, 'reactions');

@@ -27,9 +27,10 @@ export async function startServer(overrides = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'hush-test-'));
   // Test clients are not browser pages (no Origin header), so the origin check is off unless a test turns it on;
   // every test account comes from 127.0.0.1, so the daily sign-up backstop is lifted unless a test sets it on purpose,
-  // and the secured-account rule for power roles is off (power-roles.test.js turns it on).
+  // and the secured-account rule for power roles is off (power-roles.test.js turns it on). For the same reason (one address for
+  // every client of a test, writers and readers alike) the address's server time is not limited unless a test sets it.
   const cfg = { host: '127.0.0.1', port: 0, dataDir, authz: 'open', origins: 'any', trustProxy: true, ...overrides };
-  cfg.limits = { signupsPerDayPerAddr: 1000, powerNeedsSecure: false, ...(overrides.limits || {}) };
+  cfg.limits = { signupsPerDayPerAddr: 1000, powerNeedsSecure: false, frameMsPerMinPerAddr: 1e9, ...(overrides.limits || {}) };
   log.setEnabled(false);
   const srv = createServer(cfg);
   const { port } = await srv.listen();

@@ -1,4 +1,4 @@
-// The Apple push sender for call wake-ups (HANDOFF.md, ringing when closed) and "New message" nudges: one push per wake
+// The Apple push sender for call wake-ups (ringing when the app is closed) and "New message" nudges: one push per wake
 // ticket use, over Apple's HTTP/2 API with a provider token (an ES256 JWT), on node:http2 and node:crypto alone. Without a key
 // (HUSH_APNS_KEY unset) it is a stub that reports 'disabled' and the server runs exactly as before.
 // Nothing here logs a device token, the provider token or a payload.

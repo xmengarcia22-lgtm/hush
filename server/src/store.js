@@ -18,7 +18,7 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { fail, HushError } from './errors.js';
@@ -34,11 +34,13 @@ export const SYSTEM = Symbol('system');
 const ANON = Object.freeze({ handle: null, viaAccountKey: false, mayCreate: null, pub: null, chats: new Map() });
 // One answer's documents (an mget, a query, a watch's first load), each counted as it is read, before the next is: past answerBytes
 // the request is refused, so no such request has the server take from its database, build or keep more than that and one document, besides
-// what is not counted: the rows SQLite visits to test a query's conditions or sort it, the part of a chat record left out of what is
-// answered (a preview, a channel's meta), and a channel's reactions and votes from before release 97 (no `an`), read whole and
-// answered as none (a watch counts none of them, an mget 4 bytes each, its null). An answer leaves room for pushes under
-// sendBufferMaxBytes. The refusal carries the count, which the connection pays before it is answered again (protocol.js) (release 110).
-const capped = (max) => { let n = 0; return (b) => { if ((n += b) > max) throw Object.assign(new HushError('toolarge', 'too much to answer at once; ask for less'), { n }); }; };
+// the rows SQLite visits to test a query's conditions or sort it (which fields a query may name: query.js). In an mget and a watch by
+// ids, a document the reader is shown only part of, or as none whether or not it is there, counts as the largest its kind can be
+// (_shown, release 112): it is read whole, and neither a refusal nor what is paid may tell the size of what is not shown, or whether
+// it is there. A plain get reads one document and is not counted. An answer leaves room for pushes under sendBufferMaxBytes. The
+// store keeps the running count (a request's share is the difference) and a refusal carries its own, which the connection pays before
+// it is answered again (protocol.js) (release 110).
+const capped = (st) => { let n = 0; return (b) => { st.counted += b; if ((n += b) > st.limits.answerBytes) throw Object.assign(new HushError('toolarge', 'too much to answer at once; ask for less'), { n }); }; };
 // A document answered as it is stored is counted by its stored text's length, not by a new stringify of it (_read).
 const stored = new WeakMap();
 const answered = (d) => stored.get(d) ?? byteLength(d);
@@ -232,6 +234,10 @@ export class Store extends EventEmitter {
     this.now = now;
     this.authz = authz;
     this.mem = new MemoryBackend();
+    this.counted = 0;      // every byte the answers have counted (capped), ever: a request's share is the difference (protocol.js)
+    this.unanswered = 0;   // of those, what an mget counted and did not answer (a preview, a row answered as none)
+    this.pubs = [];        // the ids of the public channels, in no order, and where each is in it: the listing picks among them (_listing)
+    this.pubAt = new Map();
     this.db = null;
     this.media = null;
   }
@@ -249,6 +255,7 @@ export class Store extends EventEmitter {
     this.db.prepare('INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)').run('schema', SCHEMA_VERSION);
     this.q = {
       get: this.db.prepare('SELECT d FROM docs WHERE path = ?'),
+      has: this.db.prepare('SELECT 1 FROM docs WHERE path = ?'),
       put: this.db.prepare('INSERT INTO docs(path, parent, id, d, ts, exp) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET d = excluded.d, ts = excluded.ts, exp = excluded.exp'),
       del: this.db.prepare('DELETE FROM docs WHERE path = ?'),
       goneAdd: this.db.prepare('INSERT OR REPLACE INTO gone(k, ts) VALUES (?, ?)'),
@@ -273,8 +280,6 @@ export class Store extends EventEmitter {
       chatLeaves: this.db.prepare('UPDATE chats SET lv = ? WHERE cid = ?'),
       chatDel: this.db.prepare('DELETE FROM chats WHERE cid = ?'),
       chatVis: this.db.prepare("SELECT json_extract(d, '$.visibility') AS v FROM docs WHERE path = ?"),
-      // The public listing walks its own index, in id order (a path is 'channels/' + id): SQLite reads no other chat record and sorts none.
-      listing: this.db.prepare("SELECT id, d FROM docs INDEXED BY docs_channels_vis WHERE parent = 'channels' AND json_extract(d, '$.visibility') = 'public' ORDER BY path LIMIT ?"),
       wrapGet: this.db.prepare('SELECT n, ts FROM wraps WHERE cid = ? AND tag = ? AND e = ?'),
       wrapPut: this.db.prepare('INSERT OR REPLACE INTO wraps(cid, tag, e, n, ts) VALUES (?, ?, ?, ?, ?)'),
       wrapsBelow: this.db.prepare('DELETE FROM wraps WHERE cid = ? AND e < ?'),
@@ -333,6 +338,9 @@ export class Store extends EventEmitter {
     if (!this.media.prepare('SELECT 1 FROM media_ids LIMIT 1').get() && this.media.prepare('SELECT 1 FROM chunks LIMIT 1').get()) {
       this.media.exec('INSERT INTO media_ids(cid, mid, bytes, exp) SELECT cid, mid, SUM(length(d)), 0 FROM chunks GROUP BY cid, mid');
     }
+    // The public channels, read once (through their index; a start reads each of their records for it) and then kept in step (_emit).
+    // shortcut: a record made public behind the store's back (a hand edit) is not listed until the store writes it or starts again.
+    for (const r of this.db.prepare("SELECT path FROM docs INDEXED BY docs_channels_vis WHERE parent = 'channels' AND json_extract(d, '$.visibility') = 'public'").iterate()) this._pub(r.path.slice('channels/'.length), true);
     // Search is opt-in (SPEC.md 7.6): an entry whose owner never turned it on, as with every account before release 24, comes off.
     this.db.exec("DELETE FROM docs WHERE parent = 'search' AND NOT EXISTS (SELECT 1 FROM docs u WHERE u.path = 'directory/' || docs.id AND json_extract(u.d, '$.findable') = 1)");
     return this;
@@ -353,7 +361,8 @@ export class Store extends EventEmitter {
   // Update and delete answer by what is stored, so under a chat and for the secured mark they first check that this connection may
   // read the path: one that may not learns nothing of what is there. Below admin level a channel's read marks read as none ('blind'); a
   // channel's reactions and votes are chat.act's alone at every level. A set, update or delete reads a chat record (up to 2 MB) only for a
-  // connection that holds the chat, as each of them needs; a delete that finds no `chats` row reads it first, as before 110 (release 110).
+  // connection that holds the chat, as each of them needs; a delete that finds no `chats` row reads it first, as before 110, and an
+  // update of a chat that is gone (no row and no record) answers notfound, as before 110 (release 110; the update since release 112).
   _readOk(actor, p) {
     if (p.kind === 'acts') { this._check(actor, 'set', p); return; }
     if (p.kind === 'channels') { this._check(actor, 'watch', p); return; }
@@ -382,7 +391,7 @@ export class Store extends EventEmitter {
         const r = this.q.get.get(this._storagePath(p).path);
         if (!r) return null;
         const d = JSON.parse(r.d);
-        stored.set(d, Buffer.byteLength(r.d));
+        if (d !== null && typeof d === 'object') stored.set(d, Buffer.byteLength(r.d));   // a row written by hand may hold null, text or a number: answered as it is
         return d;
       }
     }
@@ -426,6 +435,7 @@ export class Store extends EventEmitter {
   }
 
   _emit(p, d, type, actor) {   // `by`: the writer's connection, for the server's own listeners; subs.js never sends it
+    if (p.kind === 'channels') this._pub(p.id, type === 'set' && d.visibility === 'public');   // every write and delete of a chat record comes here
     this.emit('change', { kind: p.kind, parent: p.parent, id: p.id, d: type === 'set' ? d : null, type, by: actor && actor.conn ? actor.conn : null });
   }
 
@@ -469,26 +479,38 @@ export class Store extends EventEmitter {
 
   get(path, actor) {
     const p = parseDocPath(path);
-    const mode = this._check(actor, 'get', p);
-    if (mode === 'blind') return { id: p.id, d: null };   // as if there were none (authz.js)
-    let d = this._read(p, this.now());
+    return { id: p.id, d: this._shown(p, this._check(actor, 'get', p)).d };
+  }
+
+  // A document as its reader may see it. `most` is set when the reader is shown only part of it, or as none whether or not it is there
+  // (a chat record's preview, the copy of a channel a member gets, a channel's reactions and votes): the largest its kind can be,
+  // which is what it counts as in an mget or a watch by ids (capped).
+  _shown(p, mode) {
+    if (mode === 'blind') return { d: null, most: 0 };   // as if there were none (authz.js): not read
+    const all = this._read(p, this.now());
+    let d = all;
     if (d && mode === 'preview') {
       const fields = d.visibility === 'public' ? [...PREVIEW_FIELDS, ...PUBLIC_PREVIEW_FIELDS] : PREVIEW_FIELDS;
-      const t = {};
-      for (const f of fields) if (d[f] !== undefined) t[f] = d[f];
-      d = t;
+      d = {};
+      for (const f of fields) if (all[f] !== undefined) d[f] = all[f];
     }
-    return { id: p.id, d: forLevel(mode, d) };
+    d = forLevel(mode, d);
+    return { d, most: mode === 'slotted' || d !== all ? MAX_BYTES[p.kind] : 0 };
   }
 
   mget(paths, actor) {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > this.limits.mgetMax) fail('invalid', 'mget: bad path list');
-    const ok = capped(this.limits.answerBytes), got = new Map();   // a path named again is read once and counted again: the answer has it again
+    const ok = capped(this), got = new Map();   // a path named again is read once and counted again: the answer has it again
     return paths.map((path) => {
-      if (!got.has(path)) { const r = this.get(path, actor); got.set(path, [r, answered(r.d)]); }
-      const [r, n] = got.get(path);
-      ok(n);
-      return r;
+      let g = got.get(path);
+      if (g) ok(g[1]);
+      else {   // a first read: one shown in part counts as the most it can be, and what is not answered of that is the connection's to pay
+        const p = parseDocPath(path), { d, most } = this._shown(p, this._check(actor, 'get', p)), n = answered(d);
+        got.set(path, g = [{ id: p.id, d }, n]);
+        if (most) this.unanswered += most - n;
+        ok(most || n);
+      }
+      return g[0];
     });
   }
 
@@ -518,12 +540,17 @@ export class Store extends EventEmitter {
 
   update(path, patch, actor) {
     const p = parseDocPath(path);
+    // A chat that is gone (its small row goes with it) answers notfound, as before 110; a record with no row is refused like any other.
+    if (p.kind === 'channels' && !this.q.chatGet.get(p.id) && !this.q.has.get('channels/' + p.id)) fail('notfound', 'no document to update');
     this._readOk(actor, p);
     validateDoc(patch, 'patch');
     const now = this.now();
     const prev = this._read(p, now);
     if (!prev) fail('notfound', 'no document to update');
     let merged = SEALED_KINDS.has(p.kind) ? applyPostUpdate(prev, patch) : mergePatch(prev, patch);
+    // A chat's latest-message marker is replaced whole, not merged into the one before (release 112): the page writes every field of
+    // it each time, and what sat under any other key stayed for good, in the way of every later marker once `last` has a size (schemas.js).
+    if (p.kind === 'channels' && isPlain(patch.last)) merged.last = mergePatch({}, patch.last);
     validateDoc(merged);
     this._checkSize(p.kind, merged);
     this._check(actor, 'update', p, { d: merged, prev, patch });
@@ -601,10 +628,11 @@ export class Store extends EventEmitter {
     const { w, o, l } = validateQuery(q || {}, col.kind, this.limits);
     const mode = this._check(actor, 'query', col, { w });
     if (mode === 'blind') return [];   // as if there were none (authz.js)
-    if (col.kind === 'channels' && (o || JSON.stringify(w) !== '[["visibility","==","public"]]')) {   // the page's listing only (q.listing)
+    if (col.kind === 'channels' && (o || JSON.stringify(w) !== '[["visibility","==","public"]]')) {   // the page's listing only (_listing)
       fail('denied', 'only public channels can be listed, by id, with no other condition');
     }
-    const now = this.now(), ok = capped(this.limits.answerBytes), rows = [];
+    const now = this.now(), ok = capped(this), rows = [];
+    if (col.kind === 'channels') return this._listing(l, ok);
     const backend = KINDS[col.kind].backend;
     if (backend === 'memory') return orderAndLimit(this.mem.list(col.parent, now).filter((r) => matches(r.d, w)), o, l).map((r) => { ok(byteLength(r.d)); return r; });
     if (backend === 'media') {   // every piece is counted, in base64, as it is read, before l picks from them (the page reads pieces over HTTP)
@@ -620,20 +648,47 @@ export class Store extends EventEmitter {
       if (f === 'ts') { sql += ` AND ts ${SQL_OP[op]} ?`; params.push(v); }
       else { sql += ` AND json_extract(d, ?) ${SQL_OP[op]} ?`; params.push('$.' + f, v); }
     }
-    if (o) {
-      if (o[0] === 'ts') sql += ` ORDER BY ts ${o[1] === 'desc' ? 'DESC' : 'ASC'}, id ASC`;
-      else { sql += ` ORDER BY json_extract(d, ?) ${o[1] === 'desc' ? 'DESC' : 'ASC'}, id ASC`; params.push('$.' + o[0]); }
-    } else sql += ' ORDER BY id ASC';
+    sql += o ? ` ORDER BY ts ${o[1] === 'desc' ? 'DESC' : 'ASC'}, id ASC` : ' ORDER BY id ASC';   // o is by ts alone (query.js)
     sql += ' LIMIT ?';
     params.push(l);
-    for (const r of col.kind === 'channels' ? this.q.listing.iterate(l) : this.db.prepare(sql).iterate(...params)) {
-      // The public listing answers the records that fit, so records made large don't have it refused to everyone (release 110).
-      try { ok(Buffer.byteLength(r.d)); } catch (e) { if (col.kind === 'channels') break; throw e; }
+    for (const r of this.db.prepare(sql).iterate(...params)) {
+      ok(Buffer.byteLength(r.d));
       rows.push({ id: r.id, d: JSON.parse(r.d) });
     }
-    // The public listing is anyone's to read, so it carries no sealed lists, not even those a channel going private keeps under its
-    // new key until it is private (set, update).
-    return col.kind === 'channels' ? rows.map((r) => ({ id: r.id, d: forLevel('member', r.d) })) : rows;
+    return rows;
+  }
+
+  // The public listing. Which channels it shows is not their creators' to choose (release 112; it was the first l by id, and a
+  // creator picks the id, so 100 channels at the lowest ids hid every other): each request is answered l of all the public channels,
+  // picked at random. Their ids are kept in memory (open, _emit), since to walk ids in the table SQLite reads every large record on
+  // the way. It answers the records that fit, so records made large don't have it refused to everyone (release 110), in id order,
+  // and only a record that is public as it is read. It carries no sealed lists, not even those a channel going private keeps
+  // under its new key until it is private (set, update): it is anyone's to read.
+  _listing(l, ok) {
+    const n = Math.min(l, this.pubs.length), rows = [];
+    for (let k = 0; k < n; k++) this._pubSwap(k, k + randomInt(this.pubs.length - k));   // the first n are now a random n of them all
+    for (const id of this.pubs.slice(0, n)) {
+      const r = this.q.get.get('channels/' + id), size = r ? Buffer.byteLength(r.d) : 0;
+      try { ok(size); } catch { break; }
+      const d = r ? JSON.parse(r.d) : null;
+      if (d && d.visibility === 'public') rows.push({ id, d: forLevel('member', d) });
+      else this._pub(id, false);   // changed behind the store's back: off the list
+    }
+    return rows.sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+  // The list of public channels, kept in step with one chat record: on it or off it.
+  _pub(id, isPublic) {
+    const at = this.pubAt.get(id);
+    if (isPublic === (at !== undefined)) return;
+    if (isPublic) { this.pubAt.set(id, this.pubs.length); this.pubs.push(id); return; }
+    this._pubSwap(at, this.pubs.length - 1);
+    this.pubs.pop();
+    this.pubAt.delete(id);
+  }
+  _pubSwap(i, j) {
+    const a = this.pubs[i], b = this.pubs[j];
+    this.pubs[i] = b; this.pubs[j] = a;
+    this.pubAt.set(b, i); this.pubAt.set(a, j);
   }
 
   // Validates a `sub` frame and computes its first result. Returns { spec, init }. A view read as none (authz.js 'blind') starts
@@ -645,13 +700,14 @@ export class Store extends EventEmitter {
       if (col.keyed) fail('denied', 'this collection cannot be watched');
       const pat = KINDS[col.kind].id;
       for (const id of ids) if (typeof id !== 'string' || !pat.test(id)) fail('invalid', 'sub: bad id');
-      const init = [], ok = capped(this.limits.answerBytes);
+      const init = [], ok = capped(this);
       let mode;   // blind or not: one collection, so the same for every id
       for (const id of ids) {
         const pd = parseDocPath(col.parent + '/' + id);
         mode = this._check(actor, 'watch', pd);
-        const d = mode === 'blind' ? null : forLevel(mode, this._read(pd, this.now()));
-        if (d !== null) { ok(answered(d)); init.push({ id, d }); }
+        const { d, most } = this._shown(pd, mode);
+        ok(most || (d === null ? 0 : answered(d)));   // one shown in part counts as the most it can be (_shown)
+        if (d !== null) init.push({ id, d });
       }
       return { spec: { kind: col.kind, parent: at(mode), ids }, init };
     }

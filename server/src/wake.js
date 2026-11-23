@@ -1,4 +1,4 @@
-// Call wake-ups (HANDOFF.md, ringing when closed): `POST /wake { tk }` with a contact's wake ticket sends one VoIP push to
+// Call wake-ups (ringing when the app is closed): `POST /wake { tk }` with a contact's wake ticket sends one VoIP push to
 // the iPhone that issued it; a message ticket (kind m, release 65) sends one alert push saying only "New message", through
 // per-ticket buckets of its own. The ticket is all the server reads; who holds it and which chat it is for, it does not
 // learn. An unknown, revoked or exhausted ticket is answered exactly like a good one, so a ticket's state cannot be

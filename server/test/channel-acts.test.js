@@ -265,7 +265,7 @@ test('a row from before this change stays stored and reads as none at every leve
       const seen = await everyRead(x, col, [...oldIds, fresh.id]);
       for (const way of ['get', 'mget', 'query', 'sub', 'watch']) assert.deepEqual(seen[way], want, way + ': only the new row');
       assert.deepEqual((await x.ok('query', { p: col, l: 1 })).docs.map((r) => r.id), [fresh.id], 'limit 1 finds it, past the three old rows that sort first');
-      assert.deepEqual((await x.ok('query', { p: col, w: [['ct', '==', 'c2ln']], l: 10 })).docs, [], 'nor does a filter on an old row\'s field find one');
+      assert.equal((await x.call('query', { p: col, w: [['ct', '==', 'c2ln']], l: 10 })).e, 'invalid', 'nor does a filter on an old row\'s field find one: it is refused before anything is read (release 112)');
       assert.deepEqual((await x.ok('query', { p: col, w: [['ts', '>', 0]], o: ['ts', 'desc'], l: 10 })).docs, [], 'nor one on its time');
     }
     sam.pushes.length = 0;
@@ -286,7 +286,7 @@ test('a guessed tag gets one answer on every op: at any level get, mget, query, 
       const s = 'pr' + randomBytes(6).toString('hex'), r = [];
       r.push(said(await x.call('get', { p: row(t) })), JSON.stringify((await x.call('get', { p: row(t) })).d));
       const m = await x.call('mget', { ps: [row(t)] }); r.push(said(m), JSON.stringify((m.docs || []).map((d) => d.d)));
-      const q = await x.call('query', { p: col, w: [['post', '==', PID]], l: 10 }); r.push(said(q), JSON.stringify(q.docs));
+      const q = await x.call('query', { p: col, w: [['ts', '>', 0]], l: 10 }); r.push(said(q), JSON.stringify(q.docs));
       const w = await x.call('sub', { s, p: col, ids: [`${PID}~${t}~r`] }); r.push(said(w));
       if (w.ok) { r.push(JSON.stringify((await x.waitPush((f) => f.s === s && f.t === 'init')).docs)); await x.ok('unsub', { s }); }
       r.push(...await writes(x, row(t)));
