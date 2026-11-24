@@ -589,6 +589,29 @@ What stays open:
   three devices: 29 of the other 150 left. An account in 40 chats, notes for 20 of them, two devices: none left.
   The page before release 108 lost no chat in these runs. They ran on a test server without its limit on how
   fast a device may write; under that limit the numbers can differ.
+- A chat's place in your chat list goes by a time kept with the chat, and any member of the chat may write that
+  time; in a public channel that is anyone with an account. Your app lists the 300 chats with the newest time,
+  and listens for calls in the first 90 one-on-one chats among them that you have not blocked or deleted for
+  yourself. Before release 113 one write of a far-off date kept a chat first for good. Since release 113 the
+  server stores a time that is written more than a minute ahead of its own clock as its own clock's time, so a
+  new write can no longer do that. A chat that was given such a date before release 113 keeps it until the
+  next message in that chat, or another change that writes its record again, such as pinning a message in it;
+  a join by link, a key change and a change of admins leave it as it is. A member can still set the time to
+  now, or up to a minute ahead, as often as they like, as a new message would. So enough accounts that each
+  start a chat with you still push your oldest chats out of the 300 and out of the 90, and can keep them out
+  by keeping their own chat's time fresh: those chats are then missing from your list until they get a newer
+  message, and a call in one of them can fail to ring in an open browser page. A request you have not answered
+  takes a place in the same way, so "Send a request first" does not stop this. Blocking such a chat takes it
+  out of the 90, and "Delete for me" does so until the chat's next message, which the same member can send.
+  Neither gives its place among the 300 back, unless you block it while it is still a request you have not
+  answered. The messages stay on the server.
+- The time of a chat's latest message is also kept with the chat and written by any member. Your app dates
+  "Delete for me" and "Mark as read" by it. Since release 113 the server refuses a write of it that is not a
+  number or is more than 400 days ahead, which is as far ahead as a message may be dated; a latest message
+  written with no time at all is still taken. One that a chat held before release 113 stays until that chat's
+  latest message is next written. Within those 400 days it is still the member's to write: if they date it
+  ahead and you then use "Delete for me" on that chat, the chat stays hidden on all your devices until that
+  date, and "Mark as read" on it stops its unread count on that device until that date.
 - Requests and held invitations rest on the note the other person left in your mailbox, which the server
   removes after 30 days. One you have not answered by then is gone, and nobody is told.
 

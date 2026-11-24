@@ -188,6 +188,10 @@ function channels(ctx, d) {
     if (d.last.from !== undefined && d.last.from !== null) fail('invalid', `${w}: "last.from" would put a name on the server`);
     // The latest message's marker is that message without its signature (the page's lastOf): a message's size and the marker's few fixed fields.
     if (byteLength(d.last) > MAX_BYTES.posts + KB && !(ctx.prev && same(ctx.prev.last, d.last))) bad(w, 'last');
+    // The marker's time is its message's and is under the sender's signature, so the server cannot put it right as it does the chat's
+    // own time (store.js, _chatTime): when it is there it is a number, and no further ahead than a message may be (release 113). The
+    // page dates "Delete for me" and "Mark as read" by it. Looked at when a write changes the marker, as its size is.
+    if (d.last.ts !== undefined && !(num(d.last.ts) && d.last.ts <= ctx.now + POST_TS_FUTURE_MS) && !(ctx.prev && same(ctx.prev.last, d.last))) bad(w, 'last');
   }
   if (d.keys !== undefined) wrapMap(d.keys, w, true);
   if (d.akeys !== undefined) wrapMap(d.akeys, w, false);

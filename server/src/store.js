@@ -147,6 +147,14 @@ const metaChanged = (d, prev, f = 'meta') => isPlain(d[f]) && JSON.stringify(d[f
 // none (SPEC.md 5.3). One under a key it does not publish stays: going private, chat.rotate seals a fresh list while the record is
 // still public, and other writes (an admin's post moves `ts`) may land before the update that makes it private.
 const openMeta = (d) => isPlain(d.meta) && isPlain(d.openKeys) && Object.hasOwn(d.openKeys, String(d.meta.e));
+// A chat's time (`ts`) orders every member's chat list, and any member may write it (authz.js). An honest page never writes one more
+// than 3 seconds ahead of its own clock there (it writes now, or a scheduled message's time once it is due, which the page counts from
+// 3 seconds before), so a set, an update or a new chat leaves none more than a minute past this server's clock: a later one is stored
+// as the server's clock (release 113, _chatTime). Stored, not refused: the page sends a message and its chat's update at once, and a
+// refused update would show a stored message as not sent to a phone whose clock is ahead. A time in the past is the member's to write,
+// and "now" as often as it likes. A record that held a later time from before keeps it until its next set or update (a key change, a
+// join, chat.admins and the sweep carry a record over as it is).
+const CHAT_TS_AHEAD_MS = 60_000;
 
 // SPEC.md 4.2 (release 21): when an account's keys change (kv rises) the server appends the old signing key and the
 // time to `prev`, so every device can still check messages signed before the change. Clients may not write it.
@@ -445,6 +453,15 @@ export class Store extends EventEmitter {
     if (byteLength(d) > max) fail('toolarge', 'document too large for this collection');
   }
 
+  // A chat record as it is stored: a time more than a minute past this server's clock is the server's clock (CHAT_TS_AHEAD_MS, above).
+  // The clock can be longer as text than what it takes the place of (1e21), so the size is looked at once more.
+  _chatTime(d, now) {
+    if (!(Number.isFinite(d.ts) && d.ts > now + CHAT_TS_AHEAD_MS)) return d;
+    const t = { ...d, ts: now };
+    this._checkSize('channels', t);
+    return t;
+  }
+
   _chatDoc(cid) {
     const p = parseDocPath('channels/' + cid);
     return { p, doc: this._read(p, this.now()), row: this.q.chatGet.get(cid) || null };
@@ -522,6 +539,7 @@ export class Store extends EventEmitter {
     const now = this.now();
     const prev = this._read(p, now);
     this._check(actor, 'set', p, { d, prev });
+    if (p.kind === 'channels') d = this._chatTime(d, now);
     if (p.kind === 'channels' && d.visibility === 'public') { d = { ...d }; delete d.ometa; delete d.n; if (openMeta(d)) delete d.meta; }   // a public channel's description is plain, its keys published, its count none (until Phase 3)
     if (p.kind === 'directory') { d = withKeyHistory(d, prev, now); this._checkSize(p.kind, d); }
     if (prev && SEALED_KINDS.has(p.kind)) fail('exists', 'a message with this id already exists');
@@ -554,6 +572,7 @@ export class Store extends EventEmitter {
     validateDoc(merged);
     this._checkSize(p.kind, merged);
     this._check(actor, 'update', p, { d: merged, prev, patch });
+    if (p.kind === 'channels') merged = this._chatTime(merged, now);
     if (p.kind === 'channels' && merged.visibility === 'public') { delete merged.ometa; delete merged.n; if (openMeta(merged)) delete merged.meta; }   // a public channel's description is plain, its keys published, its count none (until Phase 3)
     if (p.kind === 'channels' && JSON.stringify(merged.keys) !== JSON.stringify(prev.keys) && !keysRoomOk(merged)) fail('toolarge', 'this chat has no room for more keys');
     if (p.kind === 'channels' && ['keys', 'meta', 'invites'].some((f) => JSON.stringify(merged[f]) !== JSON.stringify(prev[f])) && byteLength(merged) > byteLength(prev) && !ownerRoomOk(merged)) fail('toolarge', 'this chat has no room for that; a removal clears space');
@@ -740,6 +759,7 @@ export class Store extends EventEmitter {
     else if (!ID.CAP.test(caps.a || '') || !ID.CAP.test(caps.o || '')) fail('invalid', 'chat.create: groups and channels need admin and owner keys');
     const now = this.now();
     if (d.visibility === 'public') { d = { ...d }; delete d.n; }   // as set: no count on a public channel
+    d = this._chatTime(d, now);
     validateForKind('channels', { ...p, now, op: 'set', prev: null }, d);
     if (!metaEpochOk(d) || !ometaEpochOk(d)) fail('invalid', 'chat.create: sealed meta must be sealed under the chat\'s epoch');
     const existing = this._read(p, now);
