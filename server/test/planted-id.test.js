@@ -6,7 +6,9 @@
 // private channel marked public by someone who can write the database is still believed; that fix is planned for a later release).
 // This file was first written as public-word.test.js (b8fc142), when the helper also judged the word "public"; that half was taken
 // out again by the owner's decision of 2026-11-16, its tests went with it, and the tests of the planted `id` keep the numbers they
-// had there (8, 11, 16a to 16f).
+// had there (8, 11, 16a to 16f). Release 111, part G: New message lists no public channel any more; the chat list's search finds
+// them (searchExtras, with the listing kept by pubChans right under it), so the door that was openNewChat's is pubChans' now, the
+// first of the seven in the file's order, and tests 11 and 16f moved there with it.
 // The page's own code runs here against a real server (channel-history-kit.js); "the writer" writes straight into the store, so
 // no test leans on a server rule. Harness liberty: the doors a real server cannot reach from here (ensureDmDoc, watchPushCall) run
 // as written around stand-ins.
@@ -36,15 +38,16 @@ const build = mkBuild(FNS);
 const watchBuild = mkBuild([lift('const isBlocked=', '\n'), lift('async function noteOk(', '/* Blocking'), lift('function notePointer(', '/* ---------- voice calls'),
   'const dmInfo=()=>null,setDmInfo=()=>{},noKeyNotice=()=>{},ownNote=dropPointer;',
   'Object.assign(S,{watchInbox,ownNote:(cid,type)=>ownNote(S.me.handle,{t:\'invite\',cid,from:S.me.handle,type})});'].join('\n'));
-// New message (openNewChat, with the public channels it asks the server for), as channel-history-info.test.js lifts it: the rows it draws.
+// The chat list's search (searchExtras, with the public channels pubChans asks the server for), as channel-history-info.test.js lifts it: the rows it draws.
 const newChatBuilt = mkBuild([lift('const curConv=', '\n'), lift('const canPost=', '\n'), lift('const isBlocked=', '\n'), lift('const contactFor=', '\n'), lift('const knownHandle=', '\n'),
   lift('const subsText=', '\n').replace('const subsText=', 'const subsTextReal='),
-  lift('function emptyPeople(', 'function picker('), lift('function openNewChat(', 'async function openDm('),
-  "const html=(t,c,h)=>el(t,c,h),userAvatar=()=>({}),isOnline=()=>false,lastSeen=()=>'',liveSearch=()=>()=>{};",
-  'spy.fns={subsText:subsTextReal,openNewChat};'].join('\n'));
+  lift('function emptyPeople(', 'function picker('), lift('function searchExtras(', 'function updateStatus('),
+  "const html=(t,c,h)=>el(t,c,h),userAvatar=()=>({}),isOnline=()=>false,lastSeen=()=>'',liveSearch=()=>()=>{},peopleLook=()=>{},isRequest=()=>false;",
+  'spy.fns={subsText:subsTextReal,searchExtras};'].join('\n'));
 const node = (e) => Object.assign(e, { kids: [], append(...k) { this.kids.push(...k); }, replaceChildren(...k) { this.kids = k; }, setAttribute() {}, style: {}, insertAdjacentHTML() {}, classList: { add() {}, remove() {} }, value: '' });
 const newChatBuild = (env) => { env.spy.sheets = []; env.spy.opened = [];
   return newChatBuilt({ ...env, I: new Proxy({}, { get: () => '' }), subsText: (...a) => env.spy.fns.subsText(...a), el: (...a) => node(env.el(...a)), openConv: (cid) => env.spy.opened.push(cid),
+    renderList: () => { env.spy.drew = (env.spy.drew || 0) + 1; },   // the chat list drawn again: the search's listing arrived
     sheet: (title) => { const body = node({ tag: 'sheet', cls: 'body', textContent: '' }); env.spy.sheets.push({ title, body }); return { body, sh: node({}), close() {} }; } }); };
 
 // The database writer: straight into the store, no rule asked. `capM`: the member key the server then checks for the chat.
@@ -105,11 +108,11 @@ test('11. the lines themselves, as written: no record is laid over its address a
   const helper = UI.slice(at, UI.indexOf('\nconst dmPeer=', at));
   assert.equal(helper.replace(/ \/\/ .*$/, ''), 'const chatRec=(cid,d)=>Object.assign({},d,{id:cid});', 'the address asked for over whatever the record carries; no other field is read or changed (`visibility` as the server sent it)');
   const rest = UI.slice(0, at) + UI.slice(at + helper.length);
-  assert.deepEqual(rest.match(/chatRec\([^()]*\(\)\)/g), ['chatRec(cid,s.data())', 'chatRec(cid,s.data())', 'chatRec(cid,s.data())', 'chatRec(c.id,s.data())', 'chatRec(d.id,d.data())', 'chatRec(cid,d.data())', 'chatRec(cid,s.data())'], 'the seven doors, in the file\'s order: capsFor, onChatEvicted, freshChan, ensureDmDoc, openNewChat, watchInbox, watchPushCall');
+  assert.deepEqual(rest.match(/chatRec\([^()]*\(\)\)/g), ['chatRec(d.id,d.data())', 'chatRec(cid,s.data())', 'chatRec(cid,s.data())', 'chatRec(cid,s.data())', 'chatRec(c.id,s.data())', 'chatRec(cid,d.data())', 'chatRec(cid,s.data())'], 'the seven doors, in the file\'s order: pubChans (the search\'s public listing; openNewChat\'s until release 111), capsFor, onChatEvicted, freshChan, ensureDmDoc, watchInbox, watchPushCall');
   assert.equal(rest.split('chatRec(').length - 1, 7, 'and nowhere else');
   for (const [fn, line] of [['capsFor', 'c=chatRec(cid,s.data());S.chatDocs.set(cid,c)}'], ['onChatEvicted', 'if(s.exists)S.chatDocs.set(cid,chatRec(cid,s.data()));else S.chatDocs.delete(cid)'],
     ['freshChan', "throw new Error('gone');return chatRec(cid,s.data())}"], ['ensureDmDoc', 'if(s.exists){const d=chatRec(c.id,s.data());S.chatDocs.set(c.id,d);'],
-    ['openNewChat', 'pubs=s.docs.map(d=>chatRec(d.id,d.data()));draw()'], ['watchInbox', 'const c=d.exists?chatRec(cid,d.data()):null;if(c)noteChatDoc(c);'],
+    ['pubChans', 'L.rows=s.docs.map(d=>chatRec(d.id,d.data()));'], ['watchInbox', 'const c=d.exists?chatRec(cid,d.data()):null;if(c)noteChatDoc(c);'],
     ['watchPushCall', 'const c=chatRec(cid,s.data());S.chatDocs.set(cid,c);S.previews.set(cid,await showMeta(c))']]) assert.ok(UI.includes(line), fn + ': ' + line);
 });
 
@@ -175,19 +178,20 @@ test('16e. watchInbox (every chat in the list): a channel whose record carries a
   });
 });
 
-test('16f. openNewChat (the public search list): what the server lists is filed under its own address', async () => {
+test('16f. pubChans (the public channels the chat list\'s search finds; openNewChat\'s list until release 111): what the server lists is filed under its own address', async () => {
   await world({}, async (w) => {
     const { O, C, c, J } = await setup(w, { carolBuild: newChatBuild });
     const open = 'c' + rnd(12);
     await O.createChatDoc(open, 'channel', 'public', { name: 'Open', desc: '', photo: null, owner: 'olga', admins: [], members: ['olga'], banned: [] });
     writer(w, c).rec({ ...flipCur(srvRec(w, c), J, O.b64), id: open });   // the planted address is the honest public channel's
-    const rows = async (X) => { X.spy.sheets.length = 0; X.spy.fns.openNewChat();
-      const list = X.spy.sheets.at(-1).body.kids.at(-1), at = () => list.kids.findIndex((k) => k.cls === 'menu-label flush' && k.textContent === 'Public channels');
-      await until(() => at() >= 0, 'the public channels on ' + X.handle + '\'s New message');
-      return list.kids.slice(at() + 1).filter((k) => k.cls === 'thread').map((r) => { const m = r.kids.find((k) => k && k.cls === 't-main'); return { name: m.kids.find((k) => k.cls === 't-name').kids.at(-1), line: m.kids.find((k) => k.cls === 't-sub').textContent, tap: r.onclick }; }); };
+    // the search as drawn for the text q, once the listing it asked the server for is in (the page draws its list again then: spy.drew)
+    const rows = async (X, q) => { const box = node({ tag: 'div', cls: 'threads', textContent: '' }), draw = () => { box.kids = []; Object.assign(X.S, { tab: 'chats', query: q }); X.spy.fns.searchExtras(box, []); };
+      draw(); await until(() => X.spy.drew, 'the public listing on ' + X.handle + '\'s search'); draw();
+      const at = box.kids.findIndex((k) => k.cls === 'menu-label' && k.textContent === 'Public channels');
+      return at < 0 ? [] : box.kids.slice(at + 1).filter((k) => k.cls === 'thread').map((r) => { const m = r.kids.find((k) => k && k.cls === 't-main'); return { name: m.kids.find((k) => k.cls === 't-name').kids.at(-1), line: m.kids.find((k) => k.cls === 't-sub').textContent, tap: r.onclick }; }); };
     // carol is shown both; each row opens the address the server listed it under
-    const rc = await rows(C);
-    assert.deepEqual(rc.map((r) => r.name).sort(), ['Made up', 'Open'], 'the honest public channel is listed, and the marked one');
+    const rc = [...await rows(C, 'made'), ...await rows(C, 'open')];
+    assert.deepEqual(rc.map((r) => r.name).sort(), ['Made up', 'Open'], 'the honest public channel is found by its name, and the marked one by its');
     rc.find((r) => r.name === 'Made up').tap();
     assert.deepEqual([C.spy.opened, [...C.S.previews.keys()]], [[c], [c]], 'the marked record opens under its own address, not the planted one');
   });

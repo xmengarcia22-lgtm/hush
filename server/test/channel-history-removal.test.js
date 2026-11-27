@@ -312,6 +312,13 @@ test('43. a block still drops the chat\'s note, once the page has its own profil
     const ew = await watching(w, E, [c2, g]);
     await A.kickMember(c2, 'eve', { ban: true }); await A.kickMember(g, 'eve');
     await until(() => !ew.shows(c2) && !ew.shows(g), 'both to leave Eve\'s list');
+    // The group's note goes at the refusal when Eve's re-open reached the server between the admin's block and key change
+    // (the right key still: the server says "you were removed", and the page forgets at once, as it always did). After the
+    // key change her key is an old one, refused as any old key is: since release 111 that deletes no note by itself, and
+    // the look-again's fresh copy of the record, which her device cannot open, does. Both orders are right; which one a
+    // run takes is the admin's two frames against her one.
+    if (!ew.dels.length) await ew.look(g);   // the 15-second look again, at once
+    await until(() => ew.dels.length > 0, 'the group\'s note to go');
     assert.deepEqual(ew.dels, [ew.note(g)], 'the channel\'s note waits; the group\'s is gone');
     await ew.restart(c2);
     assert.deepEqual([ew.dels, await ew.kept(c2)], [[ew.note(g)], true], 'also at the next start');
@@ -426,5 +433,31 @@ test('151. the owner\'s page replaces the admin secret by itself once an admin\'
     assert.deepEqual([A.spy.admins, (await A.sync(cid)).epoch], [[cid], 2], 'once: the noted version stops a second replacement, and no key changed');
     const tb = summary(B, rec);
     assert.ok(tb.includes('The removed device can still act as an admin of History until the owner next opens Hush and has accepted your new security code. If it’s an older channel, the owner first taps Edit, then Save. Then it is shut out. If the removed device is in the wrong hands, tell the owner now.'), JSON.stringify(tb));
+  });
+});
+
+// Release 111, the third round of review fixes. The server answers the RIGHT member key of a blocked username `denied`
+// "you were removed from this chat" (protocol.js, chat.open), any other key "that key does not open this chat". The
+// adapter keeps the first (S.db.chatOut) and the chat watch asks it: so a block that changes no key (a group that has
+// used its key numbers, a key change that failed after the block) forgets the chat at the refusal, as the page did
+// before release 111, although this device still holds the chat's current key. Should the server's sentence change,
+// this test fails.
+test('160. a block with no key change, on the real server: the right key is refused as "removed", the page forgets the group at the refusal with no look-again and its note goes; and a watch that begins after such a block does not list the group as an empty row from the copy anyone signed in may read', async () => {
+  await watchWorld(async (w) => {
+    const g = newCid('g'), g2 = newCid('g');
+    const A = await w.page('alice', { owner: true }), E = await w.page('eve', { build: watchBuild }); await w.page('carol');
+    await makeChannel(A, g, ['alice', 'eve', 'carol'], [], 'group'); await makeChannel(A, g2, ['alice', 'eve', 'carol'], [], 'group');
+    assert.deepEqual([await E.holds(g, 0), await E.holds(g2, 0)], [true, true]);
+    await E.loadDir(['eve'], true);
+    const ew = await watching(w, E, [g]);
+    const epoch = async (cid) => (await A.S.db.preview(cid)).data().epoch || 0;
+    await A.S.db.banChat(g, 'eve', true);                          // the block alone: no key change follows
+    await until(() => ew.dels.length === 1, 'the group\'s note to go without a look-again');
+    assert.deepEqual([ew.shows(g), ew.dels, E.S.db.chatOut(g), await epoch(g)], [false, [ew.note(g)], true, 0], 'forgotten at the refusal; the adapter kept what the server said; the key number did not move');
+    await until(async () => !(await ew.kept(g)), 'the note gone from the server');
+    await A.S.db.banChat(g2, 'eve', true);                         // blocked from the second group while her page does not watch it
+    await E.S.ownNote(g2, 'group');                                // her note for it, as a device that was not open at the block still has: the watch begins now
+    await until(() => ew.dels.length === 2, 'the second group\'s note to go');
+    assert.deepEqual([ew.lists.some((l) => l.includes(g2)), await E.holds(g2, 0), await epoch(g2)], [false, true, 0], 'never listed, not even as an empty row, though this device holds its current key');
   });
 });

@@ -104,6 +104,7 @@ html.kb-up .sheet{padding-bottom:0}
 @media (max-width:359px){.bar:has(>.chat-head)>.icon-btn{width:36px}.chat-head{gap:8px}} /* 320 px: a one-on-one chat has five keys in its header; 36 px wide (still 44 high) leaves the name about 64 px, not 20 */
 #msgs{flex:1;overflow-y:auto;padding:16px max(16px,calc((100% - 720px) / 2)) 8px;display:flex;flex-direction:column;gap:4px;
   background-color:var(--bg)}
+#msgs:not(:has(>.notice))::before{content:"";margin:auto 0 -4px} /* a short chat sits at the bottom, above the composer: a spacer takes the free room and gives the box's gap back, so a full chat is laid out as before; not with the empty-chat notice, which centres itself */
 .chat-blank{flex:1;display:grid;place-items:center;background-color:var(--bg)}
 .chip{align-self:center;background:none;color:var(--muted);font-size:13px;line-height:16px;padding:4px 0;margin:4px 0;text-align:center;max-width:90%;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .chip.day{font-size:11px;line-height:16px;font-weight:500;letter-spacing:.25em;text-transform:uppercase;padding-left:.25em;margin:12px 0}

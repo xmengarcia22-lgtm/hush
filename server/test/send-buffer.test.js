@@ -9,6 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
 import { randomBytes, createHash } from 'node:crypto';
 import { StatementSync } from 'node:sqlite';
@@ -817,30 +818,36 @@ test('a write is not charged the time its pushes take: whoever holds many watche
   } finally { await T.stop(); }
 });
 
-test('a page whose address runs out of server time between the hello and the sign-in of a new connection is not left online and signed out: the server ends a connection whose sign-in it refused for that, and the page as shipped (its adapter, unchanged) comes back and signs in', LIMIT, async () => {
-  const T = await startServer({ authz: 'standard', limits: { frameMsPerMinPerAddr: 3000 } });
+// Two pages, each on a server of its own: release 109b's (its adapter kept as it was in fixtures/adapter-109b.txt; a page left open or
+// not yet reloaded stays in use beside the new one) and the page as shipped (app/adapter.js, release 111's from that release on).
+test('a page whose address runs out of server time between the hello and the sign-in of a new connection is not left online and signed out: the server ends a connection whose sign-in it refused for that, and the page comes back and signs in, release 109b\'s page (its adapter as it was) and the page as shipped alike', LIMIT, async () => {
   const B = '/* ===== HUSH ADAPTER BEGIN ===== */', E = '/* ===== HUSH ADAPTER END ===== */', all = appSource();
-  const createHushAdapter = new Function(all.slice(all.indexOf(B) + B.length, all.indexOf(E)) + '\nreturn createHushAdapter;')();
-  let drain = null, proves = 0, db;
-  class Sock extends WebSocket {
-    constructor(url) { super(url, { headers: { 'x-forwarded-for': '203.0.113.61' } }); }
-    send(s) { if (/"op":"prove"/.test(s)) { proves++; if (drain) { drain(); drain = null; } } return super.send(s); }
+  const old = readFileSync(new URL('./fixtures/adapter-109b.txt', import.meta.url), 'utf8'), shipped = all.slice(all.indexOf(B) + B.length, all.indexOf(E));
+  assert.equal(sha(old), '6616192853d99ecfa6f0e285af9f9170000d5b8d25df563a58c349b51ea72fd3', 'release 109b\'s adapter, as it was');
+  for (const [which, src] of [['release 109b\'s page', old], ['the page as shipped', shipped]]) {
+    const T = await startServer({ authz: 'standard', limits: { frameMsPerMinPerAddr: 3000 } });
+    const createHushAdapter = new Function(src + '\nreturn createHushAdapter;')();
+    let drain = null, proves = 0, db;
+    class Sock extends WebSocket {
+      constructor(url) { super(url, { headers: { 'x-forwarded-for': '203.0.113.61' } }); }
+      send(s) { if (/"op":"prove"/.test(s)) { proves++; if (drain) { drain(); drain = null; } } return super.send(s); }
+    }
+    try {
+      const id = await makeIdentity('pagesixtyone');
+      await (await signup(T.url, id)).close();
+      db = createHushAdapter(T.url, { WebSocket: Sock, pingMs: 2000, callTimeoutMs: 5000, offlineWaitMs: 3000 });
+      await db.ready;
+      await db.prove({ h: id.handle, pub: id.sig, dev: '', signDev: null, signAcct: (m) => signText(id.sigKey, m) });
+      const conn = [...T.srv.conns].find((c) => c.proven === id.handle), fm = conn.ctx.frameMs, tag = conn.fixedTag;
+      drain = () => fm.spend(tag, fm.tokensLeft(tag) + 100);   // 100 ms below zero as the page sends its sign-in: two seconds to make good
+      proves = 0;
+      conn.ws.terminate();   // the connection drops; the page comes back by itself
+      const t0 = Date.now();
+      while (Date.now() - t0 < 25_000 && !(db.online && db.proven === id.handle && proves > 1)) await sleep(100);
+      assert.deepEqual([db.online, db.proven, proves > 1], [true, id.handle, true], `${which}: after ${Date.now() - t0} ms, ${proves} sign-ins sent`);
+      await db.doc('directory/' + id.handle).update({ bio: 'back' });
+    } finally { if (db) db.close(); await T.stop(); }
   }
-  try {
-    const id = await makeIdentity('pagesixtyone');
-    await (await signup(T.url, id)).close();
-    db = createHushAdapter(T.url, { WebSocket: Sock, pingMs: 2000, callTimeoutMs: 5000, offlineWaitMs: 3000 });
-    await db.ready;
-    await db.prove({ h: id.handle, pub: id.sig, dev: '', signDev: null, signAcct: (m) => signText(id.sigKey, m) });
-    const conn = [...T.srv.conns].find((c) => c.proven === id.handle), fm = conn.ctx.frameMs, tag = conn.fixedTag;
-    drain = () => fm.spend(tag, fm.tokensLeft(tag) + 100);   // 100 ms below zero as the page sends its sign-in: two seconds to make good
-    proves = 0;
-    conn.ws.terminate();   // the connection drops; the page comes back by itself
-    const t0 = Date.now();
-    while (Date.now() - t0 < 25_000 && !(db.online && db.proven === id.handle && proves > 1)) await sleep(100);
-    assert.deepEqual([db.online, db.proven, proves > 1], [true, id.handle, true], `after ${Date.now() - t0} ms, ${proves} sign-ins sent`);
-    await db.doc('directory/' + id.handle).update({ bio: 'back' });
-  } finally { if (db) db.close(); await T.stop(); }
 });
 
 test('the refusal allowance is one address\'s over all its connections: once refused answers have used it up (here 5 MB a minute, an answer of 2.4 MB under a 2 MB cap), a new connection from that address is refused ratelimit at once, with nothing read, also when it comes after the address closed every socket it had; another address has its own', LIMIT, async () => {

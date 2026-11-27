@@ -1,6 +1,7 @@
 // Channel member privacy, Channel info and the count (SPEC.md 5.3): in any channel only the owner and the admins may learn who the
 // subscribers are, and so how many there are. A page drew the number of subscribers (subsText) in the chat header, on the chat list's
-// row of a channel with no post yet (which the sealed list cache keeps), on the join sheet, in New message's public channels and on
+// row of a channel with no post yet (which the sealed list cache keeps), on the join sheet, in the public channels the chat list's
+// search finds (New message listed them until release 111, part G; the rows and this file's test of them moved with them) and on
 // Channel info's top line, and Channel info listed every subscriber, each with a Block person action. Now a page whose account is
 // neither the owner nor an admin of the channel reads only "Private channel" or "Public channel" there, even when the record carries the
 // count `n` (the cases under the rule put one on the records, release 93b; Channel info's top line alone adds a number of subscribers,
@@ -18,22 +19,23 @@ import { lift, mkBuild, world, makeChannel, oldServer } from './channel-history-
 import { sleep } from './helpers.js';
 
 // The page's own code beyond the kit's, reached through spy.fns: Channel info (openConvInfo), the chat header (refreshHeader), the chat
-// list's row model (rowModel, whose strings the sealed list cache keeps), New message (openNewChat, with the public channels it
-// asks the server for), and the two count texts (the kit stands stubs in for them: memberText, subsText, so the real ones are named
+// list's row model (rowModel, whose strings the sealed list cache keeps), the chat list's search (searchExtras, with the public
+// channels it asks the server for; pubChans, right under it, is lifted with it), and the two count texts (the kit stands stubs in for them: memberText, subsText, so the real ones are named
 // ...Real here and the stubs call them). Elements are kept with what they hold, a sheet's body as its elements, so a test reads what
 // was drawn; the icons are empty strings.
 const built = mkBuild([
   lift('const curConv=', '\n'), lift('const canPost=', '\n'), lift('const isBlocked=', '\n'), lift('const contactFor=', '\n'), lift('const knownHandle=', '\n'),
   lift('const memberText=', '\n').replace('const memberText=', 'const memberTextReal='), lift('const subsText=', '\n').replace('const subsText=', 'const subsTextReal='),
   lift('function rowModel(', 'function drawRow('), lift('function refreshHeader(', 'const sideSeq='), lift('function openConvInfo(', 'function pickPhoto('),
-  lift('function emptyPeople(', 'function picker('), lift('function openNewChat(', 'async function openDm('),
-  "const $=(s)=>s==='#convSub'?spy.sub:null,html=(t,c,h)=>el(t,c,h),userAvatar=()=>({}),isOnline=()=>false,lastSeen=()=>'',FEATURES={},reactCfg=()=>({mode:'all',allowed:[]}),openMediaGallery=()=>{},openPollCreate=()=>{},openReactSettings=()=>{},isMuted=()=>false,isPinned=()=>false,badgeOf=()=>null,hiddenPost=()=>false,previewText=()=>'',noKeyNotice=()=>{},liveSearch=()=>()=>{};",
-  'spy.fns={subsText:subsTextReal,memberText:memberTextReal,rowModel,refreshHeader,openConvInfo,openNewChat};',
+  lift('function emptyPeople(', 'function picker('), lift('function searchExtras(', 'function updateStatus('),
+  "const $=(s)=>s==='#convSub'?spy.sub:null,html=(t,c,h)=>el(t,c,h),userAvatar=()=>({}),isOnline=()=>false,lastSeen=()=>'',FEATURES={},reactCfg=()=>({mode:'all',allowed:[]}),openMediaGallery=()=>{},openPollCreate=()=>{},openReactSettings=()=>{},isMuted=()=>false,isPinned=()=>false,badgeOf=()=>null,hiddenPost=()=>false,previewText=()=>'',noKeyNotice=()=>{},liveSearch=()=>()=>{},peopleLook=()=>{},isRequest=()=>false;",
+  'spy.fns={subsText:subsTextReal,memberText:memberTextReal,rowModel,refreshHeader,openConvInfo,searchExtras};',
 ].join('\n'));
 const node = (e) => Object.assign(e, { kids: [], append(...k) { this.kids.push(...k); }, replaceChildren(...k) { this.kids = k; }, setAttribute() {}, style: {}, insertAdjacentHTML() {}, classList: { add() {}, remove() {} }, value: '' });
 const build = (env) => {
   env.spy.sheets = [];
   return built({ ...env, I: new Proxy({}, { get: () => '' }), subsText: (...a) => env.spy.fns.subsText(...a), memberText: (...a) => env.spy.fns.memberText(...a), el: (...a) => node(env.el(...a)),
+    renderList: () => { if (env.spy.renderList) env.spy.renderList(); },   // the chat list drawn again: the search's listing arrived (publicRows)
     sheet: (title) => { const body = node({ tag: 'sheet', cls: 'body', textContent: '' }); env.spy.sheets.push({ title, body }); return { body, sh: node({}), close() {} }; } });
 };
 
@@ -52,12 +54,15 @@ function header(X, c) { X.S.chan = c.id; X.spy.sub = node({ tag: 'div', cls: 't-
 const listRow = (X, c) => X.spy.fns.rowModel(c, null, Date.now());
 // The join sheet's line under the channel's name
 function joinLine(X, c) { X.spy.sheets.length = 0; X.confirmJoin(c, {}); return one(one(X.spy.sheets.at(-1).body.kids, 'info-top').kids, 't-sub').textContent; }
-// What New message says under each public channel it lists
-async function publicRows(X) {
-  X.spy.sheets.length = 0; X.spy.fns.openNewChat();
-  const list = X.spy.sheets.at(-1).body.kids.at(-1), at = () => list.kids.findIndex((k) => k.cls === 'menu-label flush' && k.textContent === 'Public channels');
-  for (let t0 = Date.now(); at() < 0; await sleep(40)) if (Date.now() - t0 > 6000) throw new Error('timed out waiting for the public channels on ' + X.handle + '\'s New message');
-  return list.kids.slice(at() + 1).filter((k) => k.cls === 'thread').map((r) => one(one(r.kids, 't-main').kids, 't-sub').textContent);
+// What the chat list's search says under each public channel it finds for the text q: the search is drawn, the listing it asks the
+// server for is waited for (the page draws its list again when it arrives: renderList, counted here), and the search is drawn again
+async function publicRows(X, q) {
+  const box = node({ tag: 'div', cls: 'threads', textContent: '' }), draw = () => { box.kids = []; Object.assign(X.S, { tab: 'chats', query: q }); X.spy.fns.searchExtras(box, []); };
+  let drew = 0; X.spy.renderList = () => { drew++; };
+  draw();
+  if (!X.spy.listed) { for (let t0 = Date.now(); !drew; await sleep(40)) if (Date.now() - t0 > 6000) throw new Error('timed out waiting for the public listing on ' + X.handle + '\'s search'); X.spy.listed = true; draw(); }
+  const at = box.kids.findIndex((k) => k.cls === 'menu-label' && k.textContent === 'Public channels');
+  return at < 0 ? [] : box.kids.slice(at + 1).filter((k) => k.cls === 'thread').map((r) => one(one(r.kids, 't-main').kids, 't-sub').textContent);
 }
 
 // Alice owns a private channel where Xena and Erin are admins and Bob and Carol subscribe, and a public channel where Xena is an admin,
@@ -154,14 +159,19 @@ for (const rule of [false, true]) test(`the count of subscribers, ${rule ? 'unde
   });
 });
 
-test('New message lists the public channels with the number of subscribers for their owner and admins, and with "Public channel" for everyone else, even when the listing\'s record carries an n', async () => {
+test('the chat list\'s search lists a public channel with the number of subscribers for its owner and admins, and with "Public channel" for everyone else, even when the listing\'s record carries an n (the rows New message drew until release 111)', async () => {
   await world({}, async (w) => {
     const { A, X, B, D, pid } = await cast(w, false);
     const st = w.T.srv.store, q = st.query.bind(st); st.query = (...a) => q(...a).map((r) => (r.id === pid ? { ...r, d: { ...r.d, n: 2 } } : r));   // no server puts n on a public channel's record or in the listing; this one does, so the rows below pin that a subscriber's page shows none even then
     assert.deepEqual((await B.S.db.collection('channels').where('visibility', '==', 'public').limit(100).get()).docs.map((d) => d.data().n), [2], 'the listing hands Bob the count');
-    const [a, x] = [await publicRows(A), await publicRows(X)];
+    // the channel is among Alice's, Xena's and Bob's chats: their search does not list it a second time. Dave has not joined: he finds it
+    assert.deepEqual([await publicRows(A, 'history'), await publicRows(X, 'history'), await publicRows(B, 'history'), await publicRows(D, 'history')], [[], [], [], ['Public channel']], 'a channel of mine is not found as one to join; a visitor\'s page: the kind of channel');
+    assert.deepEqual([await publicRows(D, 'h'), await publicRows(D, 'no such name')], [[], []], 'one character, and a text the name does not hold: no row');
+    // a page whose chat list is not in yet (a device just signed in) lists it: with a number only for the owner and an admin
+    for (const P of [A, X, B]) P.S.convs = [];
+    const [a, x] = [await publicRows(A, 'history'), await publicRows(X, 'history')];
     assert.ok(a.length === 1 && /subscribers$/.test(a[0]) && x.length === 1 && /subscribers$/.test(x[0]), 'the owner\'s and an admin\'s pages: a number, as before (the public listing holds no list, so it counts 0): ' + JSON.stringify([a, x]));
-    assert.deepEqual([await publicRows(B), await publicRows(D)], [['Public channel'], ['Public channel']], 'a subscriber\'s page and a visitor\'s: the kind of channel');
+    assert.deepEqual([await publicRows(B, 'history'), await publicRows(D, 'history')], [['Public channel'], ['Public channel']], 'a subscriber\'s page and a visitor\'s: the kind of channel');
   });
 });
 

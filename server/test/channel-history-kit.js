@@ -88,7 +88,7 @@ async function pageFor(T, handle, o = {}) {
   S.me = { handle, ...id };
   Object.assign(P, { S, ls, store, spy, id, handle, clock, kv, loadDir: env.loadDir, close: () => S.db && S.db.close() });
   if (!T) return P;
-  const db = createHushAdapter(T.url, { WebSocket, onStatus: noop, onPower: (cid, held) => { (S.paused || (S.paused = new Set())).add(cid); (spy.power = spy.power || []).push([cid, held]); }, caps: async (cid) => { if (spy.capsFor) return spy.capsFor(cid);
+  const db = createHushAdapter(T.url, { WebSocket, onStatus: noop, evictNow: () => !!S.rekeying, onPower: (cid, held) => { (S.paused || (S.paused = new Set())).add(cid); (spy.power = spy.power || []).push([cid, held]); }, caps: async (cid) => { if (spy.capsFor) return spy.capsFor(cid);
     const s = await db.preview(cid); if (!s.exists) return null;
     const c = P.chatRec(cid, s.data()), a = await P.adminSecret(c).catch(() => null);   // the record through the page's own door, as capsFor reads it (release 108)
     const own = o.owner ? [await P.ownerCap(cid), await P.ownerCapOld(cid)] : []; if (S.rekeying) own.reverse();   // as capsFor: the server knows the old owner key until a device removal replaces it

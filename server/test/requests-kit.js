@@ -32,7 +32,7 @@ const RECV = (inbox) => [
   lift('function notePointer(', '/* ===== HUSH INBOX RULE BEGIN ===== */'),
   lift('function pointerVerdict(', '\n'),
   inbox || lift('function watchInbox(', '/* ---------- voice calls (SPEC.md 16.2)'),
-  lift('const callable=', '\n'), lift('const callsChat=', '\n'), lift('const lastRead=', '\n'), lift('function markRead(', '\nasync function writeSeen('),
+  lift('const callable=', '\n'), lift('const callsChat=', '\n'), lift('const lastRead=', '\n'), lift('const paceAt=', '\nfunction markRead('), lift('function markRead(', '\nasync function writeSeen('),
 ].join('\n');
 const RSTUBS = ['S', 'ls', 'P', 'saveContacts', 'hiddenConv', 'openPointer', 'validHandle', 'senderKeys', 'dmIdFor', 'dmIds', 'ksMap', 'sideOk', 'showMeta', 'adoptOMeta', 'adminGone',
   'noteChatDoc', 'convKey', 'healCard', 'unsealPost', 'recordBase', 'dropPointer', 'noKeyNotice', 'toastErr', 'heldKey', 'codeWait', 'codeWaitEnd', 'setInterval', 'clearInterval', 'loadDir',

@@ -314,17 +314,24 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{const d=TABS.indexOf
 $('#q').oninput=e=>{S.query=e.target.value.trim().toLowerCase();renderList()};
 
 const lastRead=k=>ls.get(`hush:read:${S.me.handle}:${k}`,0);
+// What the chat on screen writes for every message that arrives (its read mark, the chat's latest-message marker) goes at most once a
+// second for each key: at once when a second has passed since the last, else once at the end of that second, the latest asked for
+// (by a clock that does not step, so the device's clock set back holds nothing up). However fast messages arrive, these two writes come to two
+// frames a second where they were three a message (SPEC.md 9.4). Not paced: the delete each page sends for a message that expires, and
+// the profile read for a sender this page holds no profile for. A page closed, put to sleep for good or signed out inside the second
+// leaves the last mark of a burst unwritten.
+const paceAt=new Map(),paceT=new Map();
+function paced(k,fn){clearTimeout(paceT.get(k));const d=(paceAt.get(k)||-1e3)+1000-performance.now(),go=()=>{paceAt.set(k,performance.now());fn()};if(d<=0)go();else paceT.set(k,setTimeout(go,d))}
 function markRead(){
   const c=curConv();if(!c||!S.posts.length||document.hidden)return;
   const ts=S.posts[S.posts.length-1].ts;
   if(ts>lastRead(c.id))ls.set(`hush:read:${S.me.handle}:${c.id}`,ts);
   S.unread.set(c.id,0);updateTitle();
-  if(S.db&&isMember(c)&&!isRequest(c)&&(S.readWritten.get(c.id)||0)<ts){S.readWritten.set(c.id,ts);writeSeen(c,ts)}
+  if(S.db&&isMember(c)&&!isRequest(c)&&(S.readWritten.get(c.id)||0)<ts){S.readWritten.set(c.id,ts);const me=S.me.handle;paced('seen:'+c.id,()=>{if(S.me&&S.me.handle===me)writeSeen(c,ts)})} // the mark that waited its second is written for its own chat also when another is on screen by then, never under another account
 }
 async function writeSeen(c,ts){ // "read up to here", filed under a tag only the people in this chat can work out
   try{const e=epochOf(c),t=await memTag(c,e,S.me.handle);if(!t)return;
     await S.db.doc(`channels/${c.id}/reads/${e}~${t}`).set(await sealSide(c,e,t,'hush-seen-v1',ts));
-    S.db.doc(`channels/${c.id}/reads/${S.me.handle}`).delete().catch(()=>{}); // tidy away the old named mark
   }catch{}}
 const typeOf=c=>(c&&c.type)||'channel';
 const chatRec=(cid,d)=>Object.assign({},d,{id:cid}); // a record as the server gave it, at the address asked for: a field `id` in it never wins
@@ -385,21 +392,24 @@ function drawRow(m,c){
   if(c&&m.k==='dm'&&isOnline(m.h)){const w=el('div','av-wrap');w.append(av,el('span','on-dot'));b.append(w)}else b.append(av);
   b.append(main);
   if(c){b.onclick=()=>{if(b._noClick&&Date.now()-b._noClick<600)return;openConv(c.id)};addLongPress(b,()=>chatMenu(b,c))}
-  else if(!row)b.onclick=()=>{S.wantOpen=m.id}; // opened by onConvs the moment the record is in
+  else if(!row)b.onclick=()=>{S.wantOpen=m.id;if(S.db&&S.db.hurry)S.db.hurry(m.id)}; // opened by onConvs the moment the record is in, which this tap sends for ahead of the start's other chats
   return b}
 
-let listSeq=0,lastList={h:'',j:''};
+let listSeq=0,lastList={h:'',j:''},listOrder={h:'',m:null};
+function listRank(cid){const h=S.me&&S.me.handle;if(!h||S.convsLoaded)return -1;if(listOrder.h!==h){const rows=ls.get('hush:list:'+h,null);listOrder={h,m:new Map((Array.isArray(rows)?rows:[]).map((m,i)=>[m&&m.id,i]))}}const r=listOrder.m.get(cid);return r===undefined?-1:r} // a chat's place in the list as last drawn, while the live one is still coming: the start's queue follows it
 async function renderList(){
-  const seq=++listSeq,box=$('#threads');updateStatus();
+  const seq=++listSeq,box=$('#threads'),kept=[],tap=(r,m)=>{if(m.k==='req')r.onclick=()=>{if(pendingRequests().length||(S.invites||[]).length)openRequests()};if(m.k==='arch')r.onclick=()=>{S.showArchived=true;setListTitle();renderList()};return r};updateStatus(); // tap: a kept summary row opens what the live one opens, with whatever is in; Message requests only once one is in (its sheet would say there is none)
+  const skel=()=>Array.from({length:6},()=>{const r=el('div','thread skel');r.append(el('div','avatar'),el('div','t-main'));r.lastChild.append(el('div','sk1'),el('div','sk2'));return r}),head=()=>{const h=html('button','arch-head',I.back+'<span>Archived chats</span>');h.onclick=()=>{S.showArchived=false;setListTitle();renderList()};return h};
   if(!S.me){box.replaceChildren();return}
   splashOff('list'); // the list's first draw for an account, rows or not: the shell is the first screen
-  if(!S.convsLoaded&&S.tab==='chats'&&!S.query&&!S.showArchived){const rows=ls.get('hush:list:'+S.me.handle,null); // the list as last drawn stands until the live one is whole (the live list comes chat by chat: rows would vanish and return), or for 5 s of partial live rows
-    if(Array.isArray(rows)&&rows.length&&(!S.convs.length||performance.now()<(S.boot.cache||0)+5000)){if(!S.boot.cache)S.boot.cache=performance.now();box.replaceChildren(...rows.map(m=>drawRow(m)));return}}
-  if(!S.convsLoaded&&!S.convs.length){box.replaceChildren(...Array.from({length:6},()=>{const r=el('div','thread skel');r.append(el('div','avatar'),el('div','t-main'));r.lastChild.append(el('div','sk1'),el('div','sk2'));return r}));return}
+  if(!S.convsLoaded&&S.tab==='chats'&&!S.query&&!S.showArchived){const rows=ls.get('hush:list:'+S.me.handle,null),set=S.contactsReady; // the list as last drawn, until the live one is whole (it comes chat by chat): a row stands, with no time limit, until its chat has been in the live list in this start (S.seenLast: its live row takes its place below, and from then on it is as on the live list) or is known gone: the chat watch forgot it or no note names it (S.chatGone), or this account's settings, once read, keep it out of this list. A summary row stands until the live one of its kind has been drawn in this start (S.liveSum), Archived chats not once the settings archive nothing. Once the settings are read a row's pin and muted marks are theirs; its count and line stay as saved
+    if(Array.isArray(rows))kept.push(...rows.filter(m=>m&&!(m.id?S.seenLast.has(m.id)||S.chatGone&&S.chatGone(m.id)||set&&(isArchived(m.id)||isChatBlocked(m.id)||clearedAt(m.id)&&!(m.ts>clearedAt(m.id))||m.k==='dm'&&(isBlocked(m.h)||['in','no'].includes((dmInfo(m.id)||{}).req))):S.liveSum&&S.liveSum.has(m.k)||set&&m.k==='arch'&&!P().archived.length)).map(m=>m.id&&set?Object.assign({},m,{p:isPinned(m.id),m:isMuted(m.id)}):m));if(kept.length&&!S.convs.length){if(!S.boot.cache)S.boot.cache=performance.now();box.replaceChildren(...kept.map(m=>tap(drawRow(m),m)));return}}
+  if(!S.convsLoaded&&!S.convs.length){box.replaceChildren(...(S.showArchived?[head()]:[]),...skel());return}
   const arch=S.showArchived,base=S.convs.filter(c=>(c.last||typeOf(c)!=='dm')&&!isRequest(c)&&!hiddenConv(c)),archived=base.filter(c=>isArchived(c.id));
   const pins=P().pinned;
   const items=(arch?archived:S.query?base:base.filter(c=>!isArchived(c.id)))
     .filter(c=>!S.query||(convTitle(c)+' '+(typeOf(c)==='dm'?dmPeer(c):'')).toLowerCase().includes(S.query.replace(/^@/,'')))
+    .concat(kept.filter(m=>m.id)) // the kept rows of the chats not in yet, in the live rows' order: a row's time is its newest message's, as a send writes the chat's
     .sort((a,b)=>{const pa=arch?-1:pins.indexOf(a.id),pb=arch?-1:pins.indexOf(b.id);if(pa>=0||pb>=0)return (pa<0?1e9:pa)-(pb<0?1e9:pb);return (b.ts||0)-(a.ts||0)});
   const pvs=await Promise.all(items.map(c=>c.last?openPost(c,c.last):null));
   if(seq!==listSeq)return;
@@ -407,23 +417,25 @@ async function renderList(){
   const reqs=arch?[]:pendingRequests(),invs=arch?[]:S.invites||[],rows=[];const wl=arch||S.query?[]:waitList();
   if(wl.length){const n=new Set(wl.flatMap(([,x])=>x.hs)).size,b=el('div','banner nudge wait-note');b.append(el('span',null,(n===1?'1 person is':n+' people are')+' waiting to join your channels')); // people an admin's page found waiting (noteWait): one notice, its sheet lists them by channel
     const go=el('button','link sm','Add');go.onclick=()=>openWaiting();b.append(go);box.append(b)}
-  if((reqs.length||invs.length)&&!S.query){const m={k:'req',n:'Message requests',s:reqs.length?reqs.slice(0,3).map(c=>displayName(dmPeer(c))).join(', ')+' want'+(reqs.length===1?'s':'')+' to message you':invs.length===1?'1 invitation':invs.length+' invitations',u:reqs.length+invs.length};rows.push(m);const r=drawRow(m);r.onclick=openRequests;box.append(r)}
-  if(arch){const h=html('button','arch-head',I.back+'<span>Archived chats</span>');h.onclick=()=>{S.showArchived=false;setListTitle();renderList()};box.append(h)}
-  else if(!S.query&&archived.length){const m={k:'arch',n:'Archived chats',s:archived.slice(0,4).map(convTitle).join(', '),u:archived.reduce((a,c)=>a+(S.unread.get(c.id)||0),0)};rows.push(m);const r=drawRow(m);r.onclick=()=>{S.showArchived=true;setListTitle();renderList()};box.append(r)}
+  if((reqs.length||invs.length)&&!S.query){const m={k:'req',n:'Message requests',s:reqs.length?reqs.slice(0,3).map(c=>displayName(dmPeer(c))).join(', ')+' want'+(reqs.length===1?'s':'')+' to message you':invs.length===1?'1 invitation':invs.length+' invitations',u:reqs.length+invs.length};rows.push(m);const r=drawRow(m);r.onclick=openRequests;box.append(r);if(S.liveSum)S.liveSum.add('req')}else{const k=kept.find(x=>x.k==='req');if(k)box.append(tap(drawRow(k),k))} // this row and the archived one: the kept row until the live list has drawn its own once (its chats come one by one)
+  if(arch)box.append(head());
+  else if(!S.query&&archived.length){const m={k:'arch',n:'Archived chats',s:archived.slice(0,4).map(convTitle).join(', '),u:archived.reduce((a,c)=>a+(S.unread.get(c.id)||0),0)};rows.push(m);const r=drawRow(m);r.onclick=()=>{S.showArchived=true;setListTitle();renderList()};box.append(r);if(S.liveSum)S.liveSum.add('arch')}else{const k=kept.find(x=>x.k==='arch');if(k)box.append(tap(drawRow(k),k))}
+  if(arch&&!S.convsLoaded&&!items.length&&!S.query){box.append(...skel());return} // the archived list while the live one comes: its chats may still be on their way
   if(!items.length&&!S.query&&!reqs.length&&!invs.length){const e=el('div','empty');
     if(arch)e.append(el('strong',null,'No archived chats'),el('span',null,'Press and hold a chat, then choose Archive.'));
     else e.append(el('strong',null,'No chats yet'),el('span',null,'Tap the pencil to message someone, start a group, or create a channel. Everything is encrypted on this device before it leaves.'));
     box.append(e)}
   const now=Date.now();
   if(S.query&&items.length)box.append(el('div','menu-label','Chats'));
-  items.forEach((c,i)=>{const m=rowModel(c,pvs[i],now);rows.push(c.ttl||m.x?Object.assign({},m,{s:''}):m);box.append(drawRow(m,c))}); // a chat with a timer, or whose last message disappears, caches no text: it exists at rest nowhere else
+  items.forEach((c,i)=>{if(kept.includes(c)){box.append(drawRow(c));return}const m=rowModel(c,pvs[i],now);rows.push(c.ttl||m.x?Object.assign({},m,{s:''}):m);box.append(drawRow(m,c))}); // a chat with a timer, or whose last message disappears, caches no text: it exists at rest nowhere else
   if(S.convsLoaded&&!arch&&!S.query&&S.tab==='chats'&&!S.call){if(!S.boot.live)S.boot.live=performance.now(); // the whole list as drawn, for the next start; not during a call: its row would come back as "In a call"
-    const j=JSON.stringify(rows.slice(0,90));if(lastList.h!==S.me.handle||lastList.j!==j){lastList={h:S.me.handle,j};ls.set('hush:list:'+S.me.handle,JSON.parse(j))}}
+    const j=JSON.stringify(rows.slice(0,90));if(lastList.h!==S.me.handle||lastList.j!==j){lastList={h:S.me.handle,j};listOrder.h='';ls.set('hush:list:'+S.me.handle,JSON.parse(j))}}
   if(S.query)searchExtras(box,items);
 }
-/* ---------- one search box: chats, messages and people ----------
+/* ---------- one search box: chats, messages, people and public channels ----------
    Messages are searched from what this device has already unlocked (every chat's latest message, plus chats you've opened).
-   That index lives only in memory: it's never saved, sent anywhere, and it's gone when the app closes. */
+   That index lives only in memory: it's never saved, sent anywhere, and it's gone when the app closes.
+   Public channels (release 111) are matched on this device against the server's listing of them (pubChans): what is typed is not sent for them. */
 const snipAt=(t,q)=>{t=String(t).replace(/\s+/g,' ');const i=t.toLowerCase().indexOf(q);return i>30?'\u2026'+t.slice(i-25):t};
 function indexMsg(key,c,p,text){
   const idx=S.msgIdx||(S.msgIdx=new Map()),pid=p._id||null;
@@ -458,10 +470,19 @@ function searchExtras(box,items){
     ppl.forEach(d=>{const b=personRow(Object.assign({},d,{name:displayName(d.handle)}));
       if(d.requests===true&&!knownHandle(d.handle))b.querySelector('.t-sub').append(' \u00b7 sends as a request');
       b.onclick=()=>openDm(d.handle);box.append(b)})}
-  if(!items.length&&!hits.length&&!ppl.length){const e=el('div','empty');
+  const chs=q.length<2?[]:pubChans().filter(c=>typeOf(c)==='channel'&&!S.convs.some(x=>x.id===c.id)&&(c.name+' '+(c.desc||'')).toLowerCase().includes(q)); // public channels that are not among my chats, by name or description: found here only, never listed unasked
+  if(chs.length){box.append(el('div','menu-label','Public channels'));
+    chs.forEach(c=>{const b=el('button','thread');const m=el('div','t-main');const nm=el('div','t-name');nm.innerHTML=I.megaSm;nm.append(c.name);
+      m.append(nm,el('div','t-sub',c.desc||subsText(c)));b.append(convAvatar(c,'sm'),m);
+      b.onclick=()=>{S.previews.set(c.id,c);openConv(c.id)};box.append(b)})}
+  if(!items.length&&!hits.length&&!ppl.length&&!chs.length){const e=el('div','empty');
     e.append(el('strong',null,'Nothing found'),el('span',null,q.length<2?'Keep typing to search people by name or username.':'No chats, messages or people match that.'));box.append(e)}
   peopleLook(q);
 }
+function pubChans(){const h=S.me.handle,now=Date.now();let L=S._pubs; // the server's listing of public channels, for the search above: asked for once when a search begins and kept a minute, for this account alone, never once a key or once a drawing of the list; a request that fails is not sent again inside that minute
+  if(!L||L.h!==h||Math.abs(now-L.at)>60000){L=S._pubs={h,at:now,rows:L&&L.h===h?L.rows:[]};
+    if(S.db)S.db.collection('channels').where('visibility','==','public').limit(100).get().then(s=>{L.rows=s.docs.map(d=>chatRec(d.id,d.data()));if(S._pubs===L&&S.tab==='chats'&&S.query)renderList()}).catch(()=>{})}
+  return L.rows}
 function updateStatus(){const st=$('#netStatus');if(st)st.textContent=S.me&&!S.convsLoaded?'Connecting\u2026':!S.db?'Offline':''}
 function setListTitle(){const t=$('#listTitle');if(t)t.textContent=S.tab==='calls'?'Calls':S.tab==='profile'?'Settings':S.showArchived?'Archived':'Chats';navSyncList()}
 function updateTitle(){let n=0;S.unread.forEach((v,k)=>{const c=convById(k);if(k!==S.chan&&!isMuted(k)&&!isArchived(k)&&!(c&&isRequest(c))&&!hiddenConv(c))n+=v});if(S.me)n+=pendingRequests().length+(S.invites||[]).length;
@@ -635,9 +656,11 @@ function applyExpiry(){
   S.posts=live;S.scheduled=sched;S.future=future;if(S.setSchedCount)S.setSchedCount(sched.length);
   if(c&&isMember(c)){dead.forEach(p=>{if(S.purged.has(p._id))return;S.purged.add(p._id);purgePost(c,p)});promoteLast(c,live)}
 }
-function promoteLast(c,live){ // a scheduled message becomes the chat's latest once its time arrives
+function promoteLast(c,live,now){ // a scheduled message becomes the chat's latest once its time arrives
   const l=[...live].reverse().find(x=>!x.svc),cur=convById(c.id);if(!l||!cur||!S.convs.some(x=>x.id===c.id))return;
-  if(cur.last&&l.ts<=cur.last.ts)return;if(S.promoting===l._id)return;S.promoting=l._id;
+  if(cur.last&&l.ts<=cur.last.ts)return;if(S.promoting===l._id)return;
+  if(!now)return paced('last',()=>{if(S.chan===c.id)promoteLast(c,S.posts,1)}); // one such write a second (paced): asked again when its turn comes, with what is true by then, so a marker that waited never goes over a newer one
+  S.promoting=l._id;
   S.db.doc('channels/'+c.id).update(lastUpd(c,{ts:l.ts,last:lastOf(l)})).catch(()=>{});
 }
 async function loadOlder(){
@@ -666,17 +689,25 @@ async function purgePost(c,p){ // whoever sees an expired message first deletes 
   }catch{}
 }
 async function computeUnread(){
-  if(!S.db||!S.me)return;const now=Date.now();
+  if(!S.db||!S.me)return;const now=Date.now(),R=S.unreadRedo||(S.unreadRedo={ids:new Set(),wait:0,t:null,busy:new Set(),again:new Set()});let failed=false;
   await Promise.all(S.convs.map(async c=>{
     const lr=lastRead(c.id),l=c.last;
     if(!l||l.from===S.me.handle||l.ts<=lr||c.id===S.chan){S.unread.set(c.id,0);S.mentions.set(c.id,0);return}
-    const k=c.id+':'+l.ts+':'+lr;if(S.unreadKey.get(c.id)===k)return;S.unreadKey.set(c.id,k);
+    const k=c.id+':'+l.ts+':'+lr;if(S.unreadKey.get(c.id)===k)return;
+    if(R.busy.has(c.id)){R.again.add(c.id);return} // one count a chat, waiting or on its way: a chat written to faster than it can be counted is counted again once this one is back
+    S.unreadKey.set(c.id,k);R.busy.add(c.id);
     try{const s=await S.db.collection(`channels/${c.id}/posts`).where('ts','>',lr).limit(100).get();
       const ds=(await unsealAll(c,s.docs.map(d=>Object.assign({_id:d.id},d.data())))).filter(d=>d.from!==S.me.handle&&!(d.from&&isBlocked(d.from))&&!d.svc&&!d.del&&d.ts<=now+3000&&!(d.exp&&d.exp<=now));
-      const os=await Promise.all(ds.map(d=>openPost(c,d)));noteCalls(c,ds,os);S.unread.set(c.id,os.filter(o=>!o.wake).length);let men=0; // a wake ticket is not a message
+      const os=await Promise.all(ds.map(d=>openPost(c,d)));noteCalls(c,ds,os);
+      if(c.id===S.chan||lastRead(c.id)!==lr){S.unreadKey.delete(c.id);return} // opened or read while it waited its turn: this count is stale (its calls are noted all the same), and it does not stand for the chat: left unread, the chat is counted again
+      S.unread.set(c.id,os.filter(o=>!o.wake).length);let men=0; // a wake ticket is not a message
       if(typeOf(c)==='group')for(const o of os){if(o.text&&mentionsMe(o.text))men++}
-      S.mentions.set(c.id,men)}catch{S.unread.set(c.id,1)}
+      S.mentions.set(c.id,men)}
+    catch(e){if(!['ratelimit','timeout','offline'].includes(e&&e.code)){S.unread.set(c.id,1);return}R.ids.add(c.id);failed=true} // refused for the allowance, late or no connection: asked again below, never shown as 1
+    finally{R.busy.delete(c.id);if(R.again.delete(c.id))setTimeout(computeUnread,0)}
   }));
+  if(failed&&!R.t){R.wait=Math.min((R.wait||1000)*2,60000);R.t=setTimeout(()=>{R.t=null;for(const id of R.ids)S.unreadKey.delete(id);R.ids.clear();computeUnread()},R.wait)} // one timer for all of them; the wait doubles once per wait, 2 s to a minute
+  else if(!failed&&!R.ids.size)R.wait=0;
   renderList();updateTitle();
 }
 async function notifyNew(c){
@@ -1892,8 +1923,7 @@ function msgNode(c,p,o,cont){
   const wrap=el('div','msg '+side+(cont?' cont':'')+(wide?' wide':''));wrap.dataset.id=p._id;
   if(vis.length){wrap.classList.add('fit');wrap.style.setProperty('--mw',mediaFitWidth(vis)+'px')}
   const b=el('div','bubble tail'+(mine&&t!=='channel'?' out':'')+(t==='group'&&!mine&&o.text&&mentionsMe(o.text)?' mentioned':''));
-  if(t==='channel')b.append(el('div','post-from',c.name));
-  else if(t==='group'&&!mine&&!cont){const n=el('div','post-from',displayName(p.from));withBadge(n,p.from);if(isAdminH(c,p.from))n.append(el('span','role-sm',p.from===c.owner?'owner':'admin'));b.append(n)}
+  if(t==='group'&&!mine&&!cont){const n=el('div','post-from',displayName(p.from));withBadge(n,p.from);if(isAdminH(c,p.from))n.append(el('span','role-sm',p.from===c.owner?'owner':'admin'));b.append(n)}
   const parts=[];
   if(S.serverView)b.append(el('span','cipher',p.ct.slice(0,160)+'\u2026'));
   else if(o.text==null){if(o.nokey)noKeyNotice(c,p.e??0);b.append(el('span','bad',o.nokey?(typeOf(c)==='dm'?'Sent before this device was added, so it can\u2019t be shown here.':walkBad.has(c.id)?'This channel\u2019s history doesn\u2019t check out, so this post can\u2019t be opened.':'Sent before you joined on this device, so it can\u2019t be shown here.'):'Couldn\u2019t decrypt this message.'))}
@@ -2450,21 +2480,15 @@ function openNewChat(){
     actionRow(I.user,'Invite friends','Share your personal invite link',()=>{close();openInviteFriends()}),
     actionRow(I.link,'Join with a link','Paste an invite link or code',()=>{close();openJoinLink()}));
   const {s,inp}=searchBox('Search by name or username');inp.autocapitalize='none';inp.spellcheck=false;const list=el('div');body.append(s,list);
-  let pubs=null,look=null;
+  let look=null;
   const draw=()=>{const q=inp.value.trim().toLowerCase().replace(/^@/,'');list.replaceChildren();look(q);
     const ppl=peopleIn(q,[S.me.handle]).filter(d=>q||knownHandle(d.handle));
-    const chs=(pubs||[]).filter(c=>typeOf(c)==='channel'&&!isMember(c)&&(!q||(c.name+' '+(c.desc||'')).toLowerCase().includes(q)));
     const sec=(label,arr)=>{if(!arr.length)return;list.append(el('div','menu-label flush',label));arr.forEach(d=>{const b=personRow(Object.assign({},d,{name:displayName(d.handle)}));if(d.requests===true&&!knownHandle(d.handle))b.querySelector('.t-sub').append(' \u00b7 sends as a request');b.onclick=()=>{close();openDm(d.handle)};list.append(b)})};
     sec('People',ppl);
-    if(chs.length){list.append(el('div','menu-label flush','Public channels'));
-      chs.forEach(c=>{const b=el('button','thread');const m=el('div','t-main');const nm=el('div','t-name');nm.innerHTML=I.megaSm;nm.append(c.name);
-        m.append(nm,el('div','t-sub',c.desc||subsText(c)));b.append(convAvatar(c,'sm'),m);
-        b.onclick=()=>{close();S.previews.set(c.id,c);openConv(c.id)};list.append(b)})}
-    if(!ppl.length&&!chs.length)list.append(emptyPeople(q));
+    if(!ppl.length)list.append(emptyPeople(q));
     if(!q)list.append(el('p','hint','Search people on Hush by name or username. Finding someone doesn\u2019t let you read their messages, and people can ask new people to send a request first.'));
   };
   look=liveSearch(inp,draw);inp.oninput=draw;draw();
-  if(S.db)S.db.collection('channels').where('visibility','==','public').limit(100).get().then(s=>{pubs=s.docs.map(d=>chatRec(d.id,d.data()));draw()}).catch(()=>{});
 }
 async function openDm(peer){
   await loadDir([peer]);const id=await dmIdFor(peer);
@@ -3028,25 +3052,42 @@ async function loadContacts(){
   S.cache.clear();S.chanKeys.clear();tagCache.clear();rebuildNames();syncNames();refreshDir().then(refreshPresence);pinAll();renderCalls();renderList();updateTitle();if(S.chan){const id=S.chan;openConv(id)}
 }
 let vaultQ=Promise.resolve();
+// The page's own saves: made while the chat watch files people from notes (S.filing > 0: watchInbox), not by the user. Such a save's
+// frames go through the queue below the reserve (the adapter's `later`, tag 'vault', asked when a frame reaches the queue), and the last
+// save in line, if it is the page's own and not begun (vaultBg), takes the copy of the next save made with the same password rule: a
+// pass that files a hundred people writes the vault once, and the vault ends with the newest copy (a save that is not joined ends the
+// joining). A save of the user's never waits in the queue: from then on every save of the page's own in line before it (vaultLine: the
+// saves made and not done) goes without it, a frame of theirs that waits there goes at once, and the user's is written right after
+// them. A save is the account's that was signed in when it was made (`id`): after every wait it stops, writing nothing, if another
+// account is signed in by then. One of the page's own that fails is made again after a wait (5 s, doubling to a minute) for as long as
+// it fails, without a word; a save of the user's that fails still says so, and so does one of the page's own the user's save joined.
+let vaultBg=null,vaultWait=5000;const vaultLine=new Set();
 const pwVerified=new Map(); // account -> {login, loc}: a box address just proven right by logging in here with the password
 function saveContacts(keepLogin){ // keepLogin: this save carries a password change made here, so its box addresses win
   if(!S.contactsReady||!S.db)return Promise.resolve();
   if(S.vaultOk===false){if(!S.vaultWarned){S.vaultWarned=true;toastErr('Your settings can’t be saved on this device until they can be unlocked. Reload to try again.')}return Promise.resolve()} // a device that could not read its vault never writes an empty one over it
-  const me=S.me.handle,doc=JSON.parse(JSON.stringify({v:3,contacts:S.contacts,prefs:P(),pins:S.pins,verified:S.verified}));rebuildNames();syncNames();renderCalls();renderList(); // a contact renamed, a ticket minted or taken back: the iPhone's name table follows
-  vaultQ=vaultQ.then(async()=>{
+  const id=S.me,me=id.handle,doc=JSON.parse(JSON.stringify({v:3,contacts:S.contacts,prefs:P(),pins:S.pins,verified:S.verified}));rebuildNames();syncNames();renderCalls();renderList(); // a contact renamed, a ticket minted or taken back: the iPhone's name table follows
+  const bg=S.filing>0,keep=!!keepLogin;
+  if(!bg){for(const j of vaultLine)j.bg=false;if(S.db.sendNow)S.db.sendNow('vault')}
+  if(vaultBg&&vaultBg.id===id&&vaultBg.keep===keep){vaultBg.doc=doc;if(!bg)vaultBg.bg=vaultBg.own=false;return vaultBg.p} // own: the page's own copy; one the user's save joined is the user's
+  const job={id,doc,keep,bg,own:bg};vaultBg=bg?job:null;vaultLine.add(job);
+  job.p=vaultQ=vaultQ.then(async()=>{if(vaultBg===job)vaultBg=null;const doc=job.doc,o={later:()=>job.bg&&'vault'};try{if(S.me!==id)return;
     // saved whole, so a device still holding the addresses from before another device's password change would put them back
-    if(!keepLogin&&doc.prefs.login){const v=await syncLogin(me).catch(()=>null);if(v)doc.prefs.login=withAll(doc.prefs.login,v.all)}
-    const iv=crypto.getRandomValues(new Uint8Array(12));
-    const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('vault|'+me)},await vaultKey(),enc.encode(JSON.stringify(doc)));
-    await S.db.doc(await vaultPath(me)).set({iv:b64(iv),ct:b64(ct),ts:Date.now()}); // at a blind address with no username on it, so the server can't tie this box to you
-  }).catch(()=>toastErr('That didn\u2019t save. Check your connection and try again.'));
+    if(!keep&&doc.prefs.login){const v=await syncLogin(me,o).catch(()=>null);if(S.me!==id)return;if(v)doc.prefs.login=withAll(doc.prefs.login,v.all)}
+    const iv=crypto.getRandomValues(new Uint8Array(12)),key=await vaultKey();if(S.me!==id)return; // vaultKey and vaultPath work from S.me: asked only while it is this save's account
+    const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('vault|'+me)},key,enc.encode(JSON.stringify(doc)));if(S.me!==id)return;
+    const path=await vaultPath(me);if(S.me!==id)return;
+    await S.db.doc(path).set({iv:b64(iv),ct:b64(ct),ts:Date.now()},o); // at a blind address with no username on it, so the server can't tie this box to you
+    if(job.own)vaultWait=5000}finally{vaultLine.delete(job)}
+  }).catch(()=>{if(!job.own){toastErr('That didn\u2019t save. Check your connection and try again.');return}
+    const w=vaultWait;vaultWait=Math.min(w*2,60000);setTimeout(()=>{if(!vaultBg&&S.me===id){S.filing=(S.filing||0)+1;try{saveContacts(keep)}finally{S.filing--}}},w)});
   return vaultQ;
 }
 /* The account's password-box addresses as its settings hold them now. A password changed on another device moves every
    box, and this device reads the settings only when it starts: without this it would go on using the old addresses, and
    saving them back. Brings this device's login note and its copy of the settings up to date; returns the settings' copy. */
-async function syncLogin(me){
-  const s=await S.db.doc(await vaultPath(me)).get();if(!s.exists||!S.me||S.me.handle!==me)return null;const d=s.data();
+async function syncLogin(me,opt){ // opt: from saveContacts, {later:fn}: fn() gives 'vault' while the save is the page's own, asked when the read reaches the queue
+  const s=await S.db.doc(await vaultPath(me)).get(opt);if(!s.exists||!S.me||S.me.handle!==me)return null;const d=s.data();
   const o=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(d.iv),additionalData:enc.encode('vault|'+me)},await vaultKey(),unb64(d.ct))));
   const v=!Array.isArray(o)&&o.prefs&&loginPref(o.prefs.login);if(!v||!v.all||!S.me||S.me.handle!==me)return null;
   const li=loginInfo(me);if(li)ls.set('hush:login:'+me,withAll(li,v.all));
@@ -3066,7 +3107,7 @@ function setTab(t,dir){
   document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===t)));
   const q=$('#q');if(t!=='profile'&&prev!==t&&q.value){q.value='';S.query=''}q.placeholder='Search chats, messages, people';setListTitle();
   document.querySelector('.searchrow').hidden=t!=='chats';
-  $('#newBtn').hidden=t==='profile';
+  $('#newBtn').hidden=t!=='chats';
   if(t==='calls')renderCalls();
   else if(t==='profile'){const v=$('#profileView');v.replaceChildren();if(S.me)buildSettings(v);v.scrollTop=0}
   else renderList();
@@ -3837,6 +3878,7 @@ async function rekeyRun(rec,ui){ // the stages in order; the record is kept from
       for(const n of rec.notes)if(n.p.peer&&/^d/.test(n.p.cid)&&!dmInfo(n.p.cid))setDmInfo(n.p.cid,{peer:n.p.peer}); // every one-on-one chat filed under its person before the ids it derives change
       const cids=[...new Set([...S.convs.map(c=>c.id),...S.chatDocs.keys(),...Object.keys(P().dms||{}),...rec.notes.map(n=>n.p.cid)])];
       for(const cid of cids){let c=S.chatDocs.get(cid)||convById(cid);if(!c){await pause(250);try{c=await freshChan(cid)}catch{continue}} // at most four reads a second
+        else if(typeOf(c)!=='dm'&&c.visibility!=='public'&&!S.db.chatLevel(cid)){const k=S.chatDocs.get(cid);await pause(750);S.chatDocs.delete(cid);let f=null;try{f=await freshChan(cid)}catch{}if(f&&f.meta){c=f;S.chatDocs.set(cid,f)}else if(k)S.chatDocs.set(cid,k)} // a private chat this connection holds no level for (an eviction whose re-open waits, a refused re-open, a list still loading): no watch brings its record, so the kept copy may be the one of before a key change, and a key this stage does not store now cannot be unwrapped once the account's key has changed (the rotate stage would file the chat "locked"). Read once, without the kept copy (capsFor then works from a fresh preview, not from an old member key); a read that fails or brings only the trimmed copy leaves the kept one
         try{const dm=typeOf(c)==='dm',shown=await showMeta(c),owner=shown.owner===h,admin=(shown.admins||[]).includes(h);
           if(!dm&&c.visibility!=='public')await allRaws(c); // every key this device can unwrap goes into the key store: the new key could not open an account-key wrap
           if(owner||admin)await adminSecret(c);
@@ -4234,7 +4276,7 @@ function awaitingAccept(c){ // I'm the one waiting for them to accept
 async function answerRequest(c,ok){
   try{if(ok){setDmInfo(c.id,{req:'ok'});try{await S.db.collection('channels/'+c.id+'/posts').add(await sealSvc(c,'accept',0))}catch{}toast('Request accepted. You can chat now.');openConv(c.id)}
     else{setDmInfo(c.id,{req:'no'});closeConv();toast('Request deleted. '+displayName(dmPeer(c))+' won\u2019t be told.')}
-    renderList();updateTitle()}catch{toastErr('That didn\u2019t go through. Try again.')}
+    renderList();updateTitle();syncCallWatch()}catch{toastErr('That didn\u2019t go through. Try again.')} // syncCallWatch: an accepted request is watched for calls from now on, not from the next pass (a request has no call watch, an accept changes nothing in the list, and the pass that runs by the clock comes every 15 s)
 }
 function requestBar(c){
   const peer=dmPeer(c),f=el('div','composer readonly reqbar');
@@ -4563,8 +4605,9 @@ function confirmBlockChat(c){
   blockChat(c.id);toast('Chat blocked');return true}
 const dmRenoted=new Set(),baseDone=new Set();
 async function recordBase(c){ // a DM created before base keys were kept gets one, from a device that can open it, so both of us always can
-  if(!c||typeOf(c)!=='dm'||isSelf(c)||!S.db||!S.db.setBase||baseDone.has(c.id))return;baseDone.add(c.id);
-  try{const cap=await memberCap(c,0);if(cap)await S.db.setBase(c.id,cap)}catch{baseDone.delete(c.id)}}
+  if(!c||typeOf(c)!=='dm'||isSelf(c)||!S.me||!S.db||!S.db.setBase||baseDone.has(c.id))return;baseDone.add(c.id);
+  const key='hush:base:'+S.me.handle;if(ls.get(key,[]).includes(c.id))return; // done from this device before: once a chat, not at every start
+  try{const cap=await memberCap(c,0);if(cap){await S.db.setBase(c.id,cap);ls.set(key,[...new Set([...ls.get(key,[]),c.id])])}}catch{baseDone.delete(c.id)}}
 async function ensureInbox(c,only,fresh){ // make sure everyone in a chat has a pointer to it (once per person, remembered on this device; `fresh` sends again)
   if(!S.db||!c||!c.id||!S.me)return;const me=S.me.handle,key='hush:ptr:'+me,done=ls.get(key,{}),had=new Set(fresh?[]:(done[c.id]||[]));
   const who=[...new Set(only||c.members||[])].filter(h=>!had.has(h)).slice(0,500);if(!who.length)return;
@@ -4607,15 +4650,43 @@ const codeWait=cid=>{if(!/^c/.test(cid))return false;if(!S.dir[S.me.handle])retu
   const k='hush:codeWait:'+S.me.handle,m=ls.get(k,{});if(!m[cid]){m[cid]=Date.now();ls.set(k,m)}return m[cid]>Date.now()-REKEY_KEEP_MS};
 const codeWaitEnd=cid=>{const k='hush:codeWait:'+S.me.handle,m=ls.get(k,{});if(m[cid]){delete m[cid];ls.set(k,m)}};
 function watchInbox(id,cb){
-  const h=id.handle,docs=new Map(),subs=new Map(),ptrs=new Map(),waiting=new Set(),firstSeen=new Map(),kept=new Map(),renoted=new Set(),answered=new Map(),rechecks=new Map();let ready=false,pend=0,dead=false,runs=0;
+  const h=id.handle,docs=new Map(),subs=new Map(),ptrs=new Map(),waiting=new Set(),refused=new Set(),firstSeen=new Map(),kept=new Map(),renoted=new Set(),answered=new Map(),rechecks=new Map();let ready=false,pend=0,dead=false,runs=0;
   const FRESH_MS=2*60e3;const fresh=cid=>{if(!firstSeen.has(cid))firstSeen.set(cid,Date.now());return Date.now()-firstSeen.get(cid)<FRESH_MS};
   const emit=()=>{if(dead)return;
     const list=[...docs.values()].sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,300);cb(list,!ready||pend>0)};
   const drop=cid=>{const u=subs.get(cid);if(u)u();subs.delete(cid);docs.delete(cid);waiting.delete(cid)};
-  const forget=cid=>{for(const [pid,p] of ptrs)if(p&&p.cid===cid){ptrs.delete(pid);S.db.doc('inbox/'+h+'/c/'+pid).delete().catch(()=>{})}};
+  const forget=cid=>{lost.add(cid);for(const [pid,p] of ptrs)if(p&&p.cid===cid){ptrs.delete(pid);S.db.doc('inbox/'+h+'/c/'+pid).delete().catch(()=>{})}
+    for(const [id,g] of gone)if(g.cid===cid&&!g.done){g.now=true;if(!g.busy)delNote(id,cid,true)}if(S.db.sendNow)S.db.sendNow('inbox:'+cid)}; // and the chat's notes the page was deleting by itself (an older note): at once too
+  // A note this page deletes by itself (an older note of a chat, one it cannot use) is deleted once: not again at the next change of the
+  // mailbox while that delete waits or is on its way, nor after it was taken. One that fails (refused, not answered, the connection gone)
+  // is sent again by itself after a wait, 2 s doubling to a minute, while the note is still there (here: the notes of the newest pass).
+  // They wait in the queue below the reserve (the adapter's `later`, tag 'inbox:<chat>', or 'inbox' for a note that names none it can
+  // read); a chat the user deletes, leaves or blocks (forget) deletes at once every note of it this watch has read, these among them
+  // (`now`; a note of it not read yet is not among them). The wait is on a
+  // clock that does not step (performance.now), and its timer sends again whatever that clock says.
+  const gone=new Map();let here=new Set();
+  const delNote=(id,cid,again)=>{let g=gone.get(id);if(g&&(g.busy||g.done||(!again&&g.at>performance.now())))return;if(!g)gone.set(id,g={w:2000,at:0,cid});g.busy=true;
+    S.db.doc('inbox/'+h+'/c/'+id).delete({later:()=>!g.now&&'inbox'+(g.cid?':'+g.cid:'')}).then(()=>{g.busy=false;g.done=true},()=>{g.busy=false;const w=g.w;g.at=performance.now()+w;g.w=Math.min(w*2,60000);
+      setTimeout(()=>{if(!dead&&gone.get(id)===g&&here.has(id))delNote(id,g.cid,true)},w)})};
+  const filed=fn=>{S.filing=(S.filing||0)+1;try{fn()}finally{S.filing--}}; // people filed from notes: the vault saves this makes are the page's own (saveContacts)
+  // A pass that a newer copy of the mailbox cuts short files nothing, and the next opens again what it opened: in a burst of notes each
+  // pass is cut short by the next. So a note's opening (with its sender's profile read) is kept while it is under way, and once it found
+  // the note good until a pass files it (opens); one that found nothing is not kept, and a pass that took it over under way and finds
+  // nothing treats the note as not known yet (unsure: it waits). My own profile is read once at a time (selfRead): a pass that needs it while
+  // a read is under way takes that read's answer.
+  const opens=new Map();let selfRead=null;
+  // What this watch knows is gone, for the rows of the list as last drawn that stand while the live list comes (renderList): a chat it
+  // forgot (deleted, this account removed, or left, blocked or declined here), and, once a pass has read every note of the mailbox, a
+  // chat no note names (named: that pass's chats, until the next such pass; a note not read yet may name any chat; never set again
+  // once a copy of this watch has had the query's 500 notes (capped): the server may hold more, which the copies after it need not
+  // bring; a fresh copy after a reconnect may, and capped stays set even then).
+  // Also (absent) a
+  // chat whose record the server answers as not there now, if the list as last drawn has its row: its record was there then, so it
+  // was deleted; a note's chat with no such row may still be being written, and the note waits as the verdict says, either way.
+  const lost=new Set(),absent=new Set();let named=null,capped=false;S.chatGone=cid=>lost.has(cid)||absent.has(cid)&&listRank(cid)>=0||!!named&&!named.has(cid);
   S.forgetPointers=forget;
-  const un=S.db.collection('inbox/'+h+'/c').limit(500).onSnapshot(async s=>{
-    const seen=new Map(),run=++runs,unsure=new Set(),old=Date.now()-7*864e5,canDrop=()=>S.contactsReady&&S.vaultOk!==false&&!S.rekeying&&!(ls.get('hush:rekey:'+h,null)||{}).stage&&S.dir[h]&&(S.dir[h].kv||1)===(S.me.kv||1);kept.clear(); // old: one cutoff for the pass, so a note is a week old in recheck and in the delete line alike
+  const un=S.db.collection('inbox/'+h+'/c').limit(500).onSnapshot(async s=>{here=new Set(s.docs.map(d=>d.id));if(here.size>=500)capped=true;
+    const seen=new Map(),run=++runs,unsure=new Set(),old=Date.now()-7*864e5,canDrop=()=>S.contactsReady&&S.vaultOk!==false&&!S.rekeying&&!(ls.get('hush:rekey:'+h,null)||{}).stage&&S.dir[h]&&(S.dir[h].kv||1)===(S.me.kv||1); // old: one cutoff for the pass, so a note is a week old in recheck and in the delete line alike
     // A week-old note that failed with no keys held for its person (the age it goes at below): loadDir keeps no error, so a
     // failed profile read looked like "no such person". Read once more: a read that fails leaves the note for the next pass
     // (unsure); one that finds no keys leaves it bad; one that finds them puts them in the copy and asks noteOk again.
@@ -4626,7 +4697,9 @@ function watchInbox(id,cb){
       if(!r||r.at<Date.now()-60000||r.off&&S.db.online){const n=r={at:Date.now()};rechecks.set(who,n);n.v=S.db.doc('directory/'+who).get().then(s=>s.exists?s.data():null,e=>{n.off=!!e&&e.code==='offline';throw e})} // off: failed for want of a link, read again once there is one (a reconnect is rare; refusals by the server stay paced)
       let v;try{v=await r.v}catch{unsure.add(d.id);return false}
       if(!v||!v.ecdh||!v.sig)return false;S.dir[who]=v;return noteOk(p)};
-    const opened=new Map(await Promise.all(s.docs.filter(d=>!ptrs.has(d.id)).map(async d=>{let p;try{p=await openPointer(d.data());if(!(await noteOk(p))&&!(await recheck(d,p)))p=null}catch{p=null}return [d.id,p]}))); // every new note at once, not one after the other
+    const opened=new Map(await Promise.all(s.docs.filter(d=>!ptrs.has(d.id)).map(async d=>{let o=opens.get(d.id);const took=!!o;
+      if(!o){o=(async()=>{let p;try{p=await openPointer(d.data());if(!(await noteOk(p))&&!(await recheck(d,p)))p=null}catch{p=null}return p})();opens.set(d.id,o)}
+      const p=await o;if(!p){if(opens.get(d.id)===o)opens.delete(d.id);if(took)unsure.add(d.id)}return [d.id,p]}))); // every new note at once, not one after the other
     // Who left a note decides what it is, not what the note says (release 108, SPEC.md 5.6 and 6). `own`: the chats one of
     // my own notes names (the stored mark, which only my signed-in connection can set); `knows`: a person I have an accepted
     // or self-started one-on-one chat with; `asks`: one-on-one notes from someone else, for a chat and a person my vault does not know.
@@ -4634,14 +4707,15 @@ function watchInbox(id,cb){
       own=new Set(s.docs.filter(d=>d.data().own===1&&note(d)).map(d=>note(d).cid)),
       knows=who=>Object.values((S.prefs||{}).dms||{}).some(i=>i.peer===who&&i.req!=='in'&&i.req!=='no'),
       asks=[...opened].filter(([,p])=>p&&isDm(p)&&!own.has(p.cid)&&!(vault&&(dmInfo(p.cid)||knows(p.peer||p.from))));
-    if(asks.length)await loadDir([h],true); // my own setting decides, as the server holds it now
+    if(asks.length)await (selfRead||(selfRead=loadDir([h],true).finally(()=>{selfRead=null}))); // my own setting decides, as the server holds it now
     if(run!==runs)return; // a newer list arrived while these notes opened: that pass decides, never this stale one
-    for(const [id,p] of asks){if(!S.dir[h]||(S.dir[h].requests===true&&!vault))opened.set(id,null); // my profile or my vault is not read: the note waits for the next pass
-      else if(S.dir[h].requests===true)setDmInfo(p.cid,{peer:p.peer||p.from,req:'in'})} // a request, whatever its tag says; with the setting off the tag decides, as before
+    kept.clear(); // emptied here and filled below in the same step: a chat's record that comes while this pass waits finds the last pass's notes (adopt), never none
+    filed(()=>{for(const [id,p] of asks){if(!S.dir[h]||(S.dir[h].requests===true&&!vault))opened.set(id,null); // my profile or my vault is not read: the note waits for the next pass
+      else if(S.dir[h].requests===true)setDmInfo(p.cid,{peer:p.peer||p.from,req:'in'})}}) // a request, whatever its tag says; with the setting off the tag decides, as before
     const hold=new Map(),beside=new Set(); // an invitation someone else left: its chat waits for my Join (true) or goes in as before (false); beside: someone else's note that is newer than my own for the chat
     for(const d of s.docs){const p=note(d);if(!p||isDm(p)||d.data().own===1)continue;
       if(own.has(p.cid)){const mine=s.docs.filter(m=>m.data().own===1&&(note(m)||{}).cid===p.cid),q=note(mine[0]);
-        if(mine.some(m=>(m.data().ts||0)>=(d.data().ts||0))){ptrs.set(d.id,null);S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{})}
+        if(mine.some(m=>(m.data().ts||0)>=(d.data().ts||0))){ptrs.set(d.id,null);delNote(d.id,p.cid)}
         else{beside.add(d.id);if(!dead&&!(answered.get(p.cid)>=(d.data().ts||0))){const t=Math.max(...s.docs.filter(o=>o.data().own!==1&&(note(o)||{}).cid===p.cid).map(o=>o.data().ts||0));answered.set(p.cid,t);dropPointer(h,{t:q.t,cid:q.cid,from:h,type:q.type,peer:q.peer}).catch(()=>answered.delete(p.cid))}}
         continue} // the chat rests on my own note: theirs never takes its place below. Theirs goes once mine is not the older one, never before: a page from before release 108 keeps the newer note and deletes mine, and with theirs deleted here too no note would be left. So while mine is older it is written again, once per chat for the newest hour of theirs (answered), not once for each of their notes: a pile left for one chat filled my mailbox with my own notes and pushed out what waits there; with my clock behind, mine stays the older one and the mark keeps every later pass from writing again. Not by a watch that has ended (a device removal or another account has the mailbox by then)
       const inn=subs.has(p.cid)||joinedPublic(p.cid); // shown by this page already, or a public channel I joined; a stored key does not count: any read of the record stores the inviter's wrap (convKey)
@@ -4649,41 +4723,60 @@ function watchInbox(id,cb){
       else if(inn)hold.set(p.cid,false);else if(!hold.has(p.cid))hold.set(p.cid,true)} // no pass for a person I chat with: with "Send a request first" off, one note from a stranger makes them one
     for(const d of s.docs){let p=ptrs.get(d.id);
       if(p===undefined){p=opened.get(d.id);ptrs.set(d.id,p);
-        if(p===null){if(!unsure.has(d.id)&&canDrop()&&(d.data().ts||0)<old)S.db.doc('inbox/'+h+'/c/'+d.id).delete().catch(()=>{}); // unreadable, forged or from someone blocked: gone, once a week old (another device of mine, or my old key, may still open a fresh one)
+        if(p===null){if(!unsure.has(d.id)&&canDrop()&&(d.data().ts||0)<old)delNote(d.id); // unreadable, forged or from someone blocked: gone, once a week old (another device of mine, or my old key, may still open a fresh one)
           else ptrs.delete(d.id)}} // unless this device may simply not know yet (settings not read, keys changing): looked at again next time
       if(!p||beside.has(d.id))continue;
-      // a second note for a chat already listed: the newest stays (on a tie, one I wrote myself) and the other goes
+      // a second note for a chat already listed: the newest stays (on a tie, one I wrote myself) and the other goes, once (delNote)
       const x=d.data(),k=kept.get(p.cid),rank=n=>(n.ts||0)*2+(n.own===1?1:0),lose=k&&k.id!==d.id&&(rank(k.x)>=rank(x)?d.id:k.id);
-      if(lose){ptrs.delete(lose);S.db.doc('inbox/'+h+'/c/'+lose).delete().catch(()=>{});if(lose===d.id)continue}
+      if(lose){ptrs.set(lose,null);delNote(lose,p.cid);if(lose===d.id)continue}
       kept.set(p.cid,{id:d.id,x,p});if(!hold.get(p.cid))seen.set(p.cid,p)}
     if(dead)return;
-    for(const pid of [...ptrs.keys()])if(!s.docs.some(d=>d.id===pid))ptrs.delete(pid);
+    for(const pid of [...ptrs.keys()])if(!here.has(pid))ptrs.delete(pid);
+    if(!capped&&ptrs.size===here.size)named=new Set([...ptrs.values()].filter(Boolean).map(p=>p.cid)); // every note of this copy read (none left to look at again), and no copy of this watch had 500
+    for(const [id,g] of gone)if(!here.has(id)&&!g.busy)gone.delete(id); // not one on its way: a note I wrote myself may be out of one copy of the mailbox and in the next
+    for(const id of [...opens.keys()])if(ptrs.has(id)||!here.has(id))opens.delete(id);
     for(const cid of [...subs.keys()])if(!seen.has(cid))drop(cid);
-    for(const [cid,p] of seen){notePointer(cid,p);if(!subs.has(cid))start(cid)}
+    // The start's queue sends a chat no list has placed yet in the order the chats are begun here: the newest note first, a stranger's one-on-one note
+    // after every chat of mine. Worked out once per chat, for the chats not watched yet, and before the notes are filed: filing one puts its person in the vault.
+    const order=[...seen].filter(([cid])=>!subs.has(cid)).map(([cid,p])=>[(own.has(cid)||!isDm(p)||knows(p.peer||p.from)?1e15:0)+(kept.get(cid).x.ts||0),cid]).sort((a,b)=>b[0]-a[0]);
+    filed(()=>{for(const [cid,p] of seen)notePointer(cid,p)}); // in note order, as before: which of two one-on-one chats a person is known under does not change
+    for(const [,cid] of order)start(cid);
     S.invites=[...kept.values()].filter(k=>hold.get(k.p.cid)).map(k=>({cid:k.p.cid,from:k.p.from})); // what Message requests shows: who invited, and the address for its kind; the chat itself is not opened or watched
     ready=true;emit();
   },()=>toastErr('Your chats stopped updating. Reload to reconnect.'));
   // Watch one chat a pointer names. The watch may end in refusal (our level was revoked, or we never had one yet):
-  // for a fresh pointer, or one we never held a key for, that is a reason to look again later, not to forget.
+  // that is a reason to look again later, never by itself to forget.
   function start(cid){pend++;let first=true,seq=0;const done=()=>{if(first){first=false;pend--}};
-    subs.set(cid,watchDoc(S.db.doc('channels/'+cid),async d=>{const my=++seq;
+    subs.set(cid,watchDoc(S.db.doc('channels/'+cid),async d=>{const my=++seq,rf=refused.has(cid),out=!!S.db.chatOut&&S.db.chatOut(cid); // rf: this chat's watch was refused on this page. out: the server answered the right key for this chat "you were removed" (the adapter keeps it), asked as the copy comes: another open may end otherwise while the copy is worked on
       const c=d.exists?chatRec(cid,d.data()):null;if(c)noteChatDoc(c);
       const shown=c?Object.assign({},await showMeta(c)):null;adoptOMeta(c,shown);adminGone(shown);
-      const mine=!!shown&&(typeOf(c)==='dm'||c.visibility==='public'||!!(await convKey(c,epochOf(c)))||['owner','admin'].includes(S.db.chatLevel(cid)));
+      const mine=!!shown&&!(out&&typeOf(c)!=='dm'&&c.visibility!=='public')&&(typeOf(c)==='dm'||c.visibility==='public'||!!(await convKey(c,epochOf(c)))||['owner','admin'].includes(S.db.chatLevel(cid)));
+      // Holding the current key is not being let in: a member blocked with no key change still holds it, and the server refuses it
+      // in so many words (out). Such a copy, the trimmed one anyone signed in may read, is not mine: forgotten as a removal is (below).
       if(mine&&(shown._unlisted||!shown._unlocked))healCard(shown); // holding the key, left out of the list, or with no list to read: a join card again, so an admin's page lists us (healCard decides)
       if(shown&&shown.last)shown.last=await unsealPost(c,shown.last);done();
       if(dead||my!==seq||!subs.has(cid)){if(!dead)emit();return} // a newer copy arrived while unlocking this one
-      settle(cid,pointerVerdict({exists:!!c,mine,held:!mine&&heldKey(cid)&&!codeWait(cid),fresh:fresh(cid)}),shown)}, // codeWait asked only where this device can't open the record: the first ask starts its 30 days
-    // Only a refusal says we were removed (or not let in yet). A rate limit, a timeout or a server error says nothing
-    // about the chat: it stays in the list and is looked at again.
-    e=>{done();subs.delete(cid);if(e&&e.code==='denied')settle(cid,pointerVerdict({exists:true,mine:false,held:heldKey(cid)&&!/^d/.test(cid)&&!codeWait(cid),fresh:fresh(cid)}),null);else{waiting.add(cid);emit()}}))} // a one-on-one chat can't remove me: a refusal there means a key I don't hold yet, so it waits
+      if(c)absent.delete(cid);else absent.add(cid);
+      settle(cid,pointerVerdict({exists:!!c,mine,held:!mine&&heldKey(cid)&&!codeWait(cid),fresh:fresh(cid)&&!rf}),shown);if(rf)refused.delete(cid)}, // codeWait asked only where the copy is not mine: the first ask starts its 30 days. No record after a refusal (rf, used up by the first copy after it): the chat was open here and is gone, not one whose sender is still writing it
+    // A refusal may mean we were removed, or not let in yet, or only that the key this page offered was an old one (the
+    // chat's key changed and the record kept here is not the newest): the server answers `denied` to all of them. It
+    // says which in words, and the adapter keeps the one case that is certain: the right key, refused because this
+    // account was removed (S.db.chatOut). Then the chat is forgotten at once, as it always was (a one-on-one chat
+    // can't remove me, and a chat this device never held a key for waits). Any other refusal settles nothing and
+    // deletes no note: the chat waits, out of the list, and retry looks at it again with a fresh copy of the record,
+    // whose verdict (above) forgets it if this device held a key and cannot open the current one, or the server then
+    // says the account was removed. A watch ended any other way says nothing about the chat: it stays in the list
+    // and is looked at again. (After an eviction the adapter ends the watches `denied` for every answer to the
+    // re-open but a rate limit, no answer in time or a lost connection, a server error among them: such a chat waits
+    // out of the list like the others.)
+    e=>{done();subs.delete(cid);if(e&&e.code==='denied'){refused.add(cid);settle(cid,pointerVerdict({exists:true,mine:false,held:!!S.db.chatOut&&S.db.chatOut(cid)&&heldKey(cid)&&!/^d/.test(cid)&&!codeWait(cid)}),null)}else{waiting.add(cid);emit()}}))}
   // A chat in the list rests on a note I wrote myself: the server sweeps other people's notes after 30 days. A note
   // someone else left (an invite, a DM), or one from before release 17, is replaced by my own once the chat shows, and
   // tidying then keeps the newest. A message request I haven't answered stays as it came.
   function adopt(cid,shown){const k=kept.get(cid),i=dmInfo(cid);if(!k||k.x.own===1||renoted.has(cid)||(i&&i.req==='in'))return;renoted.add(cid);
     const dm=typeOf(shown)==='dm';dropPointer(h,{t:dm?'dm':'invite',cid,from:h,type:typeOf(shown),peer:dm?(k.p.peer||k.p.from):undefined}).catch(()=>renoted.delete(cid))}
   function settle(cid,verdict,shown){
-    if(verdict==='show'){waiting.delete(cid);codeWaitEnd(cid);docs.set(cid,shown);if(typeOf(shown)==='dm'){recordBase(shown);const pr=dmPeer(shown);if(pr&&S.contactsReady&&!dmInfo(cid))setDmInfo(cid,{peer:pr})}adopt(cid,shown)} // every one-on-one chat filed under its person: the alias a key change relies on
+    if(verdict==='show'){waiting.delete(cid);codeWaitEnd(cid);docs.set(cid,shown);if(typeOf(shown)==='dm'){recordBase(shown);const pr=dmPeer(shown);if(pr&&S.contactsReady&&!dmInfo(cid))filed(()=>setDmInfo(cid,{peer:pr}))}adopt(cid,shown)} // every one-on-one chat filed under its person: the alias a key change relies on
     else if(verdict==='wait'){docs.delete(cid);waiting.add(cid);if(shown&&!heldKey(cid))noKeyNotice(shown,epochOf(shown))} // keep the pointer: a wrap for this device, or the record, may still arrive (the sheet about older messages only where this device never held the chat's key)
     else{waiting.delete(cid);docs.delete(cid);codeWaitEnd(cid);forget(cid)} // deleted, or we were removed: tidy the pointer away
     emit()}
@@ -4694,7 +4787,7 @@ function watchInbox(id,cb){
       waiting.delete(cid);waiting.add(cid); // twenty at a time, taking turns
       S.chatDocs.delete(cid);if(subs.has(cid))S.db.refreshChat(cid).catch(()=>{});else start(cid)}};
   const retryT=setInterval(retry,15000);S.recheckChats=retry; // keys came in from the backup: look now, not at the next tick
-  return()=>{dead=true;S.invites=[];clearInterval(retryT);un();for(const cid of [...subs.keys()])drop(cid)};
+  return()=>{dead=true;S.invites=[];clearInterval(retryT);un();for(const cid of [...subs.keys()])drop(cid);S.chatGone=null}; // what it knew is of this account only
 }
 /* ---------- voice calls (SPEC.md 16.2) ----------
    One-on-one and audio only, and always through the operator's relay (TURN): this page gathers relay candidates only
@@ -4777,7 +4870,7 @@ const callSubsFor=h=>{if(callSubsOf!==h){callSubs.forEach(u=>{try{u()}catch{}});
 const watchCalls=cid=>{if(!callSubs.has(cid))callSubs.set(cid,S.db.collection('channels/'+cid+'/call').orderBy('ts','desc').limit(50).onSnapshot(s=>onCallRecs(cid,s.docs.slice().reverse()),()=>callSubs.delete(cid)))}; // the newest 50, so a flood of records can't push a new one out of view; read oldest first, so a call's end comes after its offer
 function syncCallWatch(){ // a live watch on the call records of each recent one-on-one chat, so a call rings with that chat closed
   if(!S.db||!S.me)return;callSubsFor(S.me.handle);
-  const want=new Set(S.convs.filter(c=>typeOf(c)==='dm'&&!isSelf(c)&&epochOf(c)>=1&&!hiddenConv(c)).slice(0,90).map(c=>c.id));if(S.pushCall&&S.pushCall.cid)want.add(S.pushCall.cid); // with the chat list's own watches, inside the server's 600 a connection; the chat the push was for stays watched whatever the list holds yet
+  const want=new Set(S.convs.filter(c=>typeOf(c)==='dm'&&!isSelf(c)&&epochOf(c)>=1&&!hiddenConv(c)&&!isRequest(c)).slice(0,90).map(c=>c.id));if(S.pushCall&&S.pushCall.cid)want.add(S.pushCall.cid); // with the chat list's own watches, inside the server's 600 a connection; a request, waiting or deleted, takes none of the 90 (it cannot call: callable); the chat the push was for stays watched whatever the list holds yet
   for(const [cid,u] of callSubs)if(!want.has(cid)){u();callSubs.delete(cid)}
   want.forEach(watchCalls)}
 async function watchPushCall(){ // booted for a pushed call whose push carries the ticket's mark: that chat's call records are watched before the chat list is even asked for, so the offer is confirmed within the system screen's window
@@ -5141,7 +5234,7 @@ function start(id){
   S.me=id;ls.set('hush:active',id.handle);S.contacts=[];S.contactsReady=false;rebuildNames();trimPrev(id);S.rekeying=!!(id.prev&&rekeyPending(ls.get('hush:rekey:'+id.handle,null))); // a removal left half done resumes below; until then nothing republishes the old keys
   ensureDev(id).catch(()=>{});dmIds.clear();S.dmPeers={};S.chatDocs.clear();metaCache.clear();dmIdFor(id.handle).catch(()=>{}); // metaCache: each ometa read again, so this account's roles record notes it (noteRoles), one a switch away cut short included
   if(S.unsubConvs)S.unsubConvs();S.unsubConvs=null;
-  Object.assign(S,{convs:[],seenLast:new Map(),convsLoaded:false,unread:new Map(),unreadKey:new Map(),mentions:new Map(),showArchived:false});S.previews.clear();
+  Object.assign(S,{convs:[],seenLast:new Map(),convsLoaded:false,unread:new Map(),unreadKey:new Map(),unreadRedo:null,mentions:new Map(),showArchived:false});S.previews.clear();S.liveSum=new Set(); // liveSum: the summary rows the live list has drawn in this start (renderList)
   closeConv();setListTitle();renderCalls();if(S.tab==='profile')setTab('profile');
   if(!S.db)return;
   const onConvs=(list,fromCache)=>{

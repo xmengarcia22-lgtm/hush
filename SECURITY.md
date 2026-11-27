@@ -571,7 +571,16 @@ What stays open:
 - An invitation back into a group or channel you left goes in without Join on a device of yours that still
   shows the chat because it was not connected when you left on another device. That device can then put the
   chat back on all your devices. And if you are removed and added again before any of your devices has seen the
-  removal, the chat simply stays in your chat list.
+  removal, the chat simply stays in your chat list. Since release 111 the same can hold for a
+  short time after a device has seen the removal. When the server refuses your app in a chat and says that you
+  were removed, which it does when your app offered the chat's current key, your app forgets the chat at once,
+  as before. When the chat's key had already been changed by the time your app asked (a removal changes it a
+  moment after the block), its key is an old one and the server refuses it without saying more, as it refuses
+  any old key. Your app no longer takes that alone for a removal:
+  it takes the chat out of your list at once but keeps your own note for it until it has looked at the chat once
+  more. It looks every 15 seconds, at twenty waiting chats a time, and its questions wait behind a chat list that
+  is still loading, so that look is usually within 15 seconds and can be later on a busy start; an app closed
+  before it looks at its next start. If you are added again before that look, the chat comes back without Join.
 - A mailbox keeps 500 notes, and when it is full the server pushes out the oldest notes of other people first.
   So anybody who knows your username can, with a few hundred notes left while your app is closed, push waiting
   requests and waiting invitations out of your mailbox. Your own notes, which keep your chat list, go only when
@@ -592,7 +601,8 @@ What stays open:
 - A chat's place in your chat list goes by a time kept with the chat, and any member of the chat may write that
   time; in a public channel that is anyone with an account. Your app lists the 300 chats with the newest time,
   and listens for calls in the first 90 one-on-one chats among them that you have not blocked or deleted for
-  yourself. Before release 113 one write of a far-off date kept a chat first for good. Since release 113 the
+  yourself and, since release 111, that are not message requests you have not accepted. Before release 113
+  one write of a far-off date kept a chat first for good. Since release 113 the
   server stores a time that is written more than a minute ahead of its own clock as its own clock's time, so a
   new write can no longer do that. A chat that was given such a date before release 113 keeps it until the
   next message in that chat, or another change that writes its record again, such as pinning a message in it;
@@ -600,8 +610,11 @@ What stays open:
   now, or up to a minute ahead, as often as they like, as a new message would. So enough accounts that each
   start a chat with you still push your oldest chats out of the 300 and out of the 90, and can keep them out
   by keeping their own chat's time fresh: those chats are then missing from your list until they get a newer
-  message, and a call in one of them can fail to ring in an open browser page. A request you have not answered
-  takes a place in the same way, so "Send a request first" does not stop this. Blocking such a chat takes it
+  message, and a call in one of them can fail to ring in an open browser page. A request you have not accepted
+  takes a place among the 300 in the same way, so "Send a request first" does not stop that part. Since
+  release 111 a request you have not accepted, or have deleted, takes none of the 90, so with "Send a request
+  first" on, strangers push a chat out of the 90 only by pushing it out of the 300. With the setting off, a
+  stranger's chat is an ordinary chat and takes a place among the 90 as before. Blocking such a chat takes it
   out of the 90, and "Delete for me" does so until the chat's next message, which the same member can send.
   Neither gives its place among the 300 back, unless you block it while it is still a request you have not
   answered. The messages stay on the server.
@@ -648,6 +661,86 @@ What stays open:
   few connections that ask for large answers and never read them, which has every other connection of the address
   wait unanswered. The server time fits one or two people starting the app at once: about twelve starts a minute
   for a whole address. Each of them can also tell roughly how much of a budget the others have used.
+- **Your app paces itself, and people in a chat with you can slow it (release 111).** The server takes 300 requests a
+  minute from each connection. Since release 111 your app sends what it needs for the chats you are not looking at
+  through a queue that stops while a fifth of that allowance is left, so that the queue does not get what you do
+  yourself refused. A chat list therefore takes a while to connect. In our tests (on one computer, against the
+  release 113 server) that was about 100 seconds for 150 chats on a new device and about 140 seconds for 300 chats on
+  a device that kept its list, and on a new device already 17 seconds for 60 chats, where the app before release 111
+  took 2. On a device that kept its list, the top 20 rows of the list it saved come first (in under a second in our
+  tests); on a new device they do not, and they were right only about when the whole list was. Until a chat's turn
+  comes, nothing new arrives in it, a call in it does not ring your app in a browser, and your app shows the row it
+  saved for that chat the last time (its name, last line and unread number as they were then; no line for a chat
+  with disappearing messages).
+  - A new device has no saved rows, so its list fills in only as the queue goes: in our tests with 150 chats it
+    showed 24 rows after 20 seconds and 88 after a minute, where the app before release 111 showed 71 and 141, up to
+    about 70 rows fewer for up to a minute and a half.
+  - Your app saves at most 90 rows of your list. With more than 90 chats, the chats beyond the saved rows appear
+    only as their turn in the queue comes, so for a while your list is shorter than it will be (in our tests with
+    150 chats, up to about 50 rows fewer than the app before release 111 showed at the same moment, for about half a
+    minute; that app first dropped most saved rows, to about 20, then showed the rest sooner); the saved rows
+    themselves stay.
+  - Many new chats while your app was closed make the next start slow, and they come last. In our test, after 100
+    strangers wrote to you and 10 contacts sent 3 messages each, your contacts' and groups' unread numbers were right
+    after about 2 minutes and the whole list after about 7, while you sent a message every 2 to 3 seconds; no request
+    of the app was refused. The app before release 111 had not got there after 12 minutes.
+  - A chat you were removed from, or that was deleted, while the app was closed keeps that saved row until your app
+    hears so from the server. In our tests that took under half a second with 75 chats; with 150 chats, under half a
+    second for a chat in the top 20 rows and up to 27 seconds for chats lower in the list, because your app decides
+    about a chat only when its turn in the queue comes, which is later for a row lower in a longer list. Before
+    release 111 all saved rows went at once, 5 seconds after they were drawn or, if no chat had come in from the
+    server by then, as soon as one did, whether or not their chats were still there (after 6 seconds with 75 chats
+    and 17 with 150 in the same tests). A chat you are removed from while the list loads keeps its row until its turn
+    in the queue comes again: in our tests, after a removal 3 seconds into the start, the row went 28 to 29 seconds
+    after the start (before release 111: 7 seconds with 75 chats, 17 with 150).
+  - Messages arriving in the chat you have open make your app answer: it writes that you read them, and it notes the
+    chat's newest message. Since release 111 it does each at most once a second, however fast messages come. In our
+    tests, with someone posting 1.5, 2 or 3 messages a second into the open chat for two minutes while a list of 150
+    chats loaded, no request of the app was refused and every message you sent (one every 5 seconds) went through,
+    and the list went on loading, though more slowly than with no flood and than the app before release 111 (61 to 66
+    of 150 chats after a minute on a first start, where that app had 135 to 142; all 150 within a minute after a
+    reconnect). The app before release 111 had 119 to 663 requests refused in the same tests, and 7 to 19 of the 10
+    to 23 messages you sent failed.
+  - Two things your app does in the chat you have open are not paced once a second: it deletes each message when the
+    time its sender set for it runs out, and it reads the profile of each sender it does not know yet. Someone who
+    posts many messages set to expire at the same moment into the chat you have open can use up your app's
+    allowance; then the queue stands still for as long as it lasts and, as before release 111, the server refuses
+    some of what you send. Profile reads are joined: once about half of your app's allowance for lookups is used, the
+    reads of each half second go as one request, so posting under many made-up names costs your app at most about two
+    requests a second. It can use up the server's 600 profile reads a minute for your connection, and for the rest of
+    that minute your app's profile reads are refused, the ones you need too.
+  - What you do yourself goes before the queue. If you send very fast while the list loads, the list waits until you
+    stop, and ordinary use slows it: in our tests, with a message every 2 to 3 seconds, 75 of 150 chats were
+    connected after a minute, against 108 with none. (The server also takes no more than 60 messages a minute from
+    one connection, whatever the app.)
+  - The other person of a one-on-one chat (also a stranger whose message request you have not answered), and an
+    owner or admin of a group or channel, can make the server end your app's watches of that chat as often as they
+    like (each key change does, and so does a change of a chat's admins). Your app opens the chat again each time.
+    Since release 111 the first two times in a minute it does so at once (one removal or one member leaving can end
+    a chat twice, a fraction of a second apart), and from the third time it waits first: half a second to a second,
+    then twice as long each time, up to 16 seconds, so that a run of these costs your app a few requests each step
+    and not its whole queue. In our test (the app's code, run outside a browser) a stranger whose message request was
+    waiting did it five times a second for two minutes while a list of 150 chats loaded: your app spent 25 requests on
+    that chat, none was refused, every message you sent went through, and the rest of the list was whole at 74 to
+    75 s, as with nobody doing it. The app before release 111, in two runs, spent 298 and 316 requests on it, had 566
+    and 586 of its requests refused, 13 and 12 of your 23 messages failed, and the rest of the list was whole at 81
+    and 109 s. While it lasts that one chat shows nothing new for up to 16 seconds at a time. Nothing is read or
+    changed by it. An admin who removes several members one after another causes the same wait for everyone in the
+    group. While you remove a device from your account your app opens such a chat again at once, without the wait
+    (only a retry after the server was too busy still waits), because it must hold every chat's newest key before
+    your account's keys change (next point).
+  - Removing a device gives your account new keys, and your new keys cannot open a chat key that was made for your
+    old ones. Your app collects every chat key it can before the change; since release 111 it also reads again,
+    first, any private group or channel it was not connected to at that moment. A chat whose key someone changes
+    between that read and the key change (seconds, or longer on a long list: each chat read again waits three
+    quarters of a second first), or changes for your old keys afterwards (anyone holding the device you are removing
+    can), is named in the summary as one Hush could not secure: the removed device may still read new messages
+    there, and the device you kept cannot read that chat's newest messages until its key is changed again. This was
+    so before release 111.
+  - When the server refuses your app in a chat, your app now tells a removal from an old key (see "Message requests
+    and held invitations are kept by your own app" above, the point on being removed and added again). It tells them
+    apart by the server's own answer; a server that lies about it can make your app drop a chat from your list, as
+    any refusal could before release 111.
 - **Search.** Typing your exact username finds you, whatever your settings. Only search by display name or
   part of a username is opt-in.
 - **Our own constructions.** Some parts are our own designs built from standard pieces, and have not been

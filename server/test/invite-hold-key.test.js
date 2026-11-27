@@ -207,7 +207,9 @@ test('K8: after I was removed (a new key without me), an add and its note wait f
   await run(async (w) => {
     const { zed, bob, G, st } = await member(w);
     await zed.kickMember(G, 'bob');
-    await until('the group gone from the list and the mailbox', async () => !st.list.length && !(await inbox(bob)).length);
+    await until('the group gone from the list', () => !st.list.length);
+    bob.S.recheckChats();   // the page's look-again (every 15 s by the clock), at once: since release 111 a refused watch deletes no note by itself, the fresh record's verdict does
+    await until('the group gone from the mailbox, once the page has looked at it again', async () => !(await inbox(bob)).length);
     assert.equal(bob.S.real.heldKey(G), true);
     const before = st.passes;
     await zed.addSubs(G, new Set(['bob']));

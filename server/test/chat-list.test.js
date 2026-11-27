@@ -65,20 +65,24 @@ test('the chat row of a live call reads "In a call" and is redrawn as the call c
 // The chat list from the sealed store at start (hush:list:<handle>): the rows as last drawn stand from the first paint
 // until the live list is whole; the live path writes the drawn rows back, write-if-changed, at most 90, no text for a
 // chat with a timer, nothing during a call.
+// Release 111 (kept-rows.test.js runs it): no 5-s limit any more; each kept row stands until its chat is in or is known gone, merged
+// with the live rows in their order. The two text pins below follow the new lines; what they check is the same.
 test('renderList draws the cached rows right after the first screen, before the skeleton, and only until the live list is whole', () => {
   const head = lift('async function renderList(){', 'const arch=S.showArchived');
-  assert.match(head, /splashOff\('list'\);[^\n]*\n\s*if\(!S\.convsLoaded&&S\.tab==='chats'&&!S\.query&&!S\.showArchived\)\{const rows=ls\.get\('hush:list:'\+S\.me\.handle,null\);/, 'read from the sealed store, after the first-screen mark');
-  assert.match(head, /if\(Array\.isArray\(rows\)&&rows\.length&&\(!S\.convs\.length\|\|performance\.now\(\)<\(S\.boot\.cache\|\|0\)\+5000\)\)\{if\(!S\.boot\.cache\)S\.boot\.cache=performance\.now\(\);box\.replaceChildren\(\.\.\.rows\.map\(m=>drawRow\(m\)\)\);return\}\}/, 'cached rows stand while the live list is partial, for at most 5 s');
-  assert.match(head, /\n\s*if\(!S\.convsLoaded&&!S\.convs\.length\)\{box\.replaceChildren\(\.\.\.Array\.from\(\{length:6\}/, 'the skeleton no longer waits for the socket: without a cache the shell shows at once');
+  assert.match(head, /splashOff\('list'\);[^\n]*\n\s*if\(!S\.convsLoaded&&S\.tab==='chats'&&!S\.query&&!S\.showArchived\)\{const rows=ls\.get\('hush:list:'\+S\.me\.handle,null\),/, 'read from the sealed store, after the first-screen mark');
+  assert.match(head, /if\(kept\.length&&!S\.convs\.length\)\{if\(!S\.boot\.cache\)S\.boot\.cache=performance\.now\(\);box\.replaceChildren\(\.\.\.kept\.map\(m=>tap\(drawRow\(m\),m\)\)\);return\}\}/, 'the kept rows alone while no chat is in yet, as before (a kept summary row with the live one\'s tap since the review\'s F1); S.boot.cache still marks the moment (Settings → Advanced, tools/ui-check/cached-list.mjs)');
+  assert.doesNotMatch(head, /5000|performance\.now\(\)</, 'no time limit');
+  assert.match(head, /\n\s*if\(!S\.convsLoaded&&!S\.convs\.length\)\{box\.replaceChildren\(\.\.\.\(S\.showArchived\?\[head\(\)\]:\[\]\),\.\.\.skel\(\)\);return\}/, 'the skeleton no longer waits for the socket: without a cache the shell shows at once (since the re-check of 9cf3d74 under the archived list\'s back header there)');
+  assert.match(head, /\n\s*const skel=\(\)=>Array\.from\(\{length:6\},/, 'six skeleton rows');
   assert.doesNotMatch(head, /S\.db&&/);
 });
 
 test('the live path writes the drawn rows back: whole list only, chats tab, no search, no archive view, no call; 90 rows; no text for a timer chat', () => {
-  const tail = lift("items.forEach((c,i)=>{const m=rowModel(c,pvs[i],now);", 'if(S.query)searchExtras');
+  const tail = lift("items.forEach((c,i)=>{if(kept.includes(c)){box.append(drawRow(c));return}const m=rowModel(c,pvs[i],now);", 'if(S.query)searchExtras');   // release 111: a kept row is drawn as cached, and never into rows
   assert.match(tail, /rows\.push\(c\.ttl\|\|m\.x\?Object\.assign\(\{\},m,\{s:''\}\):m\);box\.append\(drawRow\(m,c\)\)/, 'the screen gets the text, the cache does not, for a chat with a timer or a disappearing last message');
   assert.match(tail, /if\(S\.convsLoaded&&!arch&&!S\.query&&S\.tab==='chats'&&!S\.call\)\{if\(!S\.boot\.live\)S\.boot\.live=performance\.now\(\);/);
-  assert.match(tail, /const j=JSON\.stringify\(rows\.slice\(0,90\)\);if\(lastList\.h!==S\.me\.handle\|\|lastList\.j!==j\)\{lastList=\{h:S\.me\.handle,j\};ls\.set\('hush:list:'\+S\.me\.handle,JSON\.parse\(j\)\)\}/, 'write-if-changed: a presence tick or a typing dot re-seals nothing');
-  assert.match(ui, /\nlet listSeq=0,lastList=\{h:'',j:''\};\n/);
+  assert.match(tail, /const j=JSON\.stringify\(rows\.slice\(0,90\)\);if\(lastList\.h!==S\.me\.handle\|\|lastList\.j!==j\)\{lastList=\{h:S\.me\.handle,j\};listOrder\.h='';ls\.set\('hush:list:'\+S\.me\.handle,JSON\.parse\(j\)\)\}/, 'write-if-changed: a presence tick or a typing dot re-seals nothing; and the start\'s order is read again from what was written (release 111, pace-page.test.js)');
+  assert.match(ui, /\nlet listSeq=0,lastList=\{h:'',j:''\},listOrder=\{h:'',m:null\};\n/);
   const body = lift('async function renderList(){', '\n/* ---------- one search box');
   assert.match(body, /const reqs=arch\?\[\]:pendingRequests\(\),invs=arch\?\[\]:S\.invites\|\|\[\],rows=\[\];/);   // release 108: the row and its count take the held invitations in (invite-hold.test.js)
   assert.match(body, /\{k:'req',n:'Message requests',s:[^\n]*u:reqs\.length\+invs\.length\};rows\.push\(m\);const r=drawRow\(m\);r\.onclick=openRequests;/, 'the requests row goes through drawRow and into the cache');

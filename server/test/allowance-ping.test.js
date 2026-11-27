@@ -7,9 +7,11 @@
 // the page's adapter as written.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
 
-import { startServer, connect, sleep, appSource } from './helpers.js';
+import { startServer, connect, sleep } from './helpers.js';
 
 const drain = (conn) => { conn.frames.tokens = 0; conn.frames.perSecond = 0; };   // nothing left and nothing coming back, however long the test machine takes
 const limited = (i, retry) => ({ i, ok: false, e: 'ratelimit', m: 'slow down', retry });
@@ -93,9 +95,16 @@ test('at the default allowance a refused frame is told to wait 200 ms, one frame
   });
 });
 
-// The page as it is live today (release 109's adapter, the same as 108's): its keep-alive treats any failed ping as a dead socket.
-const B = '/* ===== HUSH ADAPTER BEGIN ===== */', E = '/* ===== HUSH ADAPTER END ===== */';
-const all = appSource(), createHushAdapter = new Function(all.slice(all.indexOf(B) + B.length, all.indexOf(E)) + '\nreturn createHushAdapter;')();
+// The page from before release 111 (release 109b's adapter, the same as 108's, kept as it was in fixtures/adapter-109b.txt): its
+// keep-alive treats any failed ping as a dead socket. Release 111's adapter takes a keep-alive refused for the allowance as
+// answered, so it would keep its connection here whatever the server did; this test is of the server, with the page that needs it.
+const OLD = readFileSync(new URL('./fixtures/adapter-109b.txt', import.meta.url), 'utf8');
+const createHushAdapter = new Function(OLD + '\nreturn createHushAdapter;')();
+
+test('the adapter this file runs is release 109b\'s, as it was: any failed keep-alive is a dead socket there', () => {
+  assert.equal(createHash('sha256').update(OLD).digest('hex'), '6616192853d99ecfa6f0e285af9f9170000d5b8d25df563a58c349b51ea72fd3');
+  assert.ok(OLD.includes("rawCall('ping',{}).then(()=>clearTimeout(t),()=>{clearTimeout(t);if(s===ws)reconnectNow()})"));
+});
 
 test('the page\'s adapter, over its allowance for several keep-alives, keeps its one connection', async () => {
   const T = await startServer({ limits: { framesPerMin: 6 } });
